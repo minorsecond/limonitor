@@ -1,0 +1,178 @@
+#include "jbd_protocol.hpp"
+#include "logger.hpp"
+#include <cstring>
+#include <algorithm>
+
+namespace jbd {
+
+// ---------------------------------------------------------------------------
+// Request builder
+// ---------------------------------------------------------------------------
+std::vector<uint8_t> build_request(uint8_t cmd) {
+    // DD A5 [cmd] 00 [ck_hi] [ck_lo] 77
+    // checksum covers: cmd, 0x00
+    uint16_t ck = (0x10000u - cmd - 0x00u) & 0xFFFFu;
+    return { 0xDD, 0xA5, cmd, 0x00,
+             static_cast<uint8_t>(ck >> 8),
+             static_cast<uint8_t>(ck & 0xFF),
+             0x77 };
+}
+
+// ---------------------------------------------------------------------------
+// Checksum (covers cmd+status+len+data bytes)
+// ---------------------------------------------------------------------------
+uint16_t Parser::checksum(const uint8_t* d, size_t n) {
+    uint32_t sum = 0;
+    for (size_t i = 0; i < n; ++i) sum += d[i];
+    return static_cast<uint16_t>((0x10000u - (sum & 0xFFFFu)) & 0xFFFFu);
+}
+
+// ---------------------------------------------------------------------------
+// Incremental parser
+// ---------------------------------------------------------------------------
+void Parser::reset() {
+    buf_.clear();
+    payload_.clear();
+    last_cmd_ = 0;
+}
+
+Parser::Result Parser::feed(const uint8_t* data, size_t len) {
+    buf_.insert(buf_.end(), data, data + len);
+    return try_parse();
+}
+
+Parser::Result Parser::try_parse() {
+    // Scan for start byte 0xDD
+    while (!buf_.empty() && buf_[0] != 0xDD) buf_.erase(buf_.begin());
+
+    // Need at least: DD cmd status len = 4 bytes to know total length
+    if (buf_.size() < 4) return Result::NEED_MORE;
+
+    uint8_t data_len = buf_[3];
+    // Total packet = DD + cmd + status + len + data + ck_hi + ck_lo + 0x77
+    size_t total = 4u + data_len + 2u + 1u;
+
+    if (buf_.size() < total) return Result::NEED_MORE;
+
+    // Validate end byte
+    if (buf_[total - 1] != 0x77) {
+        LOG_WARN("JBD: bad end byte 0x%02X, discarding", buf_[total - 1]);
+        buf_.erase(buf_.begin()); // shift and retry
+        return try_parse();
+    }
+
+    // Validate checksum — covers buf_[1..3+data_len] (cmd, status, len, data)
+    uint16_t stored_ck = (static_cast<uint16_t>(buf_[4 + data_len]) << 8) |
+                          buf_[5 + data_len];
+    uint16_t calc_ck   = checksum(buf_.data() + 1, 3u + data_len);
+    if (stored_ck != calc_ck) {
+        LOG_WARN("JBD: checksum mismatch (got %04X, expected %04X)", stored_ck, calc_ck);
+        buf_.erase(buf_.begin());
+        return try_parse();
+    }
+
+    // Status byte buf_[2]: 0x00 = OK
+    if (buf_[2] != 0x00) {
+        LOG_WARN("JBD: error response status=0x%02X for cmd=0x%02X", buf_[2], buf_[1]);
+        buf_.erase(buf_.begin(), buf_.begin() + static_cast<ptrdiff_t>(total));
+        return Result::ERROR;
+    }
+
+    last_cmd_ = buf_[1];
+    payload_.assign(buf_.begin() + 4, buf_.begin() + 4 + data_len);
+    buf_.erase(buf_.begin(), buf_.begin() + static_cast<ptrdiff_t>(total));
+    return Result::COMPLETE;
+}
+
+// ---------------------------------------------------------------------------
+// Apply parsed payload to BatterySnapshot
+// ---------------------------------------------------------------------------
+static inline uint16_t u16be(const uint8_t* p) {
+    return static_cast<uint16_t>((p[0] << 8) | p[1]);
+}
+static inline int16_t s16be(const uint8_t* p) {
+    return static_cast<int16_t>(u16be(p));
+}
+
+void Parser::apply(BatterySnapshot& snap) const {
+    if (payload_.empty()) return;
+    const uint8_t* d = payload_.data();
+    size_t n = payload_.size();
+
+    if (last_cmd_ == CMD_BASIC_INFO) {
+        // Minimum useful size: 23 bytes (no temperatures)
+        if (n < 23) { LOG_WARN("JBD: basic info too short (%zu)", n); return; }
+
+        snap.total_voltage_v   = u16be(d + 0)  * 0.01;   // 10mV units
+        snap.current_a         = s16be(d + 2)  * 0.01;   // 10mA units, signed
+        snap.remaining_ah      = u16be(d + 4)  * 0.01;   // 10mAh units
+        snap.nominal_ah        = u16be(d + 6)  * 0.01;
+        snap.cycle_count       = u16be(d + 8);
+        // bytes 10-11: production date (skip)
+        // bytes 12-15: balance status (skip for now)
+        uint16_t prot = u16be(d + 16);
+        snap.protection.cell_overvoltage     = (prot >> 0)  & 1;
+        snap.protection.cell_undervoltage    = (prot >> 1)  & 1;
+        snap.protection.pack_overvoltage     = (prot >> 2)  & 1;
+        snap.protection.pack_undervoltage    = (prot >> 3)  & 1;
+        snap.protection.charge_overtemp      = (prot >> 4)  & 1;
+        snap.protection.charge_undertemp     = (prot >> 5)  & 1;
+        snap.protection.discharge_overtemp   = (prot >> 6)  & 1;
+        snap.protection.discharge_undertemp  = (prot >> 7)  & 1;
+        snap.protection.charge_overcurrent   = (prot >> 8)  & 1;
+        snap.protection.discharge_overcurrent= (prot >> 9)  & 1;
+        snap.protection.short_circuit        = (prot >> 10) & 1;
+        snap.protection.front_end_ic_error   = (prot >> 11) & 1;
+        snap.protection.mosfet_software_lock = (prot >> 12) & 1;
+
+        // byte 18: SW version (BCD)
+        uint8_t sw_ver = d[18];
+        snap.sw_version = std::to_string(sw_ver >> 4) + "." + std::to_string(sw_ver & 0x0F);
+
+        snap.soc_pct           = d[19];
+        uint8_t fet_status     = d[20];
+        snap.charge_mosfet     = (fet_status >> 0) & 1;
+        snap.discharge_mosfet  = (fet_status >> 1) & 1;
+        uint8_t num_ntc        = (n > 22) ? d[22] : 0;
+
+        snap.temperatures_c.clear();
+        for (uint8_t i = 0; i < num_ntc; ++i) {
+            size_t off = 23 + i * 2;
+            if (off + 1 >= n) break;
+            double raw_k = u16be(d + off) * 0.1;
+            snap.temperatures_c.push_back(raw_k - 273.15);
+        }
+
+        // Derived values
+        snap.power_w = snap.total_voltage_v * snap.current_a;
+        if (snap.current_a > 0.01)
+            snap.time_remaining_h = snap.remaining_ah / snap.current_a;
+        else if (snap.current_a < -0.01)
+            snap.time_remaining_h = (snap.nominal_ah - snap.remaining_ah) / (-snap.current_a);
+        else
+            snap.time_remaining_h = 0.0;
+
+        snap.valid = true;
+
+    } else if (last_cmd_ == CMD_CELL_VOLTS) {
+        size_t cell_count = n / 2;
+        snap.cell_voltages_v.resize(cell_count);
+        snap.cell_min_v = 9999.0;
+        snap.cell_max_v = 0.0;
+        for (size_t i = 0; i < cell_count; ++i) {
+            double v = u16be(d + i * 2) * 0.001;   // 1mV units
+            snap.cell_voltages_v[i] = v;
+            if (v < snap.cell_min_v) snap.cell_min_v = v;
+            if (v > snap.cell_max_v) snap.cell_max_v = v;
+        }
+        snap.cell_delta_v = snap.cell_max_v - snap.cell_min_v;
+
+    } else if (last_cmd_ == CMD_DEVICE_INFO) {
+        // Device name: up to 24 bytes, null-terminated
+        size_t name_len = std::min(n, size_t{24});
+        snap.device_name.assign(reinterpret_cast<const char*>(d),
+                                strnlen(reinterpret_cast<const char*>(d), name_len));
+    }
+}
+
+} // namespace jbd
