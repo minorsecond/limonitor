@@ -140,9 +140,16 @@ void HttpServer::handle(int fd) {
     if (snap_opt) snap = *snap_opt;
     std::string ble_st = store_.ble_state();
 
+    auto pg_opt = store_.latest_pwrgate();
+    PwrGateSnapshot pg;
+    if (pg_opt) pg = *pg_opt;
+
     if (path == "/" || path == "/index.html") {
-        auto hist = store_.history(288); // up to ~24 min at 5s
-        send_response(fd, 200, "text/html", html_dashboard(snap, ble_st, hist));
+        auto hist    = store_.history(288);
+        auto pg_hist = store_.pwrgate_history(288);
+        send_response(fd, 200, "text/html", html_dashboard(snap, ble_st, hist, pg, pg_hist));
+    } else if (path == "/api/charger") {
+        send_response(fd, 200, "application/json", charger_json(pg));
     } else if (path == "/api/status") {
         send_response(fd, 200, "application/json", status_json(snap, ble_st));
     } else if (path == "/api/cells") {
@@ -153,7 +160,8 @@ void HttpServer::handle(int fd) {
         if (ni != std::string::npos) count = std::stoul(query.substr(ni + 2));
         send_response(fd, 200, "application/json", history_json(store_.history(count)));
     } else if (path == "/metrics") {
-        send_response(fd, 200, "text/plain; version=0.0.4", prometheus(snap));
+        send_response(fd, 200, "text/plain; version=0.0.4",
+                      prometheus(snap) + prometheus_charger(pg));
     } else {
         send_response(fd, 404, "text/plain", "Not Found");
     }
@@ -282,6 +290,26 @@ std::string HttpServer::prometheus(const BatterySnapshot& s) {
     return o;
 }
 
+std::string HttpServer::prometheus_charger(const PwrGateSnapshot& pg) {
+    if (!pg.valid) return "";
+    std::string o;
+    auto g = [&](const char* name, const char* help, double val, int prec = 3) {
+        o += "# HELP "; o += name; o += " "; o += help; o += "\n";
+        o += "# TYPE "; o += name; o += " gauge\n";
+        char buf[32]; std::snprintf(buf, sizeof(buf), "%.*f", prec, val);
+        o += name; o += " "; o += buf; o += "\n";
+    };
+    g("charger_ps_volts",       "Charger power-supply input voltage", pg.ps_v);
+    g("charger_bat_volts",      "Battery voltage (charger-measured)",  pg.bat_v);
+    g("charger_bat_amps",       "Charge current",                      pg.bat_a);
+    g("charger_solar_volts",    "Solar panel voltage",                 pg.sol_v);
+    g("charger_target_volts",   "Target absorption voltage",           pg.target_v);
+    g("charger_target_amps",    "Max charge current",                  pg.target_a);
+    g("charger_pwm",            "PWM duty cycle (0-1023)",             pg.pwm, 0);
+    g("charger_elapsed_minutes","Elapsed charge time minutes",         pg.minutes, 0);
+    return o;
+}
+
 std::string HttpServer::svg_history_chart(const std::vector<BatterySnapshot>& hist) {
     if (hist.size() < 2)
         return "<p style='color:#555;font-family:monospace'>Collecting history...</p>";
@@ -377,8 +405,125 @@ std::string HttpServer::svg_history_chart(const std::vector<BatterySnapshot>& hi
     return o;
 }
 
+std::string HttpServer::svg_charger_chart(const std::vector<PwrGateSnapshot>& hist) {
+    if (hist.size() < 2)
+        return "<p style='color:#555;font-family:monospace'>Collecting charger history...</p>";
+
+    const int W = 800, H = 180;
+    const int PL = 52, PR = 48, PT = 14, PB = 28;
+    const int CW = W - PL - PR, CH = H - PT - PB;
+
+    double vlo = 1e9, vhi = -1e9, alo = 1e9, ahi = -1e9;
+    for (auto& p : hist) {
+        if (p.bat_v < vlo) vlo = p.bat_v; if (p.bat_v > vhi) vhi = p.bat_v;
+        if (p.bat_a < alo) alo = p.bat_a; if (p.bat_a > ahi) ahi = p.bat_a;
+    }
+    double vrng = vhi - vlo; if (vrng < 0.1) vrng = 0.1;
+    double arng = ahi - alo; if (arng < 0.1) arng = 0.1;
+    vlo -= vrng * 0.08; vhi += vrng * 0.08; vrng = vhi - vlo;
+    alo -= arng * 0.08; ahi += arng * 0.08; arng = ahi - alo;
+
+    int N = static_cast<int>(hist.size());
+    auto xp = [&](int i) { return PL + static_cast<double>(i) / (N - 1) * CW; };
+    auto yv = [&](double v) { return PT + CH - (v - vlo) / vrng * CH; };
+    auto ya = [&](double a) { return PT + CH - (a - alo) / arng * CH; };
+
+    std::string o;
+    char buf[256];
+
+    o += "<svg viewBox='0 0 800 180' style='width:100%;height:180px;display:block;background:#111;border-radius:4px'>\n";
+
+    o += "<g stroke='#2a2a2a' stroke-width='1'>\n";
+    for (int i = 0; i <= 4; ++i) {
+        double gy = PT + CH * i / 4.0;
+        std::snprintf(buf, sizeof(buf), "<line x1='%d' y1='%.1f' x2='%d' y2='%.1f'/>\n", PL, gy, W-PR, gy);
+        o += buf;
+    }
+    o += "</g>\n";
+
+    // Voltage labels (left, green)
+    o += "<g fill='#4caf50' font-size='11' font-family='monospace' text-anchor='end'>\n";
+    for (int i = 0; i <= 4; ++i) {
+        double v = vhi - vrng * i / 4.0;
+        double gy = PT + CH * i / 4.0;
+        std::snprintf(buf, sizeof(buf), "<text x='%d' y='%.1f'>%.2fV</text>\n", PL-3, gy+4, v);
+        o += buf;
+    }
+    o += "</g>\n";
+
+    // Current labels (right, orange)
+    o += "<g fill='#ff9800' font-size='11' font-family='monospace' text-anchor='start'>\n";
+    for (int i = 0; i <= 4; ++i) {
+        double a = ahi - arng * i / 4.0;
+        double gy = PT + CH * i / 4.0;
+        std::snprintf(buf, sizeof(buf), "<text x='%d' y='%.1f'>%.1fA</text>\n", W-PR+3, gy+4, a);
+        o += buf;
+    }
+    o += "</g>\n";
+
+    // Bat voltage polyline (green)
+    o += "<polyline fill='none' stroke='#4caf50' stroke-width='2' points='";
+    for (int i = 0; i < N; ++i) {
+        std::snprintf(buf, sizeof(buf), "%.1f,%.1f ", xp(i), yv(hist[i].bat_v));
+        o += buf;
+    }
+    o += "'/>\n";
+
+    // Charge current polyline (orange, dashed)
+    o += "<polyline fill='none' stroke='#ff9800' stroke-width='1.5' stroke-dasharray='5,3' points='";
+    for (int i = 0; i < N; ++i) {
+        std::snprintf(buf, sizeof(buf), "%.1f,%.1f ", xp(i), ya(hist[i].bat_a));
+        o += buf;
+    }
+    o += "'/>\n";
+
+    {
+        double span_min = (N - 1) / 60.0; // ~1 sample/sec from serial
+        std::snprintf(buf, sizeof(buf),
+            "<text x='%d' y='%d' fill='#555' font-size='10' font-family='monospace'>%.0f min ago</text>\n",
+            PL, H-4, span_min);
+        o += buf;
+        o += "<text x='"; o += std::to_string(W-PR);
+        o += "' y='"; o += std::to_string(H-4);
+        o += "' fill='#555' font-size='10' font-family='monospace' text-anchor='end'>now</text>\n";
+    }
+
+    o += "<g font-size='11' font-family='monospace'>"
+         "<line x1='60' y1='8' x2='74' y2='8' stroke='#4caf50' stroke-width='2'/>"
+         "<text x='78' y='12' fill='#4caf50'>Bat V</text>"
+         "<line x1='130' y1='8' x2='144' y2='8' stroke='#ff9800' stroke-width='1.5' stroke-dasharray='5,3'/>"
+         "<text x='148' y='12' fill='#ff9800'>Charge A</text>"
+         "</g>\n";
+
+    o += "</svg>\n";
+    return o;
+}
+
+std::string HttpServer::charger_json(const PwrGateSnapshot& pg) {
+    if (!pg.valid) return "{\"valid\":false}\n";
+    std::string o = "{\n";
+    o += "  \"valid\": true,\n";
+    o += "  \"timestamp\": " + jstr(iso8601(pg.timestamp)) + ",\n";
+    o += "  \"state\": "     + jstr(pg.state)    + ",\n";
+    o += "  \"ps_v\": "      + jdbl(pg.ps_v)     + ",\n";
+    o += "  \"bat_v\": "     + jdbl(pg.bat_v)    + ",\n";
+    o += "  \"bat_a\": "     + jdbl(pg.bat_a)    + ",\n";
+    o += "  \"sol_v\": "     + jdbl(pg.sol_v)    + ",\n";
+    o += "  \"target_v\": "  + jdbl(pg.target_v) + ",\n";
+    o += "  \"target_a\": "  + jdbl(pg.target_a) + ",\n";
+    o += "  \"stop_a\": "    + jdbl(pg.stop_a)   + ",\n";
+    o += "  \"minutes\": "   + std::to_string(pg.minutes) + ",\n";
+    o += "  \"pwm\": "       + std::to_string(pg.pwm)     + ",\n";
+    o += "  \"temp\": "      + std::to_string(pg.temp)    + ",\n";
+    o += "  \"pss\": "       + std::to_string(pg.pss)     + "\n";
+    o += "}\n";
+    return o;
+}
+
 std::string HttpServer::html_dashboard(const BatterySnapshot& s, const std::string& ble_st,
-                                       const std::vector<BatterySnapshot>& hist) {
+                                       const std::vector<BatterySnapshot>& hist,
+                                       const PwrGateSnapshot& pg,
+                                       const std::vector<PwrGateSnapshot>& pg_hist) {
     std::string ts = s.valid ? iso8601(s.timestamp) : "—";
     std::string o = R"(<!DOCTYPE html>
 <html><head>
@@ -471,10 +616,36 @@ std::string HttpServer::html_dashboard(const BatterySnapshot& s, const std::stri
         o += "</div>";
     }
 
+    // Charger (PwrGate) section
+    if (pg.valid) {
+        o += "<div class=\"card\"><b>Charger — EpicPowerGate 2</b>";
+        o += "<table><tr><th>Metric</th><th>Value</th></tr>\n";
+        auto crow = [&](const char* k, const std::string& v) {
+            o += "<tr><td>" + std::string(k) + "</td><td>" + v + "</td></tr>\n";
+        };
+        const char* st_cls = (pg.state == "Charging") ? "ok" :
+                             (pg.state == "Float")     ? "ok" : "warn";
+        std::snprintf(buf, sizeof(buf), "<span class='%s'><b>%s</b></span>", st_cls, pg.state.c_str());
+        crow("State", buf);
+        std::snprintf(buf, sizeof(buf), "%.2f V", pg.ps_v);   crow("Power Supply", buf);
+        std::snprintf(buf, sizeof(buf), "%.2f V", pg.sol_v);  crow("Solar", buf);
+        std::snprintf(buf, sizeof(buf), "%.2f V  /  %.2f A", pg.bat_v, pg.bat_a); crow("Battery (charger)", buf);
+        std::snprintf(buf, sizeof(buf), "%.2f V  max %.2f A  stop %.2f A",
+                      pg.target_v, pg.target_a, pg.stop_a);   crow("Target", buf);
+        std::snprintf(buf, sizeof(buf), "%d / 1023  (%d%%)", pg.pwm, pg.pwm * 100 / 1023); crow("PWM", buf);
+        std::snprintf(buf, sizeof(buf), "%d min", pg.minutes); crow("Elapsed", buf);
+        std::snprintf(buf, sizeof(buf), "%d (raw)", pg.temp);  crow("Temp", buf);
+        o += "</table>";
+        if (!pg_hist.empty())
+            o += svg_charger_chart(pg_hist);
+        o += "</div>";
+    }
+
     o += R"(<div class="card" style="font-size:0.8em;color:#555">
 API: <a href="/api/status">/api/status</a> &nbsp;
 <a href="/api/cells">/api/cells</a> &nbsp;
 <a href="/api/history">/api/history</a> &nbsp;
+<a href="/api/charger">/api/charger</a> &nbsp;
 <a href="/metrics">/metrics</a> (Prometheus)
 </div></body></html>)";
     return o;

@@ -1,6 +1,7 @@
 #pragma once
 #include "battery_data.hpp"
 #include "ble_types.hpp"
+#include "pwrgate.hpp"
 #include <deque>
 #include <functional>
 #include <mutex>
@@ -37,9 +38,15 @@ public:
     void clear_discovered();
     std::vector<DiscoveredDevice> discovered_devices() const;
 
+    // PwrGate / charger data
+    void update_pwrgate(PwrGateSnapshot snap);
+    std::optional<PwrGateSnapshot> latest_pwrgate() const;
+    std::vector<PwrGateSnapshot>   pwrgate_history(size_t n = 0) const;
+
 private:
     mutable std::mutex mu_;
     std::deque<BatterySnapshot> ring_;
+    std::deque<PwrGateSnapshot> pwrgate_ring_;
     size_t max_history_;
     std::vector<Observer> observers_;
     std::string ble_state_{"disconnected"};

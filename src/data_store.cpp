@@ -73,3 +73,23 @@ std::vector<DiscoveredDevice> DataStore::discovered_devices() const {
     std::lock_guard<std::mutex> lk(mu_);
     return discovered_;
 }
+
+void DataStore::update_pwrgate(PwrGateSnapshot snap) {
+    std::lock_guard<std::mutex> lk(mu_);
+    pwrgate_ring_.push_back(std::move(snap));
+    while (pwrgate_ring_.size() > max_history_) pwrgate_ring_.pop_front();
+}
+
+std::optional<PwrGateSnapshot> DataStore::latest_pwrgate() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (pwrgate_ring_.empty()) return std::nullopt;
+    return pwrgate_ring_.back();
+}
+
+std::vector<PwrGateSnapshot> DataStore::pwrgate_history(size_t n) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (n == 0 || n >= pwrgate_ring_.size())
+        return std::vector<PwrGateSnapshot>(pwrgate_ring_.begin(), pwrgate_ring_.end());
+    auto it = pwrgate_ring_.end() - static_cast<ptrdiff_t>(n);
+    return std::vector<PwrGateSnapshot>(it, pwrgate_ring_.end());
+}

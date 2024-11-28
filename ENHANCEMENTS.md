@@ -7,10 +7,12 @@
 - [x] **"Est. Time to Full/Empty" label** — currently says `17.5 h remaining` for both states. When charging should say `17.5 h to full`; when discharging `17.5 h to empty`.
 - [x] **History sparkline in TUI** — ring buffer already holds history; add an ASCII sparkline of last ~40 voltage samples in the pack section.
 - [ ] **Auto-reconnect** — confirm/implement BLE re-scan on disconnect so the tool recovers from drops without manual restart.
+- [x] **EpicPowerGate 2 serial integration** — reads `/dev/ttyACM0` ASCII output, parses charger state into TUI Charger section, `/api/charger` JSON endpoint, and Prometheus metrics.
 
 ## Medium Effort, Good Value
 
 - [x] **Web dashboard history chart** — `/api/history` already exists. Generate a pure SVG voltage+current chart server-side (no external JS library) for a much more useful web UI.
+- [x] **SQLite persistence** — battery and charger history survive restarts. WAL mode, write-throttled (default 60s). macOS: `~/Library/Application Support/limonitor/limonitor.db`, Linux: `~/.local/share/limonitor/limonitor.db`. Override with `--db PATH`, throttle with `--db-interval N`.
 - [ ] **Config file support** — `~/.config/limonitor.conf` or `/etc/limonitor.conf` so common flags (`-n`, `-p`, `-l`, etc.) don't have to be passed every run.
 - [ ] **Alert thresholds + notification** — `--alert-low-soc N` and `--alert-high-temp N` flags; log warning + optional `notify-send` (Linux) / `osascript` (macOS) when thresholds are crossed.
 

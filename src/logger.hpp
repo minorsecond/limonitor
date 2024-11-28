@@ -3,6 +3,7 @@
 #include <deque>
 #include <mutex>
 #include <string>
+#include <vector>
 
 enum class LogLevel { DEBUG = 0, INFO, WARN, ERROR };
 

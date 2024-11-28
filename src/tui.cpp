@@ -124,8 +124,30 @@ void TUI::draw(const BatterySnapshot& snap, const std::string& ble_st,
         mvprintw(0, 30, "  %s  %s", snap.device_name.c_str(), snap.ble_address.c_str());
     attroff(COLOR_PAIR(C_HEADER) | A_BOLD);
 
+    int row = 2;
+    auto content_ok = [&]{ return row < content_rows + 2; };
+
     if (!snap.valid) {
-        mvprintw(2, 2, "Waiting for data...");
+        mvprintw(row++, 2, "Waiting for battery data...");
+        // Still show charger section if we have it (e.g. --no-ble mode)
+        row++;
+        auto pg_opt = store_.latest_pwrgate();
+        if (pg_opt && pg_opt->valid && content_ok()) {
+            const auto& pg = *pg_opt;
+            attron(A_BOLD); mvprintw(row++, 1, "Charger   %s", pg.state.c_str()); attroff(A_BOLD);
+            if (content_ok())
+                mvprintw(row++, 3, "PS      : %6.2f V       Solar : %.2f V", pg.ps_v, pg.sol_v);
+            if (content_ok())
+                mvprintw(row++, 3, "Bat     : %6.2f V  %5.2f A  (charger-measured)", pg.bat_v, pg.bat_a);
+            if (content_ok())
+                mvprintw(row++, 3, "Target  : %.2f V / %.2f A   stop @ %.2f A",
+                         pg.target_v, pg.target_a, pg.stop_a);
+            if (content_ok()) {
+                int pwm_pct = pg.pwm * 100 / 1023;
+                mvprintw(row++, 3, "PWM     : %4d (%3d%%)   Elapsed: %d min   Temp: %d",
+                         pg.pwm, pwm_pct, pg.minutes, pg.temp);
+            }
+        }
         draw_log_panel(rows, cols);
         refresh();
         return;
@@ -134,9 +156,6 @@ void TUI::draw(const BatterySnapshot& snap, const std::string& ble_st,
     std::time_t t = std::chrono::system_clock::to_time_t(snap.timestamp);
     char ts[20]; struct tm tm{}; localtime_r(&t, &tm);
     std::strftime(ts, sizeof(ts), "%H:%M:%S", &tm);
-
-    int row = 2;
-    auto content_ok = [&]{ return row < content_rows + 2; };
 
     // ---- Pack overview ----
     attron(A_BOLD); mvprintw(row, 1, "Pack"); attroff(A_BOLD);
@@ -239,6 +258,30 @@ void TUI::draw(const BatterySnapshot& snap, const std::string& ble_st,
                 tline += buf;
             }
             mvprintw(row++, 1, "%s", tline.c_str());
+        }
+    }
+
+    // ---- Charger (PwrGate) ----
+    {
+        auto pg_opt = store_.latest_pwrgate();
+        if (pg_opt && pg_opt->valid && content_ok()) {
+            const auto& pg = *pg_opt;
+            row++;
+            attron(A_BOLD); mvprintw(row++, 1, "Charger   %s", pg.state.c_str()); attroff(A_BOLD);
+            if (content_ok())
+                mvprintw(row++, 3, "PS      : %6.2f V       Solar : %.2f V",
+                         pg.ps_v, pg.sol_v);
+            if (content_ok())
+                mvprintw(row++, 3, "Bat     : %6.2f V  %5.2f A  (charger-measured)",
+                         pg.bat_v, pg.bat_a);
+            if (content_ok())
+                mvprintw(row++, 3, "Target  : %.2f V / %.2f A   stop @ %.2f A",
+                         pg.target_v, pg.target_a, pg.stop_a);
+            if (content_ok()) {
+                int pwm_pct = pg.pwm * 100 / 1023;
+                mvprintw(row++, 3, "PWM     : %4d (%3d%%)   Elapsed: %d min   Temp: %d",
+                         pg.pwm, pwm_pct, pg.minutes, pg.temp);
+            }
         }
     }
 
