@@ -31,4 +31,18 @@ struct Config {
 
     // Demo / offline mode (generates synthetic data, no BLE needed)
     bool demo_mode = false;
+    // Skip BLE entirely (e.g. Pi running as serial/HTTP-only node)
+    bool no_ble = false;
+
+    // EpicPowerGate 2 — local serial (Pi) or remote HTTP poll (Mac)
+    std::string serial_device;          // e.g. "/dev/ttyACM0"
+    int         serial_baud = 115200;
+    std::string pwrgate_remote;         // e.g. "ham-pi:8081"
+
+    // SQLite database (empty = use Database::default_path())
+    std::string db_path;
+    int         db_write_interval_s = 60;  // write at most once per N seconds (0 = every update)
+
+    // Daemon mode: skip TUI, log to stderr/file only
+    bool daemon_mode = false;
 };

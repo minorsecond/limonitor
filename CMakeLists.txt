@@ -8,6 +8,7 @@ set(CMAKE_OBJCXX_STANDARD 17)
 set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
 
 find_package(PkgConfig REQUIRED)
+find_package(SQLite3 REQUIRED)
 find_package(Curses)
 if(CURSES_FOUND)
     add_definitions(-DHAVE_NCURSES)
@@ -26,8 +27,12 @@ set(SOURCES
     src/main.cpp
     src/logger.cpp
     src/data_store.cpp
+    src/database.cpp
     src/http_server.cpp
     src/tui.cpp
+    src/pwrgate.cpp
+    src/pwrgate_client.cpp
+    src/serial_reader.cpp
     ${PROTO_SOURCES}
 )
 
@@ -43,7 +48,7 @@ add_executable(limonitor ${SOURCES})
 target_compile_options(limonitor PRIVATE -Wall -Wextra)
 
 # Common link libs
-target_link_libraries(limonitor pthread)
+target_link_libraries(limonitor pthread SQLite::SQLite3)
 
 # Platform link libs
 if(APPLE)

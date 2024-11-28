@@ -38,9 +38,14 @@ private:
     static std::string cells_json(const BatterySnapshot& s);
     static std::string history_json(const std::vector<BatterySnapshot>& snaps);
     static std::string prometheus(const BatterySnapshot& s);
+    static std::string prometheus_charger(const PwrGateSnapshot& pg);
     static std::string svg_history_chart(const std::vector<BatterySnapshot>& hist);
+    static std::string svg_charger_chart(const std::vector<PwrGateSnapshot>& hist);
+    static std::string charger_json(const PwrGateSnapshot& pg);
     static std::string html_dashboard(const BatterySnapshot& s, const std::string& ble_state,
-                                      const std::vector<BatterySnapshot>& hist);
+                                      const std::vector<BatterySnapshot>& hist,
+                                      const PwrGateSnapshot& pg,
+                                      const std::vector<PwrGateSnapshot>& pg_hist);
 
     static void send_response(int fd, int code, const char* content_type, const std::string& body);
 };

@@ -3,9 +3,12 @@
 #include "ble_types.hpp"
 #include "config.hpp"
 #include "data_store.hpp"
+#include "database.hpp"
 #include "http_server.hpp"
 #include "litime_protocol.hpp"
 #include "logger.hpp"
+#include "pwrgate_client.hpp"
+#include "serial_reader.hpp"
 #include "tui.hpp"
 
 #include <atomic>
@@ -48,6 +51,13 @@ static void print_usage(const char* prog) {
         "  --notify  UUID     GATT notify char UUID [ff01...]\n"
         "  --write   UUID     GATT write char UUID  [ff02...]\n"
         "  --demo         Run in demo mode (no BLE, synthetic data)\n"
+        "  --no-ble       Skip BLE entirely (serial/HTTP-only node, e.g. on Pi)\n"
+        "  -s DEVICE      Serial port for EpicPowerGate 2  [e.g. /dev/ttyACM0]\n"
+        "  --baud N       Serial baud rate                 [115200]\n"
+        "  --pwrgate-remote HOST:PORT  Poll remote limonitor for charger data\n"
+        "  --db PATH      SQLite database path             [platform default]\n"
+        "  --db-interval N  DB write throttle seconds      [60]\n"
+        "  --daemon       Run headless (no TUI) — for background/service use\n"
         "  -h             Show this help\n"
         "\n"
         "API endpoints (served on http://HOST:PORT/):\n"
@@ -82,6 +92,13 @@ static Config parse_args(int argc, char** argv) {
         else if (arg == "--notify")  cfg.notify_char_uuid = next();
         else if (arg == "--write")   cfg.write_char_uuid = next();
         else if (arg == "--demo")    cfg.demo_mode = true;
+        else if (arg == "--no-ble")  cfg.no_ble    = true;
+        else if (arg == "-s")               cfg.serial_device = next();
+        else if (arg == "--baud")           cfg.serial_baud = std::stoi(next());
+        else if (arg == "--pwrgate-remote") cfg.pwrgate_remote = next();
+        else if (arg == "--db")      cfg.db_path = next();
+        else if (arg == "--db-interval") cfg.db_write_interval_s = std::stoi(next());
+        else if (arg == "--daemon")  cfg.daemon_mode = true;
         else if (arg == "-h" || arg == "--help") { print_usage(argv[0]); std::exit(0); }
         else { std::cerr << "Unknown option: " << arg << "\n"; print_usage(argv[0]); std::exit(1); }
     }
@@ -169,6 +186,26 @@ int main(int argc, char** argv) {
     // Data store
     DataStore store(cfg.history_size);
 
+    // SQLite database
+    std::string dbpath = cfg.db_path.empty() ? Database::default_path() : cfg.db_path;
+    auto db = std::make_shared<Database>(dbpath);
+    if (db->open()) {
+        int interval = cfg.db_write_interval_s;
+        // Battery observer — throttled by db_write_interval_s
+        store.on_update([db, interval](const BatterySnapshot& snap) {
+            using clock = std::chrono::steady_clock;
+            static auto last = clock::time_point{};
+            auto now = clock::now();
+            if (interval <= 0 ||
+                std::chrono::duration_cast<std::chrono::seconds>(now - last).count() >= interval) {
+                db->insert_battery(snap);
+                last = now;
+            }
+        });
+    } else {
+        LOG_WARN("DB: running without persistence");
+    }
+
     // HTTP server
     HttpServer http(store, cfg.http_bind, cfg.http_port);
     if (!http.start()) {
@@ -181,7 +218,10 @@ int main(int argc, char** argv) {
     std::unique_ptr<BleManager> ble;
     std::thread demo_thread;
 
-    if (cfg.demo_mode) {
+    if (cfg.no_ble) {
+        store.set_ble_state("disabled");
+        LOG_INFO("BLE disabled (--no-ble)");
+    } else if (cfg.demo_mode) {
         demo_thread = std::thread([&]{ run_demo(store, cfg.poll_interval_s); });
     } else {
         // Determine target: prefer address, fall back to name
@@ -235,27 +275,90 @@ int main(int argc, char** argv) {
         }
     }
 
-    // TUI — blocks until 'q' or signal
-    TUI tui(store, cfg.http_port);
-    if (ble) {
-        tui.set_connect_callback([&ble](const std::string& id) {
-            ble->connect_to(id);
+    // Serial reader for EpicPowerGate 2 (optional)
+    std::unique_ptr<SerialReader> serial;
+    if (!cfg.serial_device.empty()) {
+        serial = std::make_unique<SerialReader>(cfg.serial_device, cfg.serial_baud);
+        int pg_interval = std::max(1, cfg.db_write_interval_s / 5);
+        serial->set_callback([&store, db, pg_interval](const PwrGateSnapshot& snap) {
+            store.update_pwrgate(snap);
+            LOG_DEBUG("PwrGate: %s  PS=%.2fV  Bat=%.2fV %.2fA  Sol=%.2fV",
+                snap.state.c_str(), snap.ps_v, snap.bat_v, snap.bat_a, snap.sol_v);
+            if (db && db->is_open()) {
+                using clock = std::chrono::steady_clock;
+                static auto last = clock::time_point{};
+                auto now = clock::now();
+                if (std::chrono::duration_cast<std::chrono::seconds>(now - last).count()
+                        >= pg_interval) {
+                    db->insert_charger(snap);
+                    last = now;
+                }
+            }
         });
+        if (!serial->start())
+            LOG_WARN("Serial: failed to open %s — charger data unavailable", cfg.serial_device.c_str());
     }
-    std::thread quit_watcher([&]{
-        while (!g_quit) std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        tui.stop();
-    });
 
-    tui.run();
-    g_quit = true;
+    // Remote PwrGate client (polls another limonitor instance's /api/charger)
+    std::unique_ptr<PwrGateClient> pgclient;
+    if (!cfg.pwrgate_remote.empty()) {
+        // Parse "host:port"
+        auto colon = cfg.pwrgate_remote.rfind(':');
+        std::string pg_host = (colon != std::string::npos)
+            ? cfg.pwrgate_remote.substr(0, colon) : cfg.pwrgate_remote;
+        uint16_t pg_port = (colon != std::string::npos)
+            ? static_cast<uint16_t>(std::stoul(cfg.pwrgate_remote.substr(colon + 1)))
+            : 8080;
+
+        pgclient = std::make_unique<PwrGateClient>(pg_host, pg_port, cfg.poll_interval_s);
+        int pg_interval = std::max(1, cfg.db_write_interval_s / 5);
+        pgclient->set_callback([&store, db, pg_interval](const PwrGateSnapshot& snap) {
+            store.update_pwrgate(snap);
+            if (db && db->is_open()) {
+                using clock = std::chrono::steady_clock;
+                static auto last = clock::time_point{};
+                auto now = clock::now();
+                if (std::chrono::duration_cast<std::chrono::seconds>(now - last).count()
+                        >= pg_interval) {
+                    db->insert_charger(snap);
+                    last = now;
+                }
+            }
+        });
+        pgclient->start();
+    }
+
+    // TUI — blocks until 'q' or signal
+    if (cfg.daemon_mode) {
+        LOG_INFO("Daemon mode: running headless (HTTP on port %d)", cfg.http_port);
+        while (!g_quit)
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    } else {
+        TUI tui(store, cfg.http_port);
+        if (ble) {
+            tui.set_connect_callback([&ble](const std::string& id) {
+                ble->connect_to(id);
+            });
+        }
+        std::thread quit_watcher([&]{
+            while (!g_quit) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            tui.stop();
+        });
+
+        tui.run();
+        g_quit = true;
+
+        if (quit_watcher.joinable()) quit_watcher.join();
+    }
 
     // Shutdown
     LOG_INFO("Shutting down");
     http.stop();
+    if (serial)   serial->stop();
+    if (pgclient) pgclient->stop();
+    db->close();
     if (ble) ble->stop();
     if (demo_thread.joinable()) demo_thread.join();
-    if (quit_watcher.joinable()) quit_watcher.join();
 
     return 0;
 }
