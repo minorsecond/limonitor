@@ -23,6 +23,10 @@ public:
     void insert_battery(const BatterySnapshot& s);
     void insert_charger(const PwrGateSnapshot& p);
 
+    // Load historical rows (oldest first) to pre-populate DataStore on startup.
+    std::vector<BatterySnapshot>  load_battery_history(size_t n = 2880) const;
+    std::vector<PwrGateSnapshot>  load_charger_history(size_t n = 2880) const;
+
     const std::string& path() const { return path_; }
 
     // Platform default:

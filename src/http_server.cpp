@@ -414,9 +414,13 @@ std::string HttpServer::svg_charger_chart(const std::vector<PwrGateSnapshot>& hi
     const int CW = W - PL - PR, CH = H - PT - PB;
 
     double vlo = 1e9, vhi = -1e9, alo = 1e9, ahi = -1e9;
+    bool has_solar = false;
     for (auto& p : hist) {
-        if (p.bat_v < vlo) vlo = p.bat_v; if (p.bat_v > vhi) vhi = p.bat_v;
+        double vmax = std::max(p.bat_v, p.sol_v > 0.1 ? p.sol_v : p.bat_v);
+        double vmin = p.bat_v;
+        if (vmin < vlo) vlo = vmin; if (vmax > vhi) vhi = vmax;
         if (p.bat_a < alo) alo = p.bat_a; if (p.bat_a > ahi) ahi = p.bat_a;
+        if (p.sol_v > 0.1) has_solar = true;
     }
     double vrng = vhi - vlo; if (vrng < 0.1) vrng = 0.1;
     double arng = ahi - alo; if (arng < 0.1) arng = 0.1;
@@ -488,12 +492,25 @@ std::string HttpServer::svg_charger_chart(const std::vector<PwrGateSnapshot>& hi
         o += "' fill='#555' font-size='10' font-family='monospace' text-anchor='end'>now</text>\n";
     }
 
+    // Solar voltage polyline (cyan, dotted) — only if any solar data
+    if (has_solar) {
+        o += "<polyline fill='none' stroke='#00bcd4' stroke-width='1.5' stroke-dasharray='3,4' points='";
+        for (int i = 0; i < N; ++i) {
+            std::snprintf(buf, sizeof(buf), "%.1f,%.1f ", xp(i), yv(hist[i].sol_v));
+            o += buf;
+        }
+        o += "'/>\n";
+    }
+
     o += "<g font-size='11' font-family='monospace'>"
          "<line x1='60' y1='8' x2='74' y2='8' stroke='#4caf50' stroke-width='2'/>"
          "<text x='78' y='12' fill='#4caf50'>Bat V</text>"
          "<line x1='130' y1='8' x2='144' y2='8' stroke='#ff9800' stroke-width='1.5' stroke-dasharray='5,3'/>"
-         "<text x='148' y='12' fill='#ff9800'>Charge A</text>"
-         "</g>\n";
+         "<text x='148' y='12' fill='#ff9800'>Charge A</text>";
+    if (has_solar)
+        o += "<line x1='222' y1='8' x2='236' y2='8' stroke='#00bcd4' stroke-width='1.5' stroke-dasharray='3,4'/>"
+             "<text x='240' y='12' fill='#00bcd4'>Solar V</text>";
+    o += "</g>\n";
 
     o += "</svg>\n";
     return o;
@@ -641,7 +658,32 @@ std::string HttpServer::html_dashboard(const BatterySnapshot& s, const std::stri
         o += "</div>";
     }
 
-    o += R"(<div class="card" style="font-size:0.8em;color:#555">
+    o += R"(<details class="card" style="font-size:0.85em;cursor:pointer">
+<summary style="color:#888;outline:none"><b>Help — field reference</b></summary>
+<table style="margin-top:0.5em">
+<tr><th colspan="2" style="color:#4caf50;padding-top:0.5em">BATTERY (BLE)</th></tr>
+<tr><td>Voltage</td><td>Total pack voltage (sum of all cells)</td></tr>
+<tr><td>Current</td><td>Amps in/out. Negative = charging, positive = discharging</td></tr>
+<tr><td>Power</td><td>Voltage × Current (negative while charging)</td></tr>
+<tr><td>SoC</td><td>State of Charge — % of rated capacity remaining</td></tr>
+<tr><td>Capacity</td><td>Remaining Ah / Nominal (rated) Ah</td></tr>
+<tr><td>Est. Remaining</td><td>Time to full (charging) or empty (discharging)</td></tr>
+<tr><td>Cycles</td><td>Full charge cycles counted by the BMS</td></tr>
+<tr><th colspan="2" style="color:#4caf50;padding-top:0.5em">CELLS</th></tr>
+<tr><td>C1..N</td><td>Individual cell voltages. LiFePO4 healthy range: ~3.0–3.65 V</td></tr>
+<tr><td>delta</td><td>Spread between min and max cell. &lt;5 mV = excellent, &gt;50 mV = rebalance</td></tr>
+<tr><th colspan="2" style="color:#4caf50;padding-top:0.5em">CHARGER (EpicPowerGate 2)</th></tr>
+<tr><td>State</td><td>Charging / Float / Idle / Standby</td></tr>
+<tr><td>Power Supply</td><td>Input supply voltage measured by charger</td></tr>
+<tr><td>Solar</td><td>Solar panel voltage (0 when no solar input)</td></tr>
+<tr><td>Battery</td><td>Battery voltage and current as measured by charger</td></tr>
+<tr><td>Target</td><td>Bulk charge target voltage / max current / stop (termination) current</td></tr>
+<tr><td>PWM</td><td>Charge controller duty cycle (1023 = 100% = full power)</td></tr>
+<tr><td>Elapsed</td><td>Minutes since current charge session started</td></tr>
+<tr><td>Temp</td><td>Charger controller temperature (raw ADC — not °C)</td></tr>
+</table>
+</details>
+<div class="card" style="font-size:0.8em;color:#555">
 API: <a href="/api/status">/api/status</a> &nbsp;
 <a href="/api/cells">/api/cells</a> &nbsp;
 <a href="/api/history">/api/history</a> &nbsp;

@@ -1,5 +1,6 @@
 #include "database.hpp"
 #include "logger.hpp"
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -199,6 +200,99 @@ void Database::insert_charger(const PwrGateSnapshot& p) {
     if (sqlite3_step(stmt) != SQLITE_DONE)
         LOG_WARN("DB: insert charger: %s", sqlite3_errmsg(db));
     sqlite3_finalize(stmt);
+}
+
+// ---------------------------------------------------------------------------
+// History queries (pre-populate DataStore on startup)
+// ---------------------------------------------------------------------------
+std::vector<BatterySnapshot> Database::load_battery_history(size_t n) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<BatterySnapshot> result;
+    if (!db_) return result;
+
+    char sql[256];
+    std::snprintf(sql, sizeof(sql),
+        "SELECT ts,device,v,a,soc,rem_ah,nom_ah,pwr,cell_min,cell_max,cell_delta,cells,t1,t2 "
+        "FROM battery_readings ORDER BY ts DESC LIMIT %zu", n);
+
+    sqlite3_stmt* stmt = nullptr;
+    auto* db = db_handle(db_);
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return result;
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        BatterySnapshot s;
+        s.timestamp = std::chrono::system_clock::from_time_t(
+            static_cast<time_t>(sqlite3_column_int64(stmt, 0)));
+        if (auto* t = sqlite3_column_text(stmt, 1)) s.device_name = reinterpret_cast<const char*>(t);
+        s.total_voltage_v = sqlite3_column_double(stmt, 2);
+        s.current_a       = sqlite3_column_double(stmt, 3);
+        s.soc_pct         = sqlite3_column_double(stmt, 4);
+        s.remaining_ah    = sqlite3_column_double(stmt, 5);
+        s.nominal_ah      = sqlite3_column_double(stmt, 6);
+        s.power_w         = sqlite3_column_double(stmt, 7);
+        s.cell_min_v      = sqlite3_column_double(stmt, 8);
+        s.cell_max_v      = sqlite3_column_double(stmt, 9);
+        s.cell_delta_v    = sqlite3_column_double(stmt, 10);
+        if (auto* c = sqlite3_column_text(stmt, 11)) {
+            const char* p = reinterpret_cast<const char*>(c);
+            while (*p) {
+                char* end;
+                double v = std::strtod(p, &end);
+                if (end == p) break;
+                s.cell_voltages_v.push_back(v);
+                p = (*end == ',') ? end + 1 : end;
+            }
+        }
+        double t1 = sqlite3_column_double(stmt, 12);
+        double t2 = sqlite3_column_double(stmt, 13);
+        if (t1 != 0.0) s.temperatures_c.push_back(t1);
+        if (t2 != 0.0) s.temperatures_c.push_back(t2);
+        s.valid = true;
+        result.push_back(std::move(s));
+    }
+    sqlite3_finalize(stmt);
+    std::reverse(result.begin(), result.end()); // oldest first
+    LOG_INFO("DB: loaded %zu battery rows", result.size());
+    return result;
+}
+
+std::vector<PwrGateSnapshot> Database::load_charger_history(size_t n) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<PwrGateSnapshot> result;
+    if (!db_) return result;
+
+    char sql[256];
+    std::snprintf(sql, sizeof(sql),
+        "SELECT ts,state,ps_v,bat_v,bat_a,sol_v,tgt_v,tgt_a,stop_a,pwm,mins,temp,pss "
+        "FROM charger_readings ORDER BY ts DESC LIMIT %zu", n);
+
+    sqlite3_stmt* stmt = nullptr;
+    auto* db = db_handle(db_);
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return result;
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        PwrGateSnapshot p;
+        p.timestamp = std::chrono::system_clock::from_time_t(
+            static_cast<time_t>(sqlite3_column_int64(stmt, 0)));
+        if (auto* t = sqlite3_column_text(stmt, 1)) p.state = reinterpret_cast<const char*>(t);
+        p.ps_v     = sqlite3_column_double(stmt, 2);
+        p.bat_v    = sqlite3_column_double(stmt, 3);
+        p.bat_a    = sqlite3_column_double(stmt, 4);
+        p.sol_v    = sqlite3_column_double(stmt, 5);
+        p.target_v = sqlite3_column_double(stmt, 6);
+        p.target_a = sqlite3_column_double(stmt, 7);
+        p.stop_a   = sqlite3_column_double(stmt, 8);
+        p.pwm      = sqlite3_column_int(stmt,  9);
+        p.minutes  = sqlite3_column_int(stmt, 10);
+        p.temp     = sqlite3_column_int(stmt, 11);
+        p.pss      = sqlite3_column_int(stmt, 12);
+        p.valid    = true;
+        result.push_back(std::move(p));
+    }
+    sqlite3_finalize(stmt);
+    std::reverse(result.begin(), result.end()); // oldest first
+    LOG_INFO("DB: loaded %zu charger rows", result.size());
+    return result;
 }
 
 // ---------------------------------------------------------------------------
