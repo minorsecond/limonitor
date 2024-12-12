@@ -14,7 +14,9 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <cmath>
 #include <iostream>
 #include <memory>
@@ -32,13 +34,99 @@ static void sig_handler(int) { g_quit = true; }
 // ---------------------------------------------------------------------------
 // Argument parsing
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Config file support
+// ---------------------------------------------------------------------------
+static std::string default_config_path() {
+#ifdef __APPLE__
+    const char* home = std::getenv("HOME");
+    if (home)
+        return std::string(home) + "/Library/Application Support/limonitor/limonitor.conf";
+#else
+    const char* xdg = std::getenv("XDG_CONFIG_HOME");
+    if (xdg && *xdg) return std::string(xdg) + "/limonitor/limonitor.conf";
+    const char* home = std::getenv("HOME");
+    if (home) return std::string(home) + "/.config/limonitor/limonitor.conf";
+#endif
+    return "./limonitor.conf";
+}
+
+static bool strtobool(const std::string& v) {
+    return v == "true" || v == "1" || v == "yes";
+}
+
+static void load_config_file(const std::string& path, Config& cfg) {
+    FILE* f = std::fopen(path.c_str(), "r");
+    if (!f) return;
+    std::fprintf(stderr, "[config] loading %s\n", path.c_str());
+    char line[512];
+    int lineno = 0;
+    while (std::fgets(line, sizeof(line), f)) {
+        ++lineno;
+        // Strip trailing newline/CR
+        size_t len = std::strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) line[--len] = '\0';
+        // Skip blanks and comments
+        const char* p = line;
+        while (*p == ' ' || *p == '\t') ++p;
+        if (!*p || *p == '#') continue;
+        // Split on '='
+        const char* eq = std::strchr(p, '=');
+        if (!eq) { std::fprintf(stderr, "[config] line %d: no '=' — skipped\n", lineno); continue; }
+        std::string key(p, eq);
+        while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) key.pop_back();
+        const char* vp = eq + 1;
+        while (*vp == ' ' || *vp == '\t') ++vp;
+        std::string val(vp);
+        // Strip inline comment
+        auto hpos = val.find(" #");
+        if (hpos != std::string::npos) val = val.substr(0, hpos);
+        while (!val.empty() && (val.back() == ' ' || val.back() == '\t')) val.pop_back();
+        // Map to Config fields
+        try {
+            if      (key == "device_name")    cfg.device_name        = val;
+            else if (key == "device_address") cfg.device_address     = val;
+            else if (key == "adapter_path")   cfg.adapter_path       = val;
+            else if (key == "http_port")      cfg.http_port          = static_cast<uint16_t>(std::stoul(val));
+            else if (key == "http_bind")      cfg.http_bind          = val;
+            else if (key == "log_file")       cfg.log_file           = val;
+            else if (key == "verbose")        cfg.log_verbose        = strtobool(val);
+            else if (key == "poll_interval")  cfg.poll_interval_s    = std::stoi(val);
+            else if (key == "service_uuid")   cfg.service_uuid       = val;
+            else if (key == "notify_uuid")    cfg.notify_char_uuid   = val;
+            else if (key == "write_uuid")     cfg.write_char_uuid    = val;
+            else if (key == "demo")           cfg.demo_mode          = strtobool(val);
+            else if (key == "no_ble")         cfg.no_ble             = strtobool(val);
+            else if (key == "serial_device")  cfg.serial_device      = val;
+            else if (key == "serial_baud")    cfg.serial_baud        = std::stoi(val);
+            else if (key == "pwrgate_remote") cfg.pwrgate_remote     = val;
+            else if (key == "db_path")        cfg.db_path            = val;
+            else if (key == "db_interval")    cfg.db_write_interval_s= std::stoi(val);
+            else if (key == "daemon")         cfg.daemon_mode        = strtobool(val);
+            else std::fprintf(stderr, "[config] line %d: unknown key '%s'\n", lineno, key.c_str());
+        } catch (...) {
+            std::fprintf(stderr, "[config] line %d: bad value for '%s'\n", lineno, key.c_str());
+        }
+    }
+    std::fclose(f);
+}
+
+// ---------------------------------------------------------------------------
+// Argument parsing
+// ---------------------------------------------------------------------------
 static void print_usage(const char* prog) {
     std::cerr <<
         "Usage: " << prog << " [OPTIONS]\n"
         "\n"
         "BLE LiTime/JBD LiFePO4 battery monitor.\n"
         "\n"
+        "Config file (loaded before CLI flags, CLI overrides):\n"
+        "  macOS: ~/Library/Application Support/limonitor/limonitor.conf\n"
+        "  Linux: ~/.config/limonitor/limonitor.conf\n"
+        "  Override path: --config FILE\n"
+        "\n"
         "Options:\n"
+        "  --config FILE  Config file path\n"
         "  -a ADDR       BLE device address (AA:BB:CC:DD:EE:FF)\n"
         "  -n NAME       BLE device name (substring match)\n"
         "  -i IFACE      BlueZ adapter path  [/org/bluez/hci0]\n"
@@ -72,15 +160,16 @@ static void print_usage(const char* prog) {
         "  " << prog << " -n JBD --demo\n";
 }
 
-static Config parse_args(int argc, char** argv) {
-    Config cfg;
+// parse_args applies CLI flags on top of an existing Config (e.g. loaded from file).
+static Config parse_args(int argc, char** argv, Config cfg = {}) {
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         auto next = [&]() -> std::string {
             if (i + 1 >= argc) { std::cerr << "Missing value for " << arg << "\n"; std::exit(1); }
             return argv[++i];
         };
-        if (arg == "-a") cfg.device_address = next();
+        if (arg == "--config") { next(); /* already handled */ }
+        else if (arg == "-a") cfg.device_address = next();
         else if (arg == "-n") cfg.device_name = next();
         else if (arg == "-i") cfg.adapter_path = next();
         else if (arg == "-p") cfg.http_port = static_cast<uint16_t>(std::stoul(next()));
@@ -169,7 +258,15 @@ static void run_demo(DataStore& store, int interval_s) {
 // Main
 // ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
-    Config cfg = parse_args(argc, argv);
+    // Determine config file path (--config can appear anywhere in argv)
+    std::string config_path = default_config_path();
+    for (int i = 1; i < argc - 1; ++i) {
+        if (std::string(argv[i]) == "--config") { config_path = argv[i+1]; break; }
+    }
+    // Load config file first, then let CLI args override
+    Config cfg;
+    load_config_file(config_path, cfg);
+    cfg = parse_args(argc, argv, cfg);
 
     // Logger
     Logger::instance().init(cfg.log_file, cfg.log_verbose, cfg.log_rotate_bytes);
@@ -190,6 +287,12 @@ int main(int argc, char** argv) {
     std::string dbpath = cfg.db_path.empty() ? Database::default_path() : cfg.db_path;
     auto db = std::make_shared<Database>(dbpath);
     if (db->open()) {
+        // Pre-populate history rings BEFORE registering the observer (avoids re-inserting)
+        for (auto& s : db->load_battery_history(cfg.history_size))
+            store.update(std::move(s));
+        for (auto& p : db->load_charger_history(cfg.history_size))
+            store.update_pwrgate(std::move(p));
+
         int interval = cfg.db_write_interval_s;
         // Battery observer — throttled by db_write_interval_s
         store.on_update([db, interval](const BatterySnapshot& snap) {

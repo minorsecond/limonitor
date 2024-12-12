@@ -181,7 +181,7 @@ struct BleManager::Impl {
                 }
                 g_object_unref(iface);
             }
-            g_object_unref(obj);
+            // obj ref is owned by the list — do NOT unref here; g_list_free_full handles it
         }
         g_list_free_full(objects, g_object_unref);
         return found;
@@ -266,8 +266,11 @@ struct BleManager::Impl {
                     g_autoptr(GVariant) r = g_dbus_proxy_call_finish(G_DBUS_PROXY(src), res, &e);
                     auto* self = static_cast<Impl*>(ud);
                     if (e) {
-                        LOG_ERROR("BLE: StartNotify: %s", e->message);
-                        g_error_free(e); self->schedule_reconnect();
+                        if (!g_error_matches(e, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+                            LOG_ERROR("BLE: StartNotify: %s", e->message);
+                            self->schedule_reconnect();
+                        }
+                        g_error_free(e);
                     } else {
                         LOG_INFO("BLE: ready");
                         self->set_state(BleState::READY);
@@ -281,32 +284,56 @@ struct BleManager::Impl {
     }
 
     bool find_characteristics() {
+        std::string notify_path, write_path;
         GList* objects = g_dbus_object_manager_get_objects(obj_mgr);
         for (GList* l = objects; l; l = l->next) {
             GDBusObject* obj = G_DBUS_OBJECT(l->data);
             const char* path = g_dbus_object_get_object_path(obj);
-            if (device_path.empty() || strncmp(path, device_path.c_str(), device_path.size()) != 0) {
-                g_object_unref(obj); continue;
-            }
+            if (device_path.empty() || strncmp(path, device_path.c_str(), device_path.size()) != 0)
+                continue; // obj ref owned by list — do NOT unref here
             GDBusInterface* iface = g_dbus_object_get_interface(obj, "org.bluez.GattCharacteristic1");
             if (iface) {
                 GDBusProxy* proxy = G_DBUS_PROXY(iface);
                 g_autoptr(GVariant) uv = g_dbus_proxy_get_cached_property(proxy, "UUID");
                 std::string uuid = gv_str(uv);
-                if (uuid == notify_uuid && !notify_char) {
-                    notify_char = G_DBUS_PROXY(g_object_ref(proxy));
-                    char_sig = g_signal_connect(notify_char, "g-properties-changed",
-                        G_CALLBACK(cb_char_props), this);
-                } else if (uuid == write_uuid && !write_char) {
-                    write_char = G_DBUS_PROXY(g_object_ref(proxy));
-                }
+                if (uuid == notify_uuid && notify_path.empty())
+                    notify_path = path;
+                else if (uuid == write_uuid && write_path.empty())
+                    write_path = path;
                 g_object_unref(iface);
             }
-            g_object_unref(obj);
-            if (notify_char && write_char) break;
+            // obj ref owned by list — do NOT unref here
+            if (!notify_path.empty() && !write_path.empty()) break;
         }
         g_list_free_full(objects, g_object_unref);
-        return notify_char && write_char;
+
+        if (notify_path.empty() || write_path.empty()) return false;
+
+        LOG_INFO("BLE: notify char: %s", notify_path.c_str());
+        LOG_INFO("BLE: write  char: %s", write_path.c_str());
+
+        // Create dedicated proxies (not from object manager cache) so that
+        // g-properties-changed is delivered reliably for incoming notifications.
+        GError* err = nullptr;
+        notify_char = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM,
+            G_DBUS_PROXY_FLAGS_NONE, nullptr, "org.bluez",
+            notify_path.c_str(), "org.bluez.GattCharacteristic1", cancel, &err);
+        if (err) {
+            LOG_ERROR("BLE: notify proxy: %s", err->message);
+            g_error_free(err); return false;
+        }
+        char_sig = g_signal_connect(notify_char, "g-properties-changed",
+            G_CALLBACK(cb_char_props), this);
+
+        write_char = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM,
+            G_DBUS_PROXY_FLAGS_NONE, nullptr, "org.bluez",
+            write_path.c_str(), "org.bluez.GattCharacteristic1", cancel, &err);
+        if (err) {
+            LOG_ERROR("BLE: write proxy: %s", err->message);
+            g_error_free(err);
+            g_object_unref(notify_char); notify_char = nullptr; return false;
+        }
+        return true;
     }
 
     // ---- Poll ----
@@ -319,10 +346,13 @@ struct BleManager::Impl {
     }
     void do_poll() {
         if (state.load() != BleState::READY || !write_char || poll_command.empty()) return;
+        LOG_INFO("BLE: polling (%zu bytes)", poll_command.size());
         GVariantBuilder b; g_variant_builder_init(&b, G_VARIANT_TYPE("ay"));
         for (uint8_t byte : poll_command) g_variant_builder_add(&b, "y", byte);
-        GVariant* params = g_variant_new("(@aya{sv})", g_variant_builder_end(&b),
-                                         g_variant_new("a{sv}", nullptr));
+        GVariantBuilder opts; g_variant_builder_init(&opts, G_VARIANT_TYPE("a{sv}"));
+        g_variant_builder_add(&opts, "{sv}", "type", g_variant_new_string("request"));
+        GVariant* params = g_variant_new("(@ay@a{sv})", g_variant_builder_end(&b),
+                                         g_variant_builder_end(&opts));
         g_dbus_proxy_call(write_char, "WriteValue", params,
             G_DBUS_CALL_FLAGS_NONE, 5000, cancel,
             +[](GObject*, GAsyncResult* r, gpointer ud) {
@@ -332,6 +362,8 @@ struct BleManager::Impl {
                     if (!g_error_matches(e, G_IO_ERROR, G_IO_ERROR_CANCELLED))
                         LOG_WARN("BLE: WriteValue: %s", e->message);
                     g_error_free(e);
+                } else {
+                    LOG_INFO("BLE: WriteValue OK");
                 }
             }, write_char);
         schedule_poll(g_poll_interval_s);
@@ -345,8 +377,10 @@ struct BleManager::Impl {
         for (const auto& pkt : queue) {
             GVariantBuilder b; g_variant_builder_init(&b, G_VARIANT_TYPE("ay"));
             for (uint8_t byte : pkt) g_variant_builder_add(&b, "y", byte);
-            GVariant* params = g_variant_new("(@aya{sv})", g_variant_builder_end(&b),
-                                             g_variant_new("a{sv}", nullptr));
+            GVariantBuilder opts; g_variant_builder_init(&opts, G_VARIANT_TYPE("a{sv}"));
+            g_variant_builder_add(&opts, "{sv}", "type", g_variant_new_string("request"));
+            GVariant* params = g_variant_new("(@ay@a{sv})", g_variant_builder_end(&b),
+                                             g_variant_builder_end(&opts));
             g_dbus_proxy_call(write_char, "WriteValue", params,
                 G_DBUS_CALL_FLAGS_NONE, 5000, nullptr, nullptr, nullptr);
         }
@@ -433,6 +467,7 @@ struct BleManager::Impl {
         if (!val) return;
         gsize n = 0;
         const uint8_t* d = static_cast<const uint8_t*>(g_variant_get_fixed_array(val, &n, 1));
+        LOG_INFO("BLE: notification received, %zu bytes", n);
         if (d && n > 0 && self->data_cb)
             self->data_cb(std::vector<uint8_t>(d, d + n));
     }
