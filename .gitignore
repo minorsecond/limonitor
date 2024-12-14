@@ -1,0 +1,9 @@
+build/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+limonitor
+limonitor_integration_test
+*.o
+*.a
