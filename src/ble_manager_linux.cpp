@@ -346,7 +346,7 @@ struct BleManager::Impl {
     }
     void do_poll() {
         if (state.load() != BleState::READY || !write_char || poll_command.empty()) return;
-        LOG_INFO("BLE: polling (%zu bytes)", poll_command.size());
+        LOG_DEBUG("BLE: polling (%zu bytes)", poll_command.size());
         GVariantBuilder b; g_variant_builder_init(&b, G_VARIANT_TYPE("ay"));
         for (uint8_t byte : poll_command) g_variant_builder_add(&b, "y", byte);
         GVariantBuilder opts; g_variant_builder_init(&opts, G_VARIANT_TYPE("a{sv}"));
@@ -363,7 +363,7 @@ struct BleManager::Impl {
                         LOG_WARN("BLE: WriteValue: %s", e->message);
                     g_error_free(e);
                 } else {
-                    LOG_INFO("BLE: WriteValue OK");
+                    LOG_DEBUG("BLE: WriteValue OK");
                 }
             }, write_char);
         schedule_poll(g_poll_interval_s);
