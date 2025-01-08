@@ -43,6 +43,10 @@ public:
     std::optional<PwrGateSnapshot> latest_pwrgate() const;
     std::vector<PwrGateSnapshot>   pwrgate_history(size_t n = 0) const;
 
+    // Battery metadata
+    void        set_purchase_date(const std::string& d);
+    std::string purchase_date() const;
+
 private:
     mutable std::mutex mu_;
     std::deque<BatterySnapshot> ring_;
@@ -50,5 +54,6 @@ private:
     size_t max_history_;
     std::vector<Observer> observers_;
     std::string ble_state_{"disconnected"};
+    std::string purchase_date_;
     std::vector<DiscoveredDevice> discovered_;
 };
