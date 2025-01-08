@@ -102,7 +102,8 @@ static void load_config_file(const std::string& path, Config& cfg) {
             else if (key == "pwrgate_remote") cfg.pwrgate_remote     = val;
             else if (key == "db_path")        cfg.db_path            = val;
             else if (key == "db_interval")    cfg.db_write_interval_s= std::stoi(val);
-            else if (key == "daemon")         cfg.daemon_mode        = strtobool(val);
+            else if (key == "daemon")              cfg.daemon_mode        = strtobool(val);
+            else if (key == "battery_purchased")   cfg.battery_purchased  = val;
             else std::fprintf(stderr, "[config] line %d: unknown key '%s'\n", lineno, key.c_str());
         } catch (...) {
             std::fprintf(stderr, "[config] line %d: bad value for '%s'\n", lineno, key.c_str());
@@ -146,6 +147,7 @@ static void print_usage(const char* prog) {
         "  --db PATH      SQLite database path             [platform default]\n"
         "  --db-interval N  DB write throttle seconds      [60]\n"
         "  --daemon       Run headless (no TUI) — for background/service use\n"
+        "  --purchase-date DATE  Record battery purchase date (e.g. 2024-03-15)\n"
         "  -h             Show this help\n"
         "\n"
         "API endpoints (served on http://HOST:PORT/):\n"
@@ -187,7 +189,8 @@ static Config parse_args(int argc, char** argv, Config cfg = {}) {
         else if (arg == "--pwrgate-remote") cfg.pwrgate_remote = next();
         else if (arg == "--db")      cfg.db_path = next();
         else if (arg == "--db-interval") cfg.db_write_interval_s = std::stoi(next());
-        else if (arg == "--daemon")  cfg.daemon_mode = true;
+        else if (arg == "--daemon")         cfg.daemon_mode       = true;
+        else if (arg == "--purchase-date")  cfg.battery_purchased = next();
         else if (arg == "-h" || arg == "--help") { print_usage(argv[0]); std::exit(0); }
         else { std::cerr << "Unknown option: " << arg << "\n"; print_usage(argv[0]); std::exit(1); }
     }
@@ -282,6 +285,8 @@ int main(int argc, char** argv) {
 
     // Data store
     DataStore store(cfg.history_size);
+    if (!cfg.battery_purchased.empty())
+        store.set_purchase_date(cfg.battery_purchased);
 
     // SQLite database
     std::string dbpath = cfg.db_path.empty() ? Database::default_path() : cfg.db_path;
@@ -310,7 +315,7 @@ int main(int argc, char** argv) {
     }
 
     // HTTP server
-    HttpServer http(store, cfg.http_bind, cfg.http_port);
+    HttpServer http(store, cfg.http_bind, cfg.http_port, cfg.poll_interval_s);
     if (!http.start()) {
         LOG_ERROR("HTTP server failed to start on port %d", cfg.http_port);
         return 1;

@@ -47,6 +47,15 @@ std::string DataStore::ble_state() const {
     return ble_state_;
 }
 
+void DataStore::set_purchase_date(const std::string& d) {
+    std::lock_guard<std::mutex> lk(mu_);
+    purchase_date_ = d;
+}
+std::string DataStore::purchase_date() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return purchase_date_;
+}
+
 void DataStore::upsert_discovered(DiscoveredDevice dev) {
     auto now = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> lk(mu_);

@@ -45,4 +45,7 @@ struct Config {
 
     // Daemon mode: skip TUI, log to stderr/file only
     bool daemon_mode = false;
+
+    // Battery metadata
+    std::string battery_purchased;  // e.g. "2024-03-15" — stored as-is
 };
