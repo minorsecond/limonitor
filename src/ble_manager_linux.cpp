@@ -72,7 +72,6 @@ struct BleManager::Impl {
     GCond                           wq_cond;
     std::vector<std::vector<uint8_t>> write_queue;
 
-    // ---- helpers ----
     void set_state(BleState s, const std::string& msg = "") {
         BleState old = state.exchange(s);
         if (old != s || !msg.empty()) {
@@ -129,7 +128,6 @@ struct BleManager::Impl {
         }
     }
 
-    // ---- GLib thread ----
     void gio_main() {
         gctx  = g_main_context_new();
         gloop = g_main_loop_new(gctx, FALSE);
@@ -162,7 +160,6 @@ struct BleManager::Impl {
         g_main_context_unref(gctx); gctx = nullptr;
     }
 
-    // ---- Discovery ----
     bool try_find_device() {
         GList* objects = g_dbus_object_manager_get_objects(obj_mgr);
         bool found = false;
@@ -253,7 +250,6 @@ struct BleManager::Impl {
             }, this);
     }
 
-    // ---- GATT ----
     void on_services_resolved() {
         set_state(BleState::DISCOVERING);
         if (find_characteristics()) {
@@ -334,7 +330,6 @@ struct BleManager::Impl {
         return true;
     }
 
-    // ---- Poll ----
     void schedule_poll(int delay_s = 0) {
         if (poll_src) { g_source_remove(poll_src); poll_src = 0; }
         GSource* src = g_timeout_source_new_seconds(delay_s);
@@ -367,7 +362,6 @@ struct BleManager::Impl {
         schedule_poll(g_poll_interval_s);
     }
 
-    // ---- Write queue drain ----
     void drain_write_queue() {
         g_mutex_lock(&wq_mu);
         auto queue = std::move(write_queue);
@@ -384,7 +378,6 @@ struct BleManager::Impl {
         }
     }
 
-    // ---- Reconnect ----
     void schedule_reconnect(int delay_s = 5) {
         if (reconnect_src) { g_source_remove(reconnect_src); reconnect_src = 0; }
         if (poll_src)      { g_source_remove(poll_src);      poll_src = 0; }
@@ -406,7 +399,6 @@ struct BleManager::Impl {
         g_source_unref(src);
     }
 
-    // ---- Static GLib callbacks ----
     static void cb_obj_mgr_ready(GObject*, GAsyncResult* res, gpointer ud) {
         auto* self = static_cast<Impl*>(ud);
         GError* err = nullptr;

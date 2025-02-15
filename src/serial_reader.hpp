@@ -5,9 +5,7 @@
 #include <string>
 #include <thread>
 
-// Reads EpicPowerGate 2 ASCII lines from a serial port in a background thread.
-// Pairs the status line ("PS=...") with the following target line ("TargetV=...")
-// and fires the callback with a parsed PwrGateSnapshot.
+// EpicPowerGate 2 serial reader, background thread
 class SerialReader {
 public:
     using SnapCb = std::function<void(const PwrGateSnapshot&)>;

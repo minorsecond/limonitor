@@ -5,14 +5,7 @@
 #include <string>
 #include <thread>
 
-// Simple single-threaded HTTP/1.0 server.
-//
-// Endpoints:
-//   GET /               HTML dashboard
-//   GET /api/status     Full battery JSON
-//   GET /api/cells      Cell voltages JSON
-//   GET /api/history    Last N snapshots JSON  (?n=100)
-//   GET /metrics        Prometheus text format
+// HTTP/1.0 server. GET /, /api/status, /api/cells, /api/history, /metrics
 class HttpServer {
 public:
     HttpServer(DataStore& store, const std::string& bind_addr, uint16_t port,

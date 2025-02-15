@@ -5,9 +5,7 @@
 #include <functional>
 #include <string>
 
-// Terminal UI.
-// With ncurses: full live-updating panel layout.
-// Without ncurses: simple periodic print to stdout.
+// TUI. ncurses or plain stdout.
 class TUI {
 public:
     explicit TUI(DataStore& store, uint16_t http_port = 8080);

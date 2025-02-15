@@ -27,19 +27,7 @@ inline const char* ble_state_str(BleState s) {
     return "unknown";
 }
 
-// Platform-independent BLE manager.
-// On Linux  : BlueZ via GLib/GIO D-Bus  (ble_manager_linux.cpp)
-// On macOS  : CoreBluetooth             (ble_manager_macos.mm)
-//
-// Discovery mode (no target set):
-//   Scans and reports all visible devices via discovery_cb.
-//   Call connect_to(device.id) from any thread to connect to one.
-//
-// Targeted mode (-n NAME or -a ADDR):
-//   Auto-connects when the matching device appears; discovery_cb still fires
-//   for every device seen so the TUI can show "nearby" context.
-//
-// macOS note: device.id is the CoreBluetooth UUID, not the BLE MAC address.
+// BLE manager. Linux: BlueZ. macOS: CoreBluetooth.
 class BleManager {
 public:
     using DataCb      = std::function<void(const std::vector<uint8_t>&)>;

@@ -4,12 +4,7 @@
 #include <mutex>
 #include <string>
 
-// Thread-safe SQLite3 persistence layer.
-// Schema:
-//   battery_readings — one row per BatterySnapshot insert
-//   charger_readings — one row per PwrGateSnapshot insert
-//
-// sqlite3* is opaque (forward-declared as void*) so callers don't need sqlite3.h.
+// SQLite persistence
 class Database {
 public:
     explicit Database(std::string path);

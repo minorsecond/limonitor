@@ -1,11 +1,4 @@
-// Integration test: connects to the real LiTime battery via BLE, reads one
-// snapshot, and validates the data is physically plausible.
-//
-// Usage: ./limonitor_integration_test [-n NAME] [-t TIMEOUT_S]
-//   -n NAME      substring of device name to match  [L-12100BNNA70]
-//   -t SECS      scan/connect timeout in seconds    [45]
-//
-// The test exits 0 on pass, 1 on failure.
+// connects to real battery via BLE, validates one snapshot. -n NAME -t SECS
 
 #include "../src/ble_manager.hpp"
 #include "../src/battery_data.hpp"
@@ -21,7 +14,6 @@
 #include <mutex>
 #include <string>
 
-// Required by ble_manager platform backends
 int g_poll_interval_s = 5;
 
 static void usage(const char* prog) {
@@ -30,9 +22,6 @@ static void usage(const char* prog) {
     fprintf(stderr, "  -t SECS     timeout in seconds     [45]\n");
 }
 
-// ---------------------------------------------------------------------------
-// Validation helpers
-// ---------------------------------------------------------------------------
 struct Check {
     const char* name;
     bool        pass;
@@ -64,9 +53,6 @@ static bool run_checks(const BatterySnapshot& s, std::vector<Check>& out) {
     return all_pass;
 }
 
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
     std::string device_name = "L-12100BNNA70";
     int timeout_s = 45;

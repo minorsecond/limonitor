@@ -1,0 +1,2 @@
+# Development / pre-commit
+pre-commit>=3.0.0
