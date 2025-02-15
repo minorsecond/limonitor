@@ -16,9 +16,6 @@ extern int g_poll_interval_s;
 
 @class BLEDelegate;
 
-// ---------------------------------------------------------------------------
-// Impl
-// ---------------------------------------------------------------------------
 struct BleManager::Impl {
     // Config
     std::string target;
@@ -290,9 +287,6 @@ struct BleManager::Impl {
     }
 };
 
-// ---------------------------------------------------------------------------
-// ObjC delegate
-// ---------------------------------------------------------------------------
 @interface BLEDelegate : NSObject<CBCentralManagerDelegate, CBPeripheralDelegate>
 @property (assign, nonatomic) BleManager::Impl* impl;
 @end
@@ -397,9 +391,6 @@ didWriteValueForCharacteristic:(CBCharacteristic*)ch error:(NSError*)err {
 
 @end
 
-// ---------------------------------------------------------------------------
-// BleManager public interface
-// ---------------------------------------------------------------------------
 BleManager::BleManager(const std::string& target, const std::string& /*adapter_path*/,
                        const std::string& svc, const std::string& ntf, const std::string& wr)
     : impl_(std::make_unique<Impl>())

@@ -3,9 +3,6 @@
 
 namespace litime {
 
-// ---------------------------------------------------------------------------
-// Request builder
-// ---------------------------------------------------------------------------
 // Bytes (from reference JS, big-endian uint16 pairs):
 //   setUint16(0, 0x0000) -> 0x00 0x00
 //   setUint16(2, 0x0401) -> 0x04 0x01
@@ -15,9 +12,6 @@ std::vector<uint8_t> build_request() {
     return {0x00, 0x00, 0x04, 0x01, 0x13, 0x55, 0xAA, 0x17};
 }
 
-// ---------------------------------------------------------------------------
-// Little-endian helpers
-// ---------------------------------------------------------------------------
 static inline uint16_t u16le(const uint8_t* p) {
     return static_cast<uint16_t>(p[0] | (static_cast<uint16_t>(p[1]) << 8));
 }
@@ -30,7 +24,6 @@ static inline uint32_t u32le(const uint8_t* p) {
 static inline int32_t s32le(const uint8_t* p) { return static_cast<int32_t>(u32le(p)); }
 static inline int16_t s16le(const uint8_t* p) { return static_cast<int16_t>(u16le(p)); }
 
-// ---------------------------------------------------------------------------
 // Response layout (offsets into the notification payload, little-endian):
 //   12-15  uint32  total voltage, mV
 //   16-47  16×uint16  cell voltages, mV  (skip zeros = absent cells)
@@ -39,7 +32,6 @@ static inline int16_t s16le(const uint8_t* p) { return static_cast<int16_t>(u16l
 //   54-55  int16   BMS temperature, °C
 //   62-63  uint16  remaining capacity, 0.01 Ah
 //   64-65  uint16  nominal capacity, 0.01 Ah
-// ---------------------------------------------------------------------------
 bool parse(const uint8_t* d, size_t len, BatterySnapshot& snap) {
     if (len < MIN_RESPONSE_LEN) {
         LOG_WARN("LiTime: response too short (%zu bytes, need %zu)", len, MIN_RESPONSE_LEN);
@@ -90,9 +82,6 @@ bool parse(const uint8_t* d, size_t len, BatterySnapshot& snap) {
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Incremental parser
-// ---------------------------------------------------------------------------
 void Parser::reset() { buf_.clear(); }
 
 Parser::Result Parser::feed(const uint8_t* data, size_t len) {

@@ -5,9 +5,6 @@
 
 namespace jbd {
 
-// ---------------------------------------------------------------------------
-// Request builder
-// ---------------------------------------------------------------------------
 std::vector<uint8_t> build_request(uint8_t cmd) {
     // DD A5 [cmd] 00 [ck_hi] [ck_lo] 77
     // checksum covers: cmd, 0x00
@@ -18,18 +15,12 @@ std::vector<uint8_t> build_request(uint8_t cmd) {
              0x77 };
 }
 
-// ---------------------------------------------------------------------------
-// Checksum (covers cmd+status+len+data bytes)
-// ---------------------------------------------------------------------------
 uint16_t Parser::checksum(const uint8_t* d, size_t n) {
     uint32_t sum = 0;
     for (size_t i = 0; i < n; ++i) sum += d[i];
     return static_cast<uint16_t>((0x10000u - (sum & 0xFFFFu)) & 0xFFFFu);
 }
 
-// ---------------------------------------------------------------------------
-// Incremental parser
-// ---------------------------------------------------------------------------
 void Parser::reset() {
     buf_.clear();
     payload_.clear();
@@ -84,9 +75,6 @@ Parser::Result Parser::try_parse() {
     return Result::COMPLETE;
 }
 
-// ---------------------------------------------------------------------------
-// Apply parsed payload to BatterySnapshot
-// ---------------------------------------------------------------------------
 static inline uint16_t u16be(const uint8_t* p) {
     return static_cast<uint16_t>((p[0] << 8) | p[1]);
 }

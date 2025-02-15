@@ -23,7 +23,6 @@ static bool str_icontains(const std::string& hay, const std::string& needle) {
     return it != hay.end();
 }
 
-// ---------------------------------------------------------------------------
 struct BleManager::Impl {
     // Config
     std::string target;
@@ -511,9 +510,6 @@ struct BleManager::Impl {
     }
 };
 
-// ---------------------------------------------------------------------------
-// BleManager public methods
-// ---------------------------------------------------------------------------
 BleManager::BleManager(const std::string& target, const std::string& adapter_path,
                        const std::string& svc, const std::string& ntf, const std::string& wr)
     : impl_(std::make_unique<Impl>())

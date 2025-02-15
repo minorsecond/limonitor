@@ -6,9 +6,6 @@
 #include <filesystem>
 #include <sqlite3.h>
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 static inline sqlite3* db_handle(void* p) { return static_cast<sqlite3*>(p); }
 
 Database::Database(std::string path) : path_(std::move(path)) {}
@@ -25,9 +22,6 @@ bool Database::exec(const char* sql) {
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Open / close
-// ---------------------------------------------------------------------------
 bool Database::open() {
     // Ensure parent directory exists
     try {
@@ -64,9 +58,6 @@ bool Database::is_open() const {
     return db_ != nullptr;
 }
 
-// ---------------------------------------------------------------------------
-// Schema migrations
-// ---------------------------------------------------------------------------
 bool Database::migrate() {
     // WAL mode: concurrent readers + writer, faster on flash storage
     if (!exec("PRAGMA journal_mode=WAL;")) return false;
@@ -112,9 +103,6 @@ bool Database::migrate() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Inserts
-// ---------------------------------------------------------------------------
 void Database::insert_battery(const BatterySnapshot& s) {
     if (!s.valid) return;
     std::lock_guard<std::mutex> lk(mu_);
@@ -202,9 +190,6 @@ void Database::insert_charger(const PwrGateSnapshot& p) {
     sqlite3_finalize(stmt);
 }
 
-// ---------------------------------------------------------------------------
-// History queries (pre-populate DataStore on startup)
-// ---------------------------------------------------------------------------
 std::vector<BatterySnapshot> Database::load_battery_history(size_t n) const {
     std::lock_guard<std::mutex> lk(mu_);
     std::vector<BatterySnapshot> result;
@@ -295,9 +280,6 @@ std::vector<PwrGateSnapshot> Database::load_charger_history(size_t n) const {
     return result;
 }
 
-// ---------------------------------------------------------------------------
-// Default path
-// ---------------------------------------------------------------------------
 std::string Database::default_path() {
 #ifdef __APPLE__
     const char* home = std::getenv("HOME");
