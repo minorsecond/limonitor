@@ -73,7 +73,6 @@ static void draw_bar(int row, int col, int width, double fraction, int color_pai
     mvhline(row, col + filled, '-', width - filled);
 }
 
-// Reserve this many rows at the bottom for the log panel (separator + lines).
 static constexpr int LOG_PANEL_ROWS = 6;   // 1 separator + 5 log lines
 
 static void draw_log_panel(int rows, int cols) {
@@ -110,7 +109,6 @@ void TUI::draw(const BatterySnapshot& snap, const std::string& ble_st,
     int content_rows = rows - 2 - LOG_PANEL_ROWS;
     erase();
 
-    // ---- Header ----
     attron(COLOR_PAIR(C_HEADER) | A_BOLD);
     mvhline(0, 0, ' ', cols);
     mvprintw(0, 1, " limonitor  |  BLE: %-14s", ble_st.c_str());
@@ -151,7 +149,6 @@ void TUI::draw(const BatterySnapshot& snap, const std::string& ble_st,
     char ts[20]; struct tm tm{}; localtime_r(&t, &tm);
     std::strftime(ts, sizeof(ts), "%H:%M:%S", &tm);
 
-    // ---- Pack overview ----
     attron(A_BOLD); mvprintw(row, 1, "Pack"); attroff(A_BOLD);
     row++;
     if (content_ok()) mvprintw(row++, 3, "Voltage  : %.3f V", snap.total_voltage_v);
@@ -180,7 +177,6 @@ void TUI::draw(const BatterySnapshot& snap, const std::string& ble_st,
             snap.charge_mosfet ? "ON " : "OFF", snap.discharge_mosfet ? "ON " : "OFF");
     if (content_ok()) mvprintw(row++, 3, "Updated  : %s", ts);
 
-    // ---- Voltage sparkline ----
     if (!hist.empty() && content_ok()) {
         int spark_w = std::min((int)hist.size(), std::min(cols - 16, 60));
         int start   = std::max(0, (int)hist.size() - spark_w);
@@ -202,7 +198,6 @@ void TUI::draw(const BatterySnapshot& snap, const std::string& ble_st,
         row++;
     }
 
-    // ---- Cells ----
     row++;
     if (!snap.cell_voltages_v.empty() && content_ok()) {
         attron(A_BOLD);
@@ -240,7 +235,6 @@ void TUI::draw(const BatterySnapshot& snap, const std::string& ble_st,
         }
     }
 
-    // ---- Temperatures ----
     if (!snap.temperatures_c.empty() && content_ok()) {
         row++;
         attron(A_BOLD); mvprintw(row++, 1, "Temperatures"); attroff(A_BOLD);
@@ -255,7 +249,6 @@ void TUI::draw(const BatterySnapshot& snap, const std::string& ble_st,
         }
     }
 
-    // ---- Charger (PwrGate) ----
     {
         auto pg_opt = store_.latest_pwrgate();
         if (pg_opt && pg_opt->valid && content_ok()) {
@@ -279,7 +272,6 @@ void TUI::draw(const BatterySnapshot& snap, const std::string& ble_st,
         }
     }
 
-    // ---- Protection ----
     if (snap.protection.any() && content_ok()) {
         row++;
         attron(COLOR_PAIR(C_RED) | A_BOLD | A_BLINK);
@@ -287,10 +279,8 @@ void TUI::draw(const BatterySnapshot& snap, const std::string& ble_st,
         attroff(COLOR_PAIR(C_RED) | A_BOLD | A_BLINK);
     }
 
-    // ---- Log panel ----
     draw_log_panel(rows, cols);
 
-    // ---- Footer ----
     attron(COLOR_PAIR(C_HEADER));
     mvhline(rows - 1, 0, ' ', cols);
     mvprintw(rows - 1, 1, " q=quit  ?=help  sw_ver=%s  http://localhost:%d/",
@@ -305,7 +295,6 @@ void TUI::draw_picker(const std::vector<DiscoveredDevice>& devs, const std::stri
     getmaxyx(stdscr, rows, cols);
     erase();
 
-    // Header
     attron(COLOR_PAIR(C_HEADER) | A_BOLD);
     mvhline(0, 0, ' ', cols);
     mvprintw(0, 1, " limonitor — BLE Device Picker  |  %s", ble_st.c_str());
@@ -421,7 +410,7 @@ void TUI::draw_help() {
     getmaxyx(stdscr, rows, cols);
 
     static const char* lines[] = {
-        "  limonitor — field reference                              ",
+        "  limonitor                                                ",
         "                                                           ",
         "  PACK                                                     ",
         "  Voltage   Total pack voltage (sum of all cells)         ",

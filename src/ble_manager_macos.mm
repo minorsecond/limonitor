@@ -1,5 +1,4 @@
-// macOS CoreBluetooth BLE backend.
-// Uses ARC-disabled manual retain/release for compatibility with C++ RAII patterns.
+// macOS CoreBluetooth backend
 
 #import <CoreBluetooth/CoreBluetooth.h>
 #import <Foundation/Foundation.h>
@@ -57,7 +56,6 @@ struct BleManager::Impl {
     std::mutex                        wq_mu;
     std::vector<std::vector<uint8_t>> write_queue;
 
-    // ---- Helpers ----
     void set_state(BleState s, const std::string& msg = "") {
         BleState old = state.exchange(s);
         if (old != s || !msg.empty()) {

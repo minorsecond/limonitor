@@ -658,9 +658,10 @@ std::string HttpServer::html_dashboard(const BatterySnapshot& s, const std::stri
     std::string o;
     o.reserve(65536);
 
-    // ---- <head> ----
-    o += R"(<!DOCTYPE html><html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    o += R"HTML(<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0d0d11" media="(prefers-color-scheme:dark)">
+<meta name="theme-color" content="#f2f3f7" media="(prefers-color-scheme:light)">
 <title>limonitor</title>
 <style>
 /* ── Dark theme (default) ── */
@@ -683,13 +684,14 @@ html.light{
 }
 /* ── Base ── */
 *{box-sizing:border-box;margin:0;padding:0}
-html{transition:background-color .2s}
+html{transition:background-color .2s;-webkit-tap-highlight-color:transparent}
 body{font-family:'SF Mono',Menlo,Consolas,monospace;background:var(--bg);color:var(--text);font-size:13px;
   transition:background-color .2s,color .15s}
 a{color:var(--green);text-decoration:none}a:hover{text-decoration:underline}
-.wrap{max-width:1100px;margin:0 auto;padding:1.4rem}
+.wrap{max-width:1100px;margin:0 auto;padding:1.4rem;padding-bottom:max(1.4rem,env(safe-area-inset-bottom))}
 /* ── Header ── */
 header{display:flex;align-items:center;justify-content:space-between;margin-bottom:1.2rem;flex-wrap:wrap;gap:.6rem}
+@media(max-width:640px){header{flex-direction:column;align-items:flex-start;gap:.8rem}}
 h1{color:var(--green);font-size:1.7rem;letter-spacing:.2em;font-weight:700}
 .hstat{font-size:.72rem;color:var(--muted);display:flex;align-items:center;gap:.8rem;flex-wrap:wrap}
 .dot{display:inline-block;width:7px;height:7px;border-radius:50%;vertical-align:middle;margin-right:4px}
@@ -697,7 +699,8 @@ h1{color:var(--green);font-size:1.7rem;letter-spacing:.2em;font-weight:700}
 .dot-warn{background:var(--orange)}.dot-err{background:var(--red)}.dot-off{background:#444}
 /* ── Stat cards ── */
 .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:.7rem;margin-bottom:.7rem}
-@media(max-width:560px){.stats{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:560px){.stats{grid-template-columns:repeat(2,1fr)}.stat{padding:1rem}}
+@media(max-width:640px){body{font-size:14px}.wrap{padding:1rem}.card{padding:1rem}}
 .stat{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.9rem 1rem;
   transition:background-color .2s,border-color .2s}
 .stat-lbl{font-size:.6rem;text-transform:uppercase;letter-spacing:.14em;color:var(--muted)}
@@ -718,10 +721,12 @@ h1{color:var(--green);font-size:1.7rem;letter-spacing:.2em;font-weight:700}
 .dt td{padding:.35rem 0;vertical-align:top;border-bottom:1px solid var(--border)}
 .dt tr:last-child td{border-bottom:none}
 .dt td:first-child{color:var(--muted);width:44%;padding-right:.5rem}
+.dt td:last-child{word-break:break-word}
 /* ── Cell grid ── */
 .cells{display:grid;grid-template-columns:repeat(auto-fill,minmax(88px,1fr));gap:.4rem;margin-top:.4rem}
 .cell{background:var(--cell-bg);border:1px solid var(--border);border-radius:5px;padding:.45rem .55rem;
   transition:background-color .2s,border-color .2s}
+@media(max-width:640px){.cells{grid-template-columns:repeat(auto-fill,minmax(72px,1fr))}}
 .cell-n{font-size:.58rem;color:var(--muted);text-transform:uppercase;letter-spacing:.1em}
 .cell-v{font-size:.92rem;font-weight:700;margin-top:.08rem}
 .cell-track{height:2px;background:var(--soc-track);border-radius:1px;margin-top:.38rem}
@@ -740,26 +745,33 @@ details[open].card summary::before{content:'▾  '}
 .ht td{padding:.2rem .35rem}.ht td:first-child{color:var(--muted);width:30%}
 .ht .sec td{color:var(--green);padding-top:.75rem;font-weight:600}
 /* ── Footer ── */
-.footer{font-size:.68rem;color:var(--muted);margin-top:.6rem;opacity:.7}
+.footer{font-size:.68rem;color:var(--muted);margin-top:1rem;opacity:.7}
 .footer a{color:var(--muted)}.footer a:hover{color:var(--green)}
 /* ── Buttons ── */
 .btn{background:none;border:1px solid var(--border);border-radius:4px;color:var(--muted);
   padding:.2rem .6rem;font-size:.72rem;font-family:inherit;cursor:pointer;
   transition:border-color .15s,color .15s,background .15s}
 .btn:hover{border-color:var(--muted);color:var(--text)}
+.btn:focus-visible,.trng-btn:focus-visible{outline:2px solid var(--green);outline-offset:2px}
 /* ── Time range ── */
 .trng{display:flex;gap:.2rem;align-items:center}
 .trng-lbl{font-size:.62rem;color:var(--muted);margin-right:.2rem;text-transform:uppercase;letter-spacing:.1em}
 .trng-btn{background:none;border:1px solid var(--border);border-radius:4px;color:var(--muted);
   padding:.22rem .65rem;font-size:.72rem;font-family:inherit;cursor:pointer;line-height:1.5;
   transition:border-color .15s,color .15s,background .15s}
+@media(max-width:640px){.trng-btn,.btn{min-height:44px;padding:.4rem .8rem;font-size:.8rem}}
 .trng-btn:hover{border-color:var(--muted);color:var(--text)}
 .trng-btn.active{background:rgba(74,222,128,.15);border-color:var(--green);color:var(--green);font-weight:600}
 html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--green);color:var(--green)}
+.chart-svg{width:100%;display:block;background:var(--chart-bg);border-radius:4px}
+)HTML";
+    o += "#bat-chart{height:200px}#chg-chart{height:180px}"
+         "@media(max-width:640px){#bat-chart{height:260px}#chg-chart{height:220px}"
+         ".chart-svg{preserve-aspect-ratio:none}}";
+    o += R"HTML(
 </style></head><body><div class="wrap">
-)";
+)HTML";
 
-    // ---- Header ----
     o += "<header><h1>limonitor</h1><div class=\"hstat\">";
     o += "<span><span class=\"dot " + dot_cls + "\"></span>" + ble_st + "</span>";
     if (s.valid && !s.device_name.empty())
@@ -784,7 +796,6 @@ html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--gre
     o += "<button id=\"thm-btn\" class=\"btn\" onclick=\"toggleTheme()\" title=\"Toggle theme\">&#9788;</button>";
     o += "</div></header>\n";
 
-    // ---- Stat cards ----
     o += "<div class=\"stats\">\n";
 
     // Voltage
@@ -826,15 +837,12 @@ html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--gre
 
     o += "</div>\n"; // .stats
 
-    // ---- Battery history chart ----
     o += "<div class=\"card\"><div class=\"card-title\">Battery History</div>"
-         "<svg id=\"bat-chart\" viewBox=\"0 0 800 200\""
-         " style=\"width:100%;height:200px;display:block;background:var(--chart-bg);border-radius:4px\">"
+         "<svg id=\"bat-chart\" class=\"chart-svg\" viewBox=\"0 0 800 200\">"
          "<text x=\"50%\" y=\"50%\" fill=\"#444\" font-size=\"12\" font-family=\"monospace\""
          " text-anchor=\"middle\" dominant-baseline=\"middle\">Loading\xe2\x80\xa6</text>"
          "</svg></div>\n";
 
-    // ---- Two-column: Battery | Charger ----
     o += "<div class=\"col2\">\n";
 
     // Battery details
@@ -903,15 +911,12 @@ html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--gre
 
     o += "</div>\n"; // .col2
 
-    // ---- Charger history chart ----
     o += "<div class=\"card\"><div class=\"card-title\">Charger History</div>"
-         "<svg id=\"chg-chart\" viewBox=\"0 0 800 180\""
-         " style=\"width:100%;height:180px;display:block;background:var(--chart-bg);border-radius:4px\">"
+         "<svg id=\"chg-chart\" class=\"chart-svg\" viewBox=\"0 0 800 180\">"
          "<text x=\"50%\" y=\"50%\" fill=\"#444\" font-size=\"12\" font-family=\"monospace\""
          " text-anchor=\"middle\" dominant-baseline=\"middle\">Loading\xe2\x80\xa6</text>"
          "</svg></div>\n";
 
-    // ---- Cell voltages ----
     if (!s.cell_voltages_v.empty()) {
         o += "<div class=\"card\"><div class=\"card-title\">Cell Voltages";
         snprintf(buf, sizeof(buf), " <span style=\"color:#222;font-weight:400\">&Delta;&nbsp;%.0f mV</span>",
@@ -935,7 +940,6 @@ html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--gre
         o += "</div></div>\n";
     }
 
-    // ---- Protection alerts ----
     if (s.protection.any()) {
         o += "<div class=\"alert\"><b>Protection Active:</b>";
         if (s.protection.cell_overvoltage)      o += " Cell&nbsp;OV";
@@ -950,8 +954,7 @@ html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--gre
         o += "</div>\n";
     }
 
-    // ---- Help ----
-    o += R"(<details class="card"><summary>Help &mdash; field reference</summary>
+    o += R"(<details class="card"><summary>Help</summary>
 <table class="ht">
 <tr class="sec"><td colspan="2">Battery (BLE)</td></tr>
 <tr><td>Voltage</td><td>Total pack voltage (sum of all cells)</td></tr>
@@ -972,7 +975,6 @@ html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--gre
 </table></details>
 )";
 
-    // ---- Footer ----
     o += "<div class=\"footer\">API: "
          "<a href=\"/api/status\">/api/status</a> &nbsp;"
          "<a href=\"/api/cells\">/api/cells</a> &nbsp;"
@@ -981,7 +983,6 @@ html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--gre
          "<a href=\"/metrics\">/metrics</a> (Prometheus)"
          "</div>\n";
 
-    // ---- JavaScript: live data + client-side charts ----
     {
         char jshdr[96];
         std::snprintf(jshdr, sizeof(jshdr),
@@ -994,7 +995,6 @@ html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--gre
 function $(id){return document.getElementById(id)}
 function fmt(v,d){return(v==null||isNaN(+v))? '\u2014':(+v).toFixed(d)}
 
-// ---- Theme ----
 function initTheme(){
   var t=localStorage.getItem('lm-theme')
   if(!t) t=window.matchMedia('(prefers-color-scheme:light)').matches?'light':'dark'
@@ -1011,7 +1011,6 @@ function toggleTheme(){
 }
 initTheme()
 
-// ---- Live status updates ----
 function upBat(){fetch('/api/status').then(function(r){return r.json()}).then(function(d){
   if(!d.valid)return
   $('sv').textContent=fmt(d.voltage_v,2)
@@ -1069,7 +1068,6 @@ setInterval(function(){
   e.style.color=s>30?'var(--orange)':'var(--muted)'
 },1000)
 
-// ---- Time-range switching ----
 function switchRange(h){
   currentH=h
   history.replaceState(null,'','/?h='+h)
@@ -1079,7 +1077,6 @@ function switchRange(h){
   loadCharts()
 }
 
-// ---- Chart loading — requests filtered by timestamp ----
 function loadCharts(){
   var cutoff=Date.now()-currentH*3600000
   var batN=Math.round(currentH*3600/pollIvl*1.15)+50
@@ -1094,7 +1091,6 @@ function loadCharts(){
     .catch(function(){})
 }
 
-// ---- SVG time-axis ticks (uses CSS vars for theme-awareness) ----
 function timeTicks(t0,t1,tspan,pl,cw,chartTop,chartH,labelY){
   if(tspan<1000) return ''
   var ss=tspan/1000
@@ -1127,10 +1123,8 @@ function timeTicks(t0,t1,tspan,pl,cw,chartTop,chartH,labelY){
   return s
 }
 
-// ---- Moving average ----
 function sma(arr,w){return arr.map(function(_,i){var a=0,c=0;for(var j=Math.max(0,i-w+1);j<=i;j++){a+=arr[j];c++}return a/c})}
 
-// ---- Battery history chart ----
 function renderBatChart(data){
   var el=$('bat-chart'); if(!el) return
   if(!data||data.length<2){
@@ -1170,7 +1164,6 @@ function renderBatChart(data){
   el.innerHTML=s
 }
 
-// ---- Charger history chart ----
 function renderChgChart(data){
   var el=$('chg-chart'); if(!el) return
   if(!data||data.length<2){

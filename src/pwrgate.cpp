@@ -3,8 +3,6 @@
 
 namespace pwrgate {
 
-// Extract the double value after "KEY=" in line, skipping optional leading spaces.
-// e.g. "Sol= 0.04V" with key "Sol" → 0.04
 static double extract_d(const std::string& line, const std::string& key) {
     std::string pat = key + "=";
     size_t p = line.find(pat);
@@ -20,7 +18,6 @@ static int extract_i(const std::string& line, const std::string& key) {
     return static_cast<int>(extract_d(line, key));
 }
 
-// Return first non-whitespace word from s.
 static std::string first_word(const std::string& s) {
     size_t p = 0;
     while (p < s.size() && (s[p] == ' ' || s[p] == '\t')) ++p;

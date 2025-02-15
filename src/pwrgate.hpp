@@ -2,7 +2,7 @@
 #include <chrono>
 #include <string>
 
-// Snapshot of one EpicPowerGate 2 status tick (two serial lines).
+// EpicPowerGate 2 status snapshot
 struct PwrGateSnapshot {
     std::chrono::system_clock::time_point timestamp;
     bool valid{false};
@@ -23,10 +23,7 @@ struct PwrGateSnapshot {
 };
 
 namespace pwrgate {
-// Parse a matched pair of serial lines into snap.
-// Line 1 (status):  " Charging  PS=13.86V Bat=13.08V,  5.36A  Sol= 0.04V ..."
-// Line 2 (targets): "TargetV=14.59V  TargetI=10.00A   Stop= 0.15A  Temp=95  PSS=1"
-// Returns true on success.
+// parse status + target lines into snap
 bool parse(const std::string& status_line,
            const std::string& target_line,
            PwrGateSnapshot& snap);

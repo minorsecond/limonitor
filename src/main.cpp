@@ -151,7 +151,6 @@ static void print_usage(const char* prog) {
         "  " << prog << " -n JBD --demo\n";
 }
 
-// parse_args applies CLI flags on top of an existing Config (e.g. loaded from file).
 static Config parse_args(int argc, char** argv, Config cfg = {}) {
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];

@@ -2,7 +2,6 @@
 #include <algorithm>
 #include <chrono>
 
-// Minimum interval between updates to an already-known device entry.
 static constexpr int DISCOVERY_UPDATE_INTERVAL_S = 7;
 
 DataStore::DataStore(size_t max_history) : max_history_(max_history) {}

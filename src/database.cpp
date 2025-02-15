@@ -23,7 +23,7 @@ bool Database::exec(const char* sql) {
 }
 
 bool Database::open() {
-    // Ensure parent directory exists
+    // mkdir -p parent
     try {
         auto parent = std::filesystem::path(path_).parent_path();
         if (!parent.empty())
