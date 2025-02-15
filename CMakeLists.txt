@@ -67,9 +67,6 @@ endif()
 
 install(TARGETS limonitor RUNTIME DESTINATION bin)
 
-# ---------------------------------------------------------------------------
-# Integration test binary
-# ---------------------------------------------------------------------------
 set(ITEST_SOURCES
     tests/integration_test.cpp
     src/logger.cpp

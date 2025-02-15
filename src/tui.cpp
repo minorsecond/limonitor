@@ -15,9 +15,6 @@ TUI::~TUI() { stop(); }
 void TUI::stop() { running_ = false; }
 void TUI::set_connect_callback(std::function<void(const std::string&)> cb) { connect_cb_ = std::move(cb); }
 
-// ---------------------------------------------------------------------------
-// Plain-terminal fallback
-// ---------------------------------------------------------------------------
 void TUI::print_snap(const BatterySnapshot& snap, const std::string& ble_st) {
     if (!snap.valid) {
         std::printf("[limonitor] BLE: %-16s  (no data yet)\n", ble_st.c_str());
@@ -50,9 +47,6 @@ void TUI::run_plain() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// ncurses TUI
-// ---------------------------------------------------------------------------
 #ifdef HAVE_NCURSES
 
 enum { C_NORMAL=0, C_GREEN, C_YELLOW, C_RED, C_CYAN, C_HEADER, C_LOG_WARN, C_LOG_ERR };
@@ -306,9 +300,6 @@ void TUI::draw(const BatterySnapshot& snap, const std::string& ble_st,
     refresh();
 }
 
-// ---------------------------------------------------------------------------
-// Device picker screen
-// ---------------------------------------------------------------------------
 void TUI::draw_picker(const std::vector<DiscoveredDevice>& devs, const std::string& ble_st) {
     int rows, cols;
     getmaxyx(stdscr, rows, cols);

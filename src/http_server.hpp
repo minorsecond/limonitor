@@ -15,7 +15,8 @@
 //   GET /metrics        Prometheus text format
 class HttpServer {
 public:
-    HttpServer(DataStore& store, const std::string& bind_addr, uint16_t port);
+    HttpServer(DataStore& store, const std::string& bind_addr, uint16_t port,
+               int poll_interval_s = 5);
     ~HttpServer();
 
     bool start();
@@ -28,6 +29,7 @@ private:
     std::string  bind_addr_;
     uint16_t     port_;
     int          listen_fd_{-1};
+    int          poll_interval_s_{5};
     std::atomic<bool> running_{false};
     std::thread  thread_;
 
@@ -42,10 +44,12 @@ private:
     static std::string svg_history_chart(const std::vector<BatterySnapshot>& hist);
     static std::string svg_charger_chart(const std::vector<PwrGateSnapshot>& hist);
     static std::string charger_json(const PwrGateSnapshot& pg);
+    static std::string charger_history_json(const std::vector<PwrGateSnapshot>& snaps);
     static std::string html_dashboard(const BatterySnapshot& s, const std::string& ble_state,
-                                      const std::vector<BatterySnapshot>& hist,
                                       const PwrGateSnapshot& pg,
-                                      const std::vector<PwrGateSnapshot>& pg_hist);
+                                      const std::string& purchase_date,
+                                      double hours,
+                                      int poll_interval_s);
 
     static void send_response(int fd, int code, const char* content_type, const std::string& body);
 };

@@ -25,9 +25,6 @@ void PwrGateClient::stop() {
     if (thread_.joinable()) thread_.join();
 }
 
-// ---------------------------------------------------------------------------
-// Simple blocking HTTP/1.0 GET — no external library required.
-// ---------------------------------------------------------------------------
 std::string PwrGateClient::http_get(const std::string& path) {
     struct addrinfo hints{}, *res = nullptr;
     hints.ai_family   = AF_UNSPEC;
@@ -75,9 +72,6 @@ std::string PwrGateClient::http_get(const std::string& path) {
     return resp.substr(pos + 4);
 }
 
-// ---------------------------------------------------------------------------
-// Minimal JSON parser — matches the exact output of charger_json()
-// ---------------------------------------------------------------------------
 static double jval_d(const std::string& body, const std::string& key) {
     // Matches both `"key": 1.23` and `"key":1.23`
     for (auto sep : {"\": ", "\":"}) {
@@ -131,9 +125,6 @@ bool PwrGateClient::parse_json(const std::string& body, PwrGateSnapshot& snap) {
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Poll loop
-// ---------------------------------------------------------------------------
 void PwrGateClient::poll_loop() {
     while (running_) {
         std::string body = http_get("/api/charger");

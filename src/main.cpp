@@ -25,18 +25,10 @@
 // Exposed to ble_manager.cpp for poll interval
 int g_poll_interval_s = 5;
 
-// ---------------------------------------------------------------------------
-// Signal handling
-// ---------------------------------------------------------------------------
 static std::atomic<bool> g_quit{false};
 static void sig_handler(int) { g_quit = true; }
 
-// ---------------------------------------------------------------------------
-// Argument parsing
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
 // Config file support
-// ---------------------------------------------------------------------------
 static std::string default_config_path() {
 #ifdef __APPLE__
     const char* home = std::getenv("HOME");
@@ -112,9 +104,6 @@ static void load_config_file(const std::string& path, Config& cfg) {
     std::fclose(f);
 }
 
-// ---------------------------------------------------------------------------
-// Argument parsing
-// ---------------------------------------------------------------------------
 static void print_usage(const char* prog) {
     std::cerr <<
         "Usage: " << prog << " [OPTIONS]\n"
@@ -197,9 +186,6 @@ static Config parse_args(int argc, char** argv, Config cfg = {}) {
     return cfg;
 }
 
-// ---------------------------------------------------------------------------
-// Demo mode: synthesize realistic battery data
-// ---------------------------------------------------------------------------
 static void run_demo(DataStore& store, int interval_s) {
     LOG_INFO("Demo mode: generating synthetic battery data");
     double soc = 85.0;   // starting SoC %
@@ -257,9 +243,6 @@ static void run_demo(DataStore& store, int interval_s) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
     // Determine config file path (--config can appear anywhere in argv)
     std::string config_path = default_config_path();
