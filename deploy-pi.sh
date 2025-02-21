@@ -18,13 +18,18 @@ echo "=== build ==="
 mkdir -p build
 cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j$(nproc)
+make -j$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
 cd ..
 
 echo "=== install ==="
 sudo cmake --install build
 
 echo "=== systemd ==="
+if [[ "$(uname -s)" != "Linux" ]]; then
+  echo "skipping systemd (not Linux) — run manually: limonitor --daemon --config /path/to/limonitor.conf"
+  echo "done."
+  exit 0
+fi
 sudo mkdir -p /etc/limonitor
 if [[ ! -f "$CONFIG_PATH" ]]; then
   sudo tee "$CONFIG_PATH" > /dev/null << EOF
