@@ -50,7 +50,23 @@ bool Database::open() {
 
 void Database::close() {
     std::lock_guard<std::mutex> lk(mu_);
-    if (db_) { sqlite3_close(db_handle(db_)); db_ = nullptr; }
+    if (db_) {
+        int rc = sqlite3_wal_checkpoint_v2(db_handle(db_), nullptr,
+                                           SQLITE_CHECKPOINT_PASSIVE, nullptr, nullptr);
+        if (rc != SQLITE_OK && rc != SQLITE_BUSY)
+            LOG_WARN("DB: checkpoint: %s", sqlite3_errmsg(db_handle(db_)));
+        sqlite3_close(db_handle(db_));
+        db_ = nullptr;
+    }
+}
+
+void Database::checkpoint() {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return;
+    int rc = sqlite3_wal_checkpoint_v2(db_handle(db_), nullptr,
+                                       SQLITE_CHECKPOINT_PASSIVE, nullptr, nullptr);
+    if (rc != SQLITE_OK && rc != SQLITE_BUSY)
+        LOG_WARN("DB: checkpoint: %s", sqlite3_errmsg(db_handle(db_)));
 }
 
 bool Database::is_open() const {

@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <filesystem>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -270,8 +271,11 @@ int main(int argc, char** argv) {
     if (!cfg.battery_purchased.empty())
         store.set_purchase_date(cfg.battery_purchased);
 
-    // SQLite database
+    // SQLite database — resolve to absolute path (systemd may have different cwd)
     std::string dbpath = cfg.db_path.empty() ? Database::default_path() : cfg.db_path;
+    try {
+        dbpath = std::filesystem::absolute(dbpath).string();
+    } catch (...) {}
     auto db = std::make_shared<Database>(dbpath);
     if (db->open()) {
         // Pre-populate history rings BEFORE registering the observer (avoids re-inserting)
@@ -421,8 +425,17 @@ int main(int argc, char** argv) {
     // TUI — blocks until 'q' or signal
     if (cfg.daemon_mode) {
         LOG_INFO("Daemon mode: running headless (HTTP on port %d)", cfg.http_port);
-        while (!g_quit)
+        auto last_checkpoint = std::chrono::steady_clock::now();
+        while (!g_quit) {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            if (db && db->is_open()) {
+                auto now = std::chrono::steady_clock::now();
+                if (std::chrono::duration_cast<std::chrono::minutes>(now - last_checkpoint).count() >= 5) {
+                    db->checkpoint();
+                    last_checkpoint = now;
+                }
+            }
+        }
     } else {
         TUI tui(store, cfg.http_port);
         if (ble) {
