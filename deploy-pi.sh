@@ -7,7 +7,8 @@ REPO="$(cd "$(dirname "$0")" && pwd)"
 cd "$REPO"
 
 # Config: edit these for your setup
-SVC_USER="${LIMONITOR_USER:-pi}"
+# Default: run as deploying user so DB path matches (avoids pi vs rwardrup mismatch)
+SVC_USER="${LIMONITOR_USER:-${SUDO_USER:-$USER}}"
 HTTP_PORT="${LIMONITOR_PORT:-8080}"
 CONFIG_PATH="/etc/limonitor/limonitor.conf"
 
@@ -32,11 +33,13 @@ if [[ "$(uname -s)" != "Linux" ]]; then
 fi
 sudo mkdir -p /etc/limonitor
 if [[ ! -f "$CONFIG_PATH" ]]; then
+  DB_PATH="/home/$SVC_USER/.local/share/limonitor/limonitor.db"
   sudo tee "$CONFIG_PATH" > /dev/null << EOF
 # limonitor config — edit for your setup
 daemon=true
 http_port=$HTTP_PORT
 verbose=false
+db_path=$DB_PATH
 
 # BLE: set device_name or device_address to target a battery
 # device_name=L-12100BNNA70
@@ -76,3 +79,5 @@ sudo systemctl start limonitor
 
 echo "done. status: sudo systemctl status limonitor"
 echo "logs: sudo journalctl -u limonitor -f"
+echo ""
+echo "If DB not updating: ensure User=$SVC_USER matches your login and db_path in config"

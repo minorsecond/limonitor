@@ -18,6 +18,9 @@ public:
     void insert_battery(const BatterySnapshot& s);
     void insert_charger(const PwrGateSnapshot& p);
 
+    // Checkpoint WAL into main db (updates main file mtime; normally writes go to -wal).
+    void checkpoint();
+
     // Load historical rows (oldest first) to pre-populate DataStore on startup.
     std::vector<BatterySnapshot>  load_battery_history(size_t n = 2880) const;
     std::vector<PwrGateSnapshot>  load_charger_history(size_t n = 2880) const;
