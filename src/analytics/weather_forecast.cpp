@@ -1,4 +1,6 @@
 #include "weather_forecast.hpp"
+#include "../database.hpp"
+#include "../logger.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -6,16 +8,65 @@
 #include <cstring>
 #include <ctime>
 #include <map>
+#include <set>
 #include <sstream>
 
 #ifdef HAVE_LIBCURL
 #include <curl/curl.h>
 #endif
 
-WeatherForecast::WeatherForecast(const WeatherConfig& cfg) : cfg_(cfg) {}
+WeatherForecast::WeatherForecast(const WeatherConfig& cfg, Database* db)
+    : cfg_(cfg), db_(db)
+{
+    if (db_) {
+        auto json_3h = db_->load_weather_cache("forecast_3h", DB_CACHE_MAX_AGE);
+        if (!json_3h.empty()) {
+            cached_json_ = std::move(json_3h);
+            cache_time_ = std::chrono::steady_clock::now() - std::chrono::seconds(CACHE_SEC / 2);
+            LOG_INFO("Weather: loaded 3h forecast from DB cache");
+        }
+        auto json_daily = db_->load_weather_cache("forecast_daily", DB_CACHE_MAX_AGE);
+        if (!json_daily.empty()) {
+            cached_daily_json_ = std::move(json_daily);
+            cache_daily_time_ = std::chrono::steady_clock::now() - std::chrono::seconds(CACHE_SEC / 2);
+            LOG_INFO("Weather: loaded daily forecast from DB cache");
+        }
+    }
+}
 
 void WeatherForecast::set_config(const WeatherConfig& cfg) {
     cfg_ = cfg;
+}
+
+void WeatherForecast::invalidate_cache() const {
+    cached_json_.clear();
+    cached_daily_json_.clear();
+    cache_time_ = {};
+    cache_daily_time_ = {};
+    LOG_INFO("Weather: cache invalidated, next request will fetch fresh data");
+}
+
+double WeatherForecast::current_cloud_cover() const {
+    if (cached_json_.empty()) return -1;
+    std::vector<std::tuple<int64_t, double, bool>> slots;
+    parse_forecast_list(cached_json_, slots);
+    if (slots.empty()) return -1;
+
+    auto now = std::time(nullptr);
+    int64_t best_dt = 0;
+    double best_cloud = -1;
+    int64_t best_diff = INT64_MAX;
+    for (const auto& [dt, cloud, daytime] : slots) {
+        int64_t diff = std::abs(dt - now);
+        if (diff < best_diff) {
+            best_diff = diff;
+            best_dt = dt;
+            best_cloud = cloud;
+        }
+    }
+    if (best_diff > 7200) return -1;
+    (void)best_dt;
+    return best_cloud;
 }
 
 #ifdef HAVE_LIBCURL
@@ -49,10 +100,47 @@ std::string WeatherForecast::fetch_api() const {
     CURLcode res = curl_easy_perform(curl);
     curl_easy_cleanup(curl);
 
-    if (res != CURLE_OK) return {};
+    if (res != CURLE_OK) {
+        LOG_WARN("Weather API fetch failed: %s", curl_easy_strerror(res));
+        return {};
+    }
+    LOG_DEBUG("Weather API fetch OK (%zu bytes)", body.size());
     return body;
 #else
     (void)cfg_;
+    return {};
+#endif
+}
+
+std::string WeatherForecast::fetch_daily_api() const {
+#ifdef HAVE_LIBCURL
+    if (cfg_.api_key.empty() || cfg_.zip_code.empty()) return {};
+
+    CURL* curl = curl_easy_init();
+    if (!curl) return {};
+
+    char url[320];
+    std::snprintf(url, sizeof(url),
+        "https://api.openweathermap.org/data/2.5/forecast/daily?zip=%s,US&cnt=16&appid=%s&units=metric",
+        cfg_.zip_code.c_str(), cfg_.api_key.c_str());
+
+    std::string body;
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+
+    CURLcode res = curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK) {
+        LOG_WARN("Weather daily API fetch failed: %s", curl_easy_strerror(res));
+        return {};
+    }
+    LOG_DEBUG("Weather daily API fetch OK (%zu bytes)", body.size());
+    return body;
+#else
     return {};
 #endif
 }
@@ -99,13 +187,99 @@ void WeatherForecast::parse_forecast_list(const std::string& json,
     }
 }
 
+std::vector<WeatherForecast::DailyEntry> WeatherForecast::parse_daily_entries(const std::string& json) {
+    std::vector<DailyEntry> entries;
+    if (json.empty()) return entries;
+
+    size_t pos = 0;
+    while ((pos = json.find("\"dt\":", pos)) != std::string::npos) {
+        pos += 5;
+        DailyEntry e;
+        if (std::sscanf(json.c_str() + pos, "%lld", (long long*)&e.dt) != 1) {
+            ++pos;
+            continue;
+        }
+
+        auto next_dt = json.find("\"dt\":", pos);
+        size_t entry_end = (next_dt != std::string::npos) ? next_dt : json.size();
+
+        // Cloud cover
+        e.cloud_cover = 0.5; // default
+        {
+            auto cp = json.find("\"clouds\":", pos);
+            if (cp != std::string::npos && cp < entry_end) {
+                size_t vstart = cp + 9;
+                while (vstart < json.size() &&
+                       (json[vstart] == ' ' || json[vstart] == '\t'))
+                    ++vstart;
+                if (vstart < json.size() && json[vstart] == '{') {
+                    auto all_pos = json.find("\"all\":", vstart);
+                    if (all_pos != std::string::npos && all_pos < vstart + 30) {
+                        double cv = 0;
+                        if (std::sscanf(json.c_str() + all_pos + 6, "%lf", &cv) == 1)
+                            e.cloud_cover = cv / 100.0;
+                    }
+                } else {
+                    double cv = 0;
+                    if (std::sscanf(json.c_str() + vstart, "%lf", &cv) == 1)
+                        e.cloud_cover = cv / 100.0;
+                }
+            }
+        }
+
+        // Sunrise / sunset
+        e.daylight_h = 12.0;
+        {
+            auto sr = json.find("\"sunrise\":", pos);
+            auto ss = json.find("\"sunset\":", pos);
+            if (sr != std::string::npos && sr < entry_end &&
+                ss != std::string::npos && ss < entry_end) {
+                std::sscanf(json.c_str() + sr + 10, "%lld", (long long*)&e.sunrise);
+                std::sscanf(json.c_str() + ss + 9, "%lld", (long long*)&e.sunset);
+                if (e.sunrise > 0 && e.sunset > e.sunrise) {
+                    e.daylight_h = (e.sunset - e.sunrise) / 3600.0;
+                    if (e.daylight_h > 18.0) e.daylight_h = 18.0;
+                    if (e.daylight_h < 4.0) e.daylight_h = 4.0;
+                }
+            }
+        }
+
+        entries.push_back(e);
+        ++pos;
+    }
+    return entries;
+}
+
+static double acceptance_at_soc(const std::vector<ChargeAcceptanceBucket>* profile, double soc_pct) {
+    if (!profile || profile->empty()) return 1.0;
+    int bucket = static_cast<int>(soc_pct / 10.0);
+    if (bucket < 0) bucket = 0;
+    if (bucket > 9) bucket = 9;
+    const auto& b = (*profile)[bucket];
+    if (b.sample_count < 3) {
+        // Not enough data for this bucket - try neighbors
+        for (int delta = 1; delta <= 4; ++delta) {
+            if (bucket - delta >= 0 && (*profile)[bucket - delta].sample_count >= 3)
+                return (*profile)[bucket - delta].acceptance_ratio;
+            if (bucket + delta <= 9 && (*profile)[bucket + delta].sample_count >= 3)
+                return (*profile)[bucket + delta].acceptance_ratio;
+        }
+        return 1.0; // no data at all
+    }
+    return b.acceptance_ratio;
+}
+
 SolarForecastWeekResult WeatherForecast::get_forecast_week(double panel_watts, double efficiency,
                                                           double max_charge_a, double battery_voltage,
-                                                          double nominal_ah, double current_soc_pct) const {
+                                                          double nominal_ah, double current_soc_pct,
+                                                          const std::vector<ChargeAcceptanceBucket>* charge_profile) const {
     SolarForecastWeekResult r;
+    bool realistic = charge_profile && !charge_profile->empty();
+    r.realistic = realistic;
 
 #ifdef HAVE_LIBCURL
     if (cfg_.api_key.empty()) {
+        LOG_WARN("Solar forecast: Weather API key not configured");
         r.error = "Weather API key not configured";
         return r;
     }
@@ -113,21 +287,28 @@ SolarForecastWeekResult WeatherForecast::get_forecast_week(double panel_watts, d
     auto now = std::chrono::steady_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - cache_time_).count();
     if (cached_json_.empty() || elapsed > CACHE_SEC) {
-        cached_json_ = fetch_api();
-        cache_time_ = now;
+        std::string fresh = fetch_api();
+        if (!fresh.empty()) {
+            cached_json_ = fresh;
+            cache_time_ = now;
+            if (db_) db_->save_weather_cache("forecast_3h", fresh);
+        }
     }
 
     if (cached_json_.empty()) {
+        LOG_WARN("Solar forecast: Failed to fetch weather (check network/API)");
         r.error = "Failed to fetch weather";
         return r;
     }
     if (cached_json_.find("\"cod\":401") != std::string::npos ||
         cached_json_.find("\"cod\":\"401\"") != std::string::npos) {
+        LOG_WARN("Solar forecast: Invalid weather API key");
         r.error = "Invalid weather API key";
         return r;
     }
     if (cached_json_.find("\"cod\":404") != std::string::npos ||
         cached_json_.find("\"cod\":\"404\"") != std::string::npos) {
+        LOG_WARN("Solar forecast: Zip code not found: %s", cfg_.zip_code.c_str());
         r.error = "Zip code not found";
         return r;
     }
@@ -135,6 +316,7 @@ SolarForecastWeekResult WeatherForecast::get_forecast_week(double panel_watts, d
     std::vector<std::tuple<int64_t, double, bool>> slots;
     parse_forecast_list(cached_json_, slots);
     if (slots.empty()) {
+        LOG_WARN("Solar forecast: No forecast data in API response");
         r.error = "No forecast data";
         return r;
     }
@@ -145,11 +327,46 @@ SolarForecastWeekResult WeatherForecast::get_forecast_week(double panel_watts, d
     double max_charge_w = max_a * v;
     double energy_to_full = (100.0 - current_soc_pct) / 100.0 * cap_ah * v;
 
-    // Group by day (local date). Each slot is 3 hours. Peak sun ~6h/day.
-    // kWh per 3h slot = panel_watts * 3 * efficiency * (1-cloud) / 1000
+    r.nominal_ah = cap_ah;
+    r.battery_voltage = v;
+
+    double cap_wh_total = cap_ah * v;
+    double projected_soc = current_soc_pct; // tracks SoC across slots for realistic mode
+
     std::map<int, std::vector<std::tuple<int64_t, double, bool>>> by_day;
     for (const auto& t : slots) {
         int64_t dt = std::get<0>(t);
+        double cloud = std::get<1>(t);
+        bool daytime = std::get<2>(t);
+
+        SolarForecastSlot s;
+        s.timestamp = dt;
+        s.cloud_cover = cloud;
+        s.daytime = daytime;
+        if (daytime) {
+            double slot_kwh = panel_watts * 3.0 * efficiency * (1.0 - cloud) / 1000.0;
+            slot_kwh = std::min(slot_kwh, max_charge_w * 3.0 / 1000.0);
+
+            if (realistic) {
+                double ar = acceptance_at_soc(charge_profile, projected_soc);
+                slot_kwh *= ar;
+            }
+
+            double cv = 0.10 + 0.10 * cloud;
+            double margin = 1.96 * cv;
+            s.kwh = slot_kwh;
+            s.kwh_lo = slot_kwh * std::max(0.0, 1.0 - margin);
+            s.kwh_hi = slot_kwh * (1.0 + margin);
+
+            // Advance projected SoC for next slot
+            if (realistic && cap_wh_total > 0) {
+                double wh_added = slot_kwh * 1000.0;
+                projected_soc += (wh_added / cap_wh_total) * 100.0;
+                if (projected_soc > 100.0) projected_soc = 100.0;
+            }
+        }
+        r.slots.push_back(s);
+
         time_t tt = static_cast<time_t>(dt);
         struct tm tm_buf{};
         localtime_r(&tt, &tm_buf);
@@ -159,6 +376,7 @@ SolarForecastWeekResult WeatherForecast::get_forecast_week(double panel_watts, d
 
     double week_total = 0;
     double best_day_kwh = 0;
+    double daily_projected_soc = current_soc_pct;
 
     for (const auto& kv : by_day) {
         DailySolarForecast d;
@@ -184,10 +402,18 @@ SolarForecastWeekResult WeatherForecast::get_forecast_week(double panel_watts, d
             double slot_kwh = panel_watts * 3.0 * efficiency * (1.0 - cloud) / 1000.0;
             if (daytime) {
                 slot_kwh = std::min(slot_kwh, max_charge_w * 3.0 / 1000.0);
+                if (realistic) {
+                    double ar = acceptance_at_soc(charge_profile, daily_projected_soc);
+                    slot_kwh *= ar;
+                }
                 day_kwh += slot_kwh;
                 cloud_sum += cloud;
                 ++cloud_n;
                 sun_hours += 3.0 * (1.0 - cloud);
+                if (realistic && cap_wh_total > 0) {
+                    daily_projected_soc += (slot_kwh * 1000.0 / cap_wh_total) * 100.0;
+                    if (daily_projected_soc > 100.0) daily_projected_soc = 100.0;
+                }
             }
             if (daytime && cloud < 0.5) {
                 if (opt_start_idx < 0) opt_start_idx = static_cast<int>(i);
@@ -257,6 +483,109 @@ SolarForecastWeekResult WeatherForecast::get_forecast_week(double panel_watts, d
     r.recovery_wh = week_total * 1000.0;
     r.valid = true;
 
+    auto now_ext = std::chrono::steady_clock::now();
+    auto elapsed_ext = std::chrono::duration_cast<std::chrono::seconds>(now_ext - cache_daily_time_).count();
+    if (elapsed_ext > CACHE_SEC) {
+        std::string fresh_daily = fetch_daily_api();
+        if (!fresh_daily.empty() && fresh_daily.find("\"cod\":401") == std::string::npos &&
+            fresh_daily.find("\"cod\":404") == std::string::npos) {
+            cached_daily_json_ = fresh_daily;
+            cache_daily_time_ = now_ext;
+            if (db_) db_->save_weather_cache("forecast_daily", fresh_daily);
+        }
+    }
+    if (!cached_daily_json_.empty()) {
+        std::set<std::string> existing_dates;
+        for (const auto& d : r.daily) existing_dates.insert(d.date);
+
+        auto daily_entries = parse_daily_entries(cached_daily_json_);
+        LOG_DEBUG("Extended forecast: parsed %zu entries from daily API JSON (%zu bytes)",
+                  daily_entries.size(), cached_daily_json_.size());
+        for (const auto& de : daily_entries) {
+            time_t tt = static_cast<time_t>(de.dt);
+            struct tm tm_buf{};
+            localtime_r(&tt, &tm_buf);
+            char date_buf[16];
+            std::snprintf(date_buf, sizeof(date_buf), "%04d-%02d-%02d",
+                          tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday);
+            if (existing_dates.count(date_buf)) {
+                LOG_DEBUG("  %s: skipped (from 3h forecast), api_cloud=%.0f%%",
+                          date_buf, de.cloud_cover * 100.0);
+                continue;
+            }
+            existing_dates.insert(date_buf);
+
+            double cloud = de.cloud_cover;
+            double daylight_h = de.daylight_h;
+            LOG_DEBUG("  %s: cloud=%.0f%% daylight=%.1fh (extended)", date_buf, cloud * 100.0, daylight_h);
+
+            DailySolarForecast ext;
+            ext.date = date_buf;
+            ext.cloud_cover = cloud;
+            double sun_h = daylight_h * (1.0 - cloud);
+            ext.sun_hours_effective = sun_h;
+            double day_kwh = panel_watts * daylight_h * efficiency * (1.0 - cloud) / 1000.0;
+            day_kwh = std::min(day_kwh, max_charge_w * daylight_h / 1000.0);
+            if (realistic) {
+                double total_ar = 0;
+                int n_sub = 3;
+                for (int ss = 0; ss < n_sub; ++ss) {
+                    double sub_soc = daily_projected_soc + (ss * day_kwh * 1000.0 / (n_sub * cap_wh_total)) * 100.0;
+                    if (sub_soc > 100) sub_soc = 100;
+                    total_ar += acceptance_at_soc(charge_profile, sub_soc);
+                }
+                day_kwh *= total_ar / n_sub;
+                if (cap_wh_total > 0) {
+                    daily_projected_soc += (day_kwh * 1000.0 / cap_wh_total) * 100.0;
+                    if (daily_projected_soc > 100) daily_projected_soc = 100;
+                }
+            }
+            ext.kwh = day_kwh;
+            if (cloud < 0.7 && de.sunrise > 0 && de.sunset > de.sunrise) {
+                // Estimate optimal window from sunrise/sunset for partly-cloudy extended days
+                time_t sr_t = static_cast<time_t>(de.sunrise);
+                time_t ss_t = static_cast<time_t>(de.sunset);
+                struct tm sr_tm{}, ss_tm{};
+                localtime_r(&sr_t, &sr_tm);
+                localtime_r(&ss_t, &ss_tm);
+                char tbuf[16];
+                std::snprintf(tbuf, sizeof(tbuf), "%02d:%02d", sr_tm.tm_hour, sr_tm.tm_min);
+                ext.optimal_start = tbuf;
+                std::snprintf(tbuf, sizeof(tbuf), "%02d:%02d", ss_tm.tm_hour, ss_tm.tm_min);
+                ext.optimal_end = tbuf;
+                ext.optimal_reason = "";
+            } else {
+                ext.optimal_start = "—";
+                ext.optimal_end = "—";
+                ext.optimal_reason = cloud >= 0.9 ? "Overcast" : "Mostly cloudy";
+            }
+            ext.is_extended = true;
+            double day_wh = day_kwh * 1000.0;
+            double headroom_pct = std::max(0.0, 100.0 - current_soc_pct);
+            double cv = 0.10 + 0.10 * ext.cloud_cover;
+            double margin = 1.96 * cv;
+            double mult_lo = std::max(0.0, 1.0 - margin), mult_hi = 1.0 + margin;
+            ext.max_recovery_wh = day_wh;
+            ext.max_recovery_wh_lo = day_wh * mult_lo;
+            ext.max_recovery_wh_hi = day_wh * mult_hi;
+            ext.max_recovery_ah = cap_ah > 0 ? day_wh / v : 0;
+            ext.max_recovery_ah_lo = cap_ah > 0 ? (day_wh * mult_lo) / v : 0;
+            ext.max_recovery_ah_hi = cap_ah > 0 ? (day_wh * mult_hi) / v : 0;
+            double ext_cap_wh = cap_ah * v;
+            ext.max_recovery_pct = ext_cap_wh > 0 ? std::min(headroom_pct, (day_wh / ext_cap_wh) * 100.0) : 0;
+            ext.max_recovery_pct_lo = ext_cap_wh > 0 ? std::max(0.0, std::min(headroom_pct, (day_wh * mult_lo / ext_cap_wh) * 100.0)) : 0;
+            ext.max_recovery_pct_hi = ext_cap_wh > 0 ? std::min(headroom_pct, (day_wh * mult_hi / ext_cap_wh) * 100.0) : 0;
+            r.daily.push_back(ext);
+            week_total += day_kwh;
+            r.week_total_kwh = week_total;
+            r.recovery_wh = week_total * 1000.0;
+            if (day_kwh > best_day_kwh) {
+                best_day_kwh = day_kwh;
+                r.best_day = ext.date;
+            }
+        }
+    }
+
     double cumul = 0;
     for (const auto& d : r.daily) {
         cumul += d.kwh * 1000.0;
@@ -267,6 +596,18 @@ SolarForecastWeekResult WeatherForecast::get_forecast_week(double panel_watts, d
     if (r.days_to_full == 0 && week_total > 0)
         r.days_to_full = static_cast<int>(r.daily.size());
 
+    if (db_) {
+        for (const auto& d : r.daily) {
+            Database::WeatherDailyRow row;
+            row.date = d.date;
+            row.cloud_cover = d.cloud_cover;
+            row.kwh_forecast = d.kwh;
+            row.sun_hours = d.sun_hours_effective;
+            row.source = d.is_extended ? "daily" : "3h";
+            db_->upsert_weather_daily(row);
+        }
+    }
+
 #else
     (void)panel_watts;
     (void)efficiency;
@@ -274,6 +615,7 @@ SolarForecastWeekResult WeatherForecast::get_forecast_week(double panel_watts, d
     (void)battery_voltage;
     (void)nominal_ah;
     (void)current_soc_pct;
+    (void)charge_profile;
     r.error = "Weather API not available (build without libcurl)";
 #endif
     return r;
@@ -293,8 +635,12 @@ WeatherForecastResult WeatherForecast::get_forecast(double panel_watts, double e
     auto now = std::chrono::steady_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - cache_time_).count();
     if (cached_json_.empty() || elapsed > CACHE_SEC) {
-        cached_json_ = fetch_api();
-        cache_time_ = now;
+        std::string fresh = fetch_api();
+        if (!fresh.empty()) {
+            cached_json_ = fresh;
+            cache_time_ = now;
+            if (db_) db_->save_weather_cache("forecast_3h", fresh);
+        }
     }
 
     if (cached_json_.empty()) {
@@ -302,7 +648,6 @@ WeatherForecastResult WeatherForecast::get_forecast(double panel_watts, double e
         return r;
     }
 
-    // Check for API errors (401 invalid key, 404 city not found, etc.)
     if (cached_json_.find("\"cod\":401") != std::string::npos ||
         cached_json_.find("\"cod\":\"401\"") != std::string::npos) {
         r.error = "Invalid weather API key";
@@ -332,7 +677,6 @@ WeatherForecastResult WeatherForecast::get_forecast(double panel_watts, double e
 
     double wh = panel_watts * psh_tomorrow * efficiency * (1.0 - cloud);
 
-    // Cap by charger capacity when available
     double max_a = max_charge_a > 0 ? max_charge_a : 10.0;
     double v = battery_voltage > 1 ? battery_voltage : 51.2;
     double cap_ah = nominal_ah > 0 ? nominal_ah : 100.0;
@@ -344,7 +688,6 @@ WeatherForecastResult WeatherForecast::get_forecast(double panel_watts, double e
     r.tomorrow_generation_wh = effective_wh;
     r.cloud_cover = cloud;
 
-    // Projection based on energy needed to reach 100%
     double energy_to_full = (100.0 - current_soc_pct) / 100.0 * cap_ah * v;
     if (effective_wh >= energy_to_full && current_soc_pct > 20)
         r.expected_battery_state = "100%";
