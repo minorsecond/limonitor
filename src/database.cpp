@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <filesystem>
+#include <map>
 #include <sqlite3.h>
 
 static inline sqlite3* db_handle(void* p) { return static_cast<sqlite3*>(p); }
@@ -116,7 +118,121 @@ bool Database::migrate() {
         "  pss    INTEGER"
         ");"
         "CREATE INDEX IF NOT EXISTS chg_ts ON charger_readings(ts);"
+
+        "CREATE TABLE IF NOT EXISTS system_events ("
+        "  id   INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  ts   INTEGER NOT NULL,"
+        "  msg  TEXT NOT NULL"
+        ");"
+        "CREATE INDEX IF NOT EXISTS ev_ts ON system_events(ts);"
+
+        "CREATE TABLE IF NOT EXISTS settings ("
+        "  key   TEXT PRIMARY KEY,"
+        "  value TEXT NOT NULL"
+        ");"
+
+        "CREATE TABLE IF NOT EXISTS weather_cache ("
+        "  key        TEXT PRIMARY KEY,"  // 'forecast_3h' or 'forecast_daily'
+        "  json_data  TEXT NOT NULL,"
+        "  fetched_at INTEGER NOT NULL"   // Unix timestamp when fetched from API
+        ");"
+
+        "CREATE TABLE IF NOT EXISTS solar_performance ("
+        "  id           INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  ts           INTEGER NOT NULL,"
+        "  cloud_cover  REAL,"
+        "  actual_w     REAL,"
+        "  theoretical_w REAL,"
+        "  coefficient  REAL,"
+        "  sol_v        REAL,"
+        "  bat_v        REAL,"
+        "  bat_a        REAL,"
+        "  soc          REAL"
+        ");"
+        "CREATE INDEX IF NOT EXISTS sp_ts ON solar_performance(ts);"
+
+        "CREATE TABLE IF NOT EXISTS weather_daily ("
+        "  date        TEXT PRIMARY KEY,"  // YYYY-MM-DD
+        "  cloud_cover REAL,"              // 0-1
+        "  kwh_forecast REAL,"             // forecasted kWh generation
+        "  sun_hours   REAL,"              // effective sun hours
+        "  source      TEXT,"              // '3h', 'daily', or 'observed'
+        "  updated_at  INTEGER NOT NULL"   // last update timestamp
+        ");"
     );
+}
+
+static std::string settings_file_path(const std::string& db_path) {
+    auto p = std::filesystem::path(db_path);
+    return (p.parent_path() / "settings.txt").string();
+}
+
+static std::string read_setting_from_file(const std::string& path, const std::string& key) {
+    std::ifstream f(path);
+    if (!f) return {};
+    std::string line, prefix = key + "=";
+    while (std::getline(f, line)) {
+        if (line.size() > prefix.size() && line.compare(0, prefix.size(), prefix) == 0)
+            return line.substr(prefix.size());
+    }
+    return {};
+}
+
+static void write_setting_to_file(const std::string& path, const std::string& key,
+                                  const std::string& value) {
+    std::map<std::string, std::string> m;
+    std::ifstream in(path);
+    if (in) {
+        std::string line;
+        while (std::getline(in, line)) {
+            auto eq = line.find('=');
+            if (eq != std::string::npos)
+                m[line.substr(0, eq)] = line.substr(eq + 1);
+        }
+    }
+    m[key] = value;
+    try {
+        std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+    } catch (...) {}
+    std::ofstream out(path);
+    if (!out) return;
+    for (const auto& kv : m)
+        out << kv.first << "=" << kv.second << "\n";
+}
+
+std::string Database::get_setting(const std::string& key) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (db_) {
+        const char* sql = "SELECT value FROM settings WHERE key=?";
+        sqlite3_stmt* stmt = nullptr;
+        auto* db = db_handle(db_);
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return {};
+        sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+        std::string result;
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            if (const char* v = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0)))
+                result = v;
+        }
+        sqlite3_finalize(stmt);
+        return result;
+    }
+    return read_setting_from_file(settings_file_path(path_), key);
+}
+
+void Database::set_setting(const std::string& key, const std::string& value) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (db_) {
+        const char* sql = "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)";
+        sqlite3_stmt* stmt = nullptr;
+        auto* db = db_handle(db_);
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return;
+        sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, value.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+        return;
+    }
+    write_setting_to_file(settings_file_path(path_), key, value);
 }
 
 void Database::insert_battery(const BatterySnapshot& s) {
@@ -204,6 +320,55 @@ void Database::insert_charger(const PwrGateSnapshot& p) {
     if (sqlite3_step(stmt) != SQLITE_DONE)
         LOG_WARN("DB: insert charger: %s", sqlite3_errmsg(db));
     sqlite3_finalize(stmt);
+}
+
+void Database::insert_system_event(const SystemEvent& e) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return;
+
+    auto ts = static_cast<sqlite3_int64>(
+        std::chrono::system_clock::to_time_t(e.timestamp));
+
+    const char* sql = "INSERT INTO system_events (ts, msg) VALUES (?, ?)";
+    sqlite3_stmt* stmt = nullptr;
+    auto* db = db_handle(db_);
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        LOG_WARN("DB: prepare system_event: %s", sqlite3_errmsg(db));
+        return;
+    }
+    sqlite3_bind_int64(stmt, 1, ts);
+    sqlite3_bind_text(stmt, 2, e.message.c_str(), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step(stmt) != SQLITE_DONE)
+        LOG_WARN("DB: insert system_event: %s", sqlite3_errmsg(db));
+    sqlite3_finalize(stmt);
+}
+
+std::vector<SystemEvent> Database::load_system_events(size_t n) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<SystemEvent> result;
+    if (!db_) return result;
+
+    char sql[80];
+    std::snprintf(sql, sizeof(sql),
+        "SELECT ts, msg FROM system_events ORDER BY ts DESC LIMIT %zu", n);
+
+    sqlite3_stmt* stmt = nullptr;
+    auto* db = db_handle(db_);
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return result;
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        SystemEvent e;
+        e.timestamp = std::chrono::system_clock::from_time_t(
+            static_cast<time_t>(sqlite3_column_int64(stmt, 0)));
+        if (const char* m = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)))
+            e.message = m;
+        result.push_back(std::move(e));
+    }
+    sqlite3_finalize(stmt);
+    std::reverse(result.begin(), result.end());  // oldest first
+    return result;
 }
 
 std::vector<BatterySnapshot> Database::load_battery_history(size_t n) const {
@@ -294,6 +459,245 @@ std::vector<PwrGateSnapshot> Database::load_charger_history(size_t n) const {
     std::reverse(result.begin(), result.end()); // oldest first
     LOG_INFO("DB: loaded %zu charger rows", result.size());
     return result;
+}
+
+std::vector<UsageSlotProfile> Database::get_usage_profile(int days_back) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<UsageSlotProfile> result(8);
+    for (int i = 0; i < 8; ++i) result[i].slot = i;
+    if (!db_) return result;
+
+    auto* db = db_handle(db_);
+    auto cutoff = std::time(nullptr) - days_back * 86400;
+    char sql[512];
+    std::snprintf(sql, sizeof(sql),
+        "SELECT (CAST(strftime('%%H', ts, 'unixepoch', 'localtime') AS INTEGER) / 3) AS slot, "
+        "AVG(pwr), "
+        "CASE WHEN COUNT(*) > 1 THEN "
+        "  SQRT(SUM(pwr*pwr)/COUNT(*) - (SUM(pwr)/COUNT(*))*(SUM(pwr)/COUNT(*))) "
+        "ELSE 0 END, "
+        "COUNT(*) "
+        "FROM battery_readings "
+        "WHERE ts > %lld AND a > 0.05 "
+        "GROUP BY slot ORDER BY slot",
+        (long long)cutoff);
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return result;
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        int slot = sqlite3_column_int(stmt, 0);
+        if (slot >= 0 && slot < 8) {
+            result[slot].avg_w = sqlite3_column_double(stmt, 1);
+            result[slot].stddev_w = sqlite3_column_double(stmt, 2);
+            result[slot].sample_count = sqlite3_column_int(stmt, 3);
+        }
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+std::vector<ChargeAcceptanceBucket> Database::get_charge_acceptance_profile(int days_back) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    // 10 buckets of 10% each: 0-10, 10-20, ..., 90-100
+    std::vector<ChargeAcceptanceBucket> result(10);
+    for (int i = 0; i < 10; ++i) { result[i].soc_lo = i * 10; result[i].soc_hi = (i + 1) * 10; }
+    if (!db_) return result;
+
+    auto* db = db_handle(db_);
+    auto cutoff = std::time(nullptr) - days_back * 86400;
+
+    // Time-correlate charger_readings with battery_readings:
+    // for each charger row where bat_a > 0.1 and tgt_a > 0.5 (actively charging),
+    // find the closest battery_readings.soc within ±60s.
+    const char* sql =
+        "SELECT CAST(b.soc / 10 AS INTEGER) AS bucket, "
+        "       AVG(c.bat_a), AVG(c.tgt_a), "
+        "       AVG(c.bat_a / c.tgt_a), "
+        "       CASE WHEN COUNT(*) > 1 THEN "
+        "         SQRT(SUM((c.bat_a/c.tgt_a)*(c.bat_a/c.tgt_a))/COUNT(*) "
+        "              - (SUM(c.bat_a/c.tgt_a)/COUNT(*))*(SUM(c.bat_a/c.tgt_a)/COUNT(*))) "
+        "       ELSE 0 END, "
+        "       COUNT(*) "
+        "FROM charger_readings c "
+        "JOIN battery_readings b ON ABS(c.ts - b.ts) <= 60 "
+        "WHERE c.ts > ?1 AND c.bat_a > 0.1 AND c.tgt_a > 0.5 "
+        "  AND b.soc >= 0 AND b.soc <= 100 "
+        "GROUP BY bucket ORDER BY bucket";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return result;
+    sqlite3_bind_int64(stmt, 1, (int64_t)cutoff);
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        int bucket = sqlite3_column_int(stmt, 0);
+        if (bucket < 0) bucket = 0;
+        if (bucket > 9) bucket = 9;
+        result[bucket].avg_current_a    = sqlite3_column_double(stmt, 1);
+        result[bucket].avg_target_a     = sqlite3_column_double(stmt, 2);
+        result[bucket].acceptance_ratio = sqlite3_column_double(stmt, 3);
+        result[bucket].stddev_ratio     = sqlite3_column_double(stmt, 4);
+        result[bucket].sample_count     = sqlite3_column_int(stmt, 5);
+    }
+    sqlite3_finalize(stmt);
+
+    // Cap ratios to [0,1] range and fill empty buckets from nearest neighbor
+    for (auto& b : result) {
+        if (b.acceptance_ratio > 1.0) b.acceptance_ratio = 1.0;
+        if (b.acceptance_ratio < 0.0) b.acceptance_ratio = 0.0;
+    }
+
+    return result;
+}
+
+void Database::save_weather_cache(const std::string& key, const std::string& json) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_ || json.empty()) return;
+    auto* db = db_handle(db_);
+    const char* sql = "INSERT OR REPLACE INTO weather_cache (key, json_data, fetched_at) VALUES (?1, ?2, ?3)";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return;
+    auto now = std::time(nullptr);
+    sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, json.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 3, now);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
+std::string Database::load_weather_cache(const std::string& key, int64_t max_age_sec) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return {};
+    auto* db = db_handle(db_);
+    auto cutoff = std::time(nullptr) - max_age_sec;
+    const char* sql = "SELECT json_data FROM weather_cache WHERE key = ?1 AND fetched_at > ?2";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return {};
+    sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 2, cutoff);
+    std::string result;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (auto* t = sqlite3_column_text(stmt, 0))
+            result = reinterpret_cast<const char*>(t);
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+void Database::upsert_weather_daily(const WeatherDailyRow& row) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_ || row.date.empty()) return;
+    auto* db = db_handle(db_);
+    const char* sql =
+        "INSERT OR REPLACE INTO weather_daily (date, cloud_cover, kwh_forecast, sun_hours, source, updated_at)"
+        " VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return;
+    sqlite3_bind_text(stmt, 1, row.date.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_double(stmt, 2, row.cloud_cover);
+    sqlite3_bind_double(stmt, 3, row.kwh_forecast);
+    sqlite3_bind_double(stmt, 4, row.sun_hours);
+    sqlite3_bind_text(stmt, 5, row.source.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 6, row.updated_at > 0 ? row.updated_at : std::time(nullptr));
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
+std::vector<Database::WeatherDailyRow> Database::load_weather_daily(int days_back) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<WeatherDailyRow> result;
+    if (!db_) return result;
+    auto* db = db_handle(db_);
+    char sql[256];
+    std::snprintf(sql, sizeof(sql),
+        "SELECT date, cloud_cover, kwh_forecast, sun_hours, source, updated_at "
+        "FROM weather_daily WHERE updated_at > %lld ORDER BY date",
+        (long long)(std::time(nullptr) - days_back * 86400));
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return result;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        WeatherDailyRow r;
+        if (auto* t = sqlite3_column_text(stmt, 0)) r.date = reinterpret_cast<const char*>(t);
+        r.cloud_cover = sqlite3_column_double(stmt, 1);
+        r.kwh_forecast = sqlite3_column_double(stmt, 2);
+        r.sun_hours = sqlite3_column_double(stmt, 3);
+        if (auto* t = sqlite3_column_text(stmt, 4)) r.source = reinterpret_cast<const char*>(t);
+        r.updated_at = sqlite3_column_int64(stmt, 5);
+        result.push_back(std::move(r));
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+void Database::insert_solar_performance(const SolarPerfRow& row) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return;
+    auto* db = db_handle(db_);
+    const char* sql =
+        "INSERT INTO solar_performance (ts, cloud_cover, actual_w, theoretical_w, coefficient, sol_v, bat_v, bat_a, soc)"
+        " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return;
+    sqlite3_bind_int64(stmt, 1, row.ts > 0 ? row.ts : std::time(nullptr));
+    sqlite3_bind_double(stmt, 2, row.cloud_cover);
+    sqlite3_bind_double(stmt, 3, row.actual_w);
+    sqlite3_bind_double(stmt, 4, row.theoretical_w);
+    sqlite3_bind_double(stmt, 5, row.coefficient);
+    sqlite3_bind_double(stmt, 6, row.sol_v);
+    sqlite3_bind_double(stmt, 7, row.bat_v);
+    sqlite3_bind_double(stmt, 8, row.bat_a);
+    sqlite3_bind_double(stmt, 9, row.soc);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
+std::vector<Database::SolarPerfRow> Database::load_solar_performance(int days_back) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<SolarPerfRow> result;
+    if (!db_) return result;
+    auto* db = db_handle(db_);
+    auto cutoff = std::time(nullptr) - days_back * 86400;
+    char sql[256];
+    std::snprintf(sql, sizeof(sql),
+        "SELECT ts, cloud_cover, actual_w, theoretical_w, coefficient, sol_v, bat_v, bat_a, soc "
+        "FROM solar_performance WHERE ts > %lld ORDER BY ts", (long long)cutoff);
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return result;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        SolarPerfRow r;
+        r.ts = sqlite3_column_int64(stmt, 0);
+        r.cloud_cover = sqlite3_column_double(stmt, 1);
+        r.actual_w = sqlite3_column_double(stmt, 2);
+        r.theoretical_w = sqlite3_column_double(stmt, 3);
+        r.coefficient = sqlite3_column_double(stmt, 4);
+        r.sol_v = sqlite3_column_double(stmt, 5);
+        r.bat_v = sqlite3_column_double(stmt, 6);
+        r.bat_a = sqlite3_column_double(stmt, 7);
+        r.soc = sqlite3_column_double(stmt, 8);
+        result.push_back(r);
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+double Database::get_avg_solar_coefficient(int days_back) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return 0;
+    auto* db = db_handle(db_);
+    auto cutoff = std::time(nullptr) - days_back * 86400;
+    char sql[256];
+    std::snprintf(sql, sizeof(sql),
+        "SELECT AVG(coefficient), COUNT(*) FROM solar_performance "
+        "WHERE ts > %lld AND coefficient > 0 AND coefficient < 2", (long long)cutoff);
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return 0;
+    double avg = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        int n = sqlite3_column_int(stmt, 1);
+        if (n > 0) avg = sqlite3_column_double(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+    return avg;
 }
 
 std::string Database::default_path() {
