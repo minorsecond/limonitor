@@ -48,6 +48,138 @@ static bool strtobool(const std::string& v) {
     return v == "true" || v == "1" || v == "yes";
 }
 
+// Migrate config values to DB (only on first run). Then load from DB into cfg.
+static void migrate_and_load_config(Database* db, Config& cfg) {
+    if (!db || !db->is_open()) return;
+    bool first_run = db->get_setting("config_migrated").empty();
+    if (first_run) {
+        auto set_if_missing = [db](const std::string& key, const std::string& val) {
+            if (val.empty()) return;
+            if (db->get_setting(key).empty()) db->set_setting(key, val);
+        };
+        set_if_missing("device_address", cfg.device_address);
+        set_if_missing("device_name", cfg.device_name);
+        set_if_missing("adapter_path", cfg.adapter_path);
+        set_if_missing("service_uuid", cfg.service_uuid);
+        set_if_missing("notify_uuid", cfg.notify_char_uuid);
+        set_if_missing("write_uuid", cfg.write_char_uuid);
+        set_if_missing("poll_interval", std::to_string(cfg.poll_interval_s));
+        set_if_missing("http_port", std::to_string(cfg.http_port));
+        set_if_missing("http_bind", cfg.http_bind);
+        set_if_missing("log_file", cfg.log_file);
+        set_if_missing("verbose", cfg.log_verbose ? "1" : "0");
+        set_if_missing("serial_device", cfg.serial_device);
+        set_if_missing("serial_baud", std::to_string(cfg.serial_baud));
+        set_if_missing("pwrgate_remote", cfg.pwrgate_remote);
+        set_if_missing("db_path", cfg.db_path);
+        set_if_missing("db_interval", std::to_string(cfg.db_write_interval_s));
+        set_if_missing("daemon", cfg.daemon_mode ? "1" : "0");
+        set_if_missing("battery_purchased", cfg.battery_purchased);
+        set_if_missing("rated_capacity_ah", std::to_string(cfg.rated_capacity_ah));
+        set_if_missing("tx_threshold", std::to_string(cfg.tx_threshold_a));
+        set_if_missing("solar_enabled", cfg.solar_enabled ? "1" : "0");
+        set_if_missing("solar_panel_watts", std::to_string(cfg.solar_panel_watts));
+        set_if_missing("solar_system_efficiency", std::to_string(cfg.solar_system_efficiency));
+        set_if_missing("solar_zip_code", cfg.solar_zip_code);
+        set_if_missing("weather_api_key", cfg.weather_api_key);
+        set_if_missing("weather_zip_code", cfg.weather_zip_code);
+        db->set_setting("config_migrated", "1");
+        LOG_INFO("Config: migrated to DB (first run)");
+    }
+
+    auto v = [db](const std::string& k) { return db->get_setting(k); };
+    auto apply = [&cfg, &v]() {
+        std::string s;
+        cfg.device_address = v("device_address");
+        cfg.device_name = v("device_name");
+        if (!(s = v("adapter_path")).empty()) cfg.adapter_path = s;
+        if (!(s = v("service_uuid")).empty()) cfg.service_uuid = s;
+        if (!(s = v("notify_uuid")).empty()) cfg.notify_char_uuid = s;
+        if (!(s = v("write_uuid")).empty()) cfg.write_char_uuid = s;
+        if (!(s = v("poll_interval")).empty()) { try { cfg.poll_interval_s = std::stoi(s); } catch (...) {} }
+        if (!(s = v("http_port")).empty()) { try { cfg.http_port = static_cast<uint16_t>(std::stoul(s)); } catch (...) {} }
+        cfg.http_bind = v("http_bind").empty() ? "0.0.0.0" : v("http_bind");
+        cfg.log_file = v("log_file");
+        cfg.log_verbose = (v("verbose") == "1" || v("verbose") == "true");
+        cfg.serial_device = v("serial_device");
+        if (!(s = v("serial_baud")).empty()) { try { cfg.serial_baud = std::stoi(s); } catch (...) {} }
+        cfg.pwrgate_remote = v("pwrgate_remote");
+        cfg.db_path = v("db_path");
+        if (!(s = v("db_interval")).empty()) { try { cfg.db_write_interval_s = std::stoi(s); } catch (...) {} }
+        cfg.daemon_mode = (v("daemon") == "1" || v("daemon") == "true");
+        cfg.battery_purchased = v("battery_purchased");
+        if (!(s = v("rated_capacity_ah")).empty()) { try { cfg.rated_capacity_ah = std::stod(s); } catch (...) {} }
+        if (!(s = v("tx_threshold")).empty()) { try { cfg.tx_threshold_a = std::stod(s); } catch (...) {} }
+        cfg.solar_enabled = (v("solar_enabled") == "1" || v("solar_enabled") == "true");
+        if (!(s = v("solar_panel_watts")).empty()) { try { cfg.solar_panel_watts = std::stod(s); } catch (...) {} }
+        if (!(s = v("solar_system_efficiency")).empty()) { try { cfg.solar_system_efficiency = std::stod(s); } catch (...) {} }
+        cfg.solar_zip_code = v("solar_zip_code").empty() ? "80112" : v("solar_zip_code");
+        cfg.weather_api_key = v("weather_api_key");
+        cfg.weather_zip_code = v("weather_zip_code").empty() ? "80112" : v("weather_zip_code");
+    };
+    apply();
+}
+
+static bool needs_setup(const Config& cfg) {
+    std::string target = cfg.device_address.empty() ? cfg.device_name : cfg.device_address;
+    return target.empty() && cfg.serial_device.empty() && cfg.pwrgate_remote.empty();
+}
+
+static void run_tui_settings(Database* db, Config& cfg) {
+    if (!db || !db->is_open()) return;
+    std::cout << "\n=== limonitor settings ===\n"
+              << "Enter value or press Enter to keep current.\n\n";
+
+    auto prompt = [](const char* label, const std::string& current) -> std::string {
+        std::cout << label;
+        if (!current.empty()) std::cout << " [" << current << "]";
+        std::cout << ": ";
+        std::string line;
+        std::getline(std::cin, line);
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
+        return line.empty() ? current : line;
+    };
+
+    auto save_str = [db](const char* k, const std::string& v, std::string& out) {
+        if (!v.empty()) { db->set_setting(k, v); out = v; }
+    };
+    auto save_int = [db](const char* k, const std::string& v, int& out) {
+        if (!v.empty()) { try { int n = std::stoi(v); db->set_setting(k, v); out = n; } catch (...) {} }
+    };
+    auto save_dbl = [db](const char* k, const std::string& v, double& out) {
+        if (!v.empty()) { try { double d = std::stod(v); db->set_setting(k, v); out = d; } catch (...) {} }
+    };
+    auto save_bool = [db](const char* k, const std::string& v, bool& out) {
+        if (!v.empty()) { bool b = (v == "1" || v == "true" || v == "yes"); db->set_setting(k, b ? "1" : "0"); out = b; }
+    };
+
+    std::string v;
+    v = prompt("BLE device name", cfg.device_name); save_str("device_name", v, cfg.device_name);
+    v = prompt("BLE device address (MAC)", cfg.device_address); save_str("device_address", v, cfg.device_address);
+    v = prompt("Adapter path", cfg.adapter_path); save_str("adapter_path", v, cfg.adapter_path);
+    v = prompt("HTTP port", std::to_string(cfg.http_port)); if (!v.empty()) { try { cfg.http_port = static_cast<uint16_t>(std::stoul(v)); db->set_setting("http_port", v); } catch (...) {} }
+    v = prompt("HTTP bind address", cfg.http_bind); save_str("http_bind", v, cfg.http_bind);
+    v = prompt("Serial device", cfg.serial_device); save_str("serial_device", v, cfg.serial_device);
+    v = prompt("Serial baud", std::to_string(cfg.serial_baud)); save_int("serial_baud", v, cfg.serial_baud);
+    v = prompt("Remote PwrGate (host:port)", cfg.pwrgate_remote); save_str("pwrgate_remote", v, cfg.pwrgate_remote);
+    v = prompt("Poll interval (seconds)", std::to_string(cfg.poll_interval_s)); save_int("poll_interval", v, cfg.poll_interval_s);
+    v = prompt("DB path", cfg.db_path); save_str("db_path", v, cfg.db_path);
+    v = prompt("DB write interval (seconds)", std::to_string(cfg.db_write_interval_s)); save_int("db_interval", v, cfg.db_write_interval_s);
+    v = prompt("Battery purchase date (YYYY-MM-DD)", cfg.battery_purchased); save_str("battery_purchased", v, cfg.battery_purchased);
+    v = prompt("Rated capacity Ah (0=auto)", std::to_string(cfg.rated_capacity_ah)); save_dbl("rated_capacity_ah", v, cfg.rated_capacity_ah);
+    v = prompt("TX threshold (amps)", std::to_string(cfg.tx_threshold_a)); save_dbl("tx_threshold", v, cfg.tx_threshold_a);
+    v = prompt("Solar enabled (1/0)", cfg.solar_enabled ? "1" : "0"); save_bool("solar_enabled", v, cfg.solar_enabled);
+    v = prompt("Solar panel watts", std::to_string(cfg.solar_panel_watts)); save_dbl("solar_panel_watts", v, cfg.solar_panel_watts);
+    v = prompt("Solar system efficiency (0-1)", std::to_string(cfg.solar_system_efficiency)); save_dbl("solar_system_efficiency", v, cfg.solar_system_efficiency);
+    v = prompt("Solar ZIP code", cfg.solar_zip_code); save_str("solar_zip_code", v, cfg.solar_zip_code);
+    v = prompt("Weather API key", cfg.weather_api_key); save_str("weather_api_key", v, cfg.weather_api_key);
+    v = prompt("Weather ZIP code", cfg.weather_zip_code); save_str("weather_zip_code", v, cfg.weather_zip_code);
+    v = prompt("Daemon mode (1/0)", cfg.daemon_mode ? "1" : "0"); save_bool("daemon", v, cfg.daemon_mode);
+
+    db->set_setting("settings_initialized", "1");
+    std::cout << "\nSettings saved. Restart limonitor to apply.\n\n";
+}
+
 static void load_config_file(const std::string& path, Config& cfg) {
     FILE* f = std::fopen(path.c_str(), "r");
     if (!f) return;
@@ -97,6 +229,14 @@ static void load_config_file(const std::string& path, Config& cfg) {
             else if (key == "db_interval")    cfg.db_write_interval_s= std::stoi(val);
             else if (key == "daemon")              cfg.daemon_mode        = strtobool(val);
             else if (key == "battery_purchased")   cfg.battery_purchased  = val;
+            else if (key == "tx_threshold")        cfg.tx_threshold_a     = std::stod(val);
+            else if (key == "rated_capacity_ah")   cfg.rated_capacity_ah  = std::stod(val);
+            else if (key == "solar_enabled")       cfg.solar_enabled      = strtobool(val);
+            else if (key == "solar_panel_watts")   cfg.solar_panel_watts  = std::stod(val);
+            else if (key == "solar_system_efficiency") cfg.solar_system_efficiency = std::stod(val);
+            else if (key == "solar_zip_code")      cfg.solar_zip_code     = val;
+            else if (key == "weather_api_key")     cfg.weather_api_key    = val;
+            else if (key == "weather_zip_code")    cfg.weather_zip_code   = val;
             else std::fprintf(stderr, "[config] line %d: unknown key '%s'\n", lineno, key.c_str());
         } catch (...) {
             std::fprintf(stderr, "[config] line %d: bad value for '%s'\n", lineno, key.c_str());
@@ -138,18 +278,28 @@ static void print_usage(const char* prog) {
         "  --db-interval N  DB write throttle seconds      [60]\n"
         "  --daemon       Run headless (no TUI) — for background/service use\n"
         "  --purchase-date DATE  Record battery purchase date (e.g. 2024-03-15)\n"
+        "  --rated-capacity N    Rated battery capacity in Ah (default: auto from BMS)\n"
+        "  --tx-threshold A  TX detection threshold in amps [1.0]\n"
+        "                    Net positive battery current that starts a TX event.\n"
+        "                    1.0 works for 25-50W VHF/UHF. Raise to 4-6 for 100W HF.\n"
         "  -h             Show this help\n"
         "\n"
         "API endpoints (served on http://HOST:PORT/):\n"
-        "  GET /              HTML dashboard\n"
-        "  GET /api/status    Full JSON status\n"
-        "  GET /api/cells     Cell voltages JSON\n"
-        "  GET /api/history   Historical snapshots JSON (?n=100)\n"
-        "  GET /metrics       Prometheus metrics\n"
+        "  GET /                   HTML dashboard\n"
+        "  GET /api/status         Full battery JSON snapshot\n"
+        "  GET /api/analytics      Battery analytics JSON (energy, health, DoD, load…)\n"
+        "  GET /api/cells          Cell voltages JSON\n"
+        "  GET /api/history        Historical battery snapshots (?n=N)\n"
+        "  GET /api/charger        Latest charger snapshot JSON\n"
+        "  GET /api/charger/history  Charger history (?n=N)\n"
+        "  GET /api/flow           Energy flow diagram data JSON\n"
+        "  GET /api/tx_events      Radio TX event log JSON (?n=N)\n"
+        "  GET /metrics            Prometheus text metrics\n"
         "\n"
         "Examples:\n"
         "  " << prog << " -a AA:BB:CC:DD:EE:FF -p 8080 -l /var/log/battery.log\n"
-        "  " << prog << " -n JBD --demo\n";
+        "  " << prog << " -n JBD --demo\n"
+        "  " << prog << " --no-ble -s /dev/ttyACM0 --purchase-date 2023-01-15 --rated-capacity 100\n";
 }
 
 static Config parse_args(int argc, char** argv, Config cfg = {}) {
@@ -180,6 +330,8 @@ static Config parse_args(int argc, char** argv, Config cfg = {}) {
         else if (arg == "--db-interval") cfg.db_write_interval_s = std::stoi(next());
         else if (arg == "--daemon")         cfg.daemon_mode       = true;
         else if (arg == "--purchase-date")  cfg.battery_purchased = next();
+        else if (arg == "--rated-capacity") cfg.rated_capacity_ah = std::stod(next());
+        else if (arg == "--tx-threshold")   cfg.tx_threshold_a = std::stod(next());
         else if (arg == "-h" || arg == "--help") { print_usage(argv[0]); std::exit(0); }
         else { std::cerr << "Unknown option: " << arg << "\n"; print_usage(argv[0]); std::exit(1); }
     }
@@ -254,35 +406,57 @@ int main(int argc, char** argv) {
     load_config_file(config_path, cfg);
     cfg = parse_args(argc, argv, cfg);
 
-    // Logger
-    Logger::instance().init(cfg.log_file, cfg.log_verbose, cfg.log_rotate_bytes);
-    LOG_INFO("limonitor v1.0.0 starting");
-
-    // Apply poll interval globally (used by ble_manager.cpp)
-    g_poll_interval_s = cfg.poll_interval_s;
-
     // Signal handling
     std::signal(SIGINT,  sig_handler);
     std::signal(SIGTERM, sig_handler);
     std::signal(SIGPIPE, SIG_IGN);
 
-    // Data store
-    DataStore store(cfg.history_size);
-    if (!cfg.battery_purchased.empty())
-        store.set_purchase_date(cfg.battery_purchased);
-
-    // SQLite database — resolve to absolute path (systemd may have different cwd)
     std::string dbpath = cfg.db_path.empty() ? Database::default_path() : cfg.db_path;
-    try {
-        dbpath = std::filesystem::absolute(dbpath).string();
-    } catch (...) {}
+    try { dbpath = std::filesystem::absolute(dbpath).string(); } catch (...) {}
     auto db = std::make_shared<Database>(dbpath);
     if (db->open()) {
+        migrate_and_load_config(db.get(), cfg);
+        if (needs_setup(cfg) && !cfg.daemon_mode) {
+            run_tui_settings(db.get(), cfg);
+        }
+    }
+
+    // Logger: init after loading from DB so verbose/log_file come from DB
+    Logger::instance().init(cfg.log_file, cfg.log_verbose, cfg.log_rotate_bytes);
+    LOG_INFO("limonitor v1.0.0 starting");
+    if (!db->is_open())
+        LOG_WARN("DB: running without persistence; config will not be migrated");
+
+    // Apply poll interval globally (used by ble_manager.cpp)
+    g_poll_interval_s = cfg.poll_interval_s;
+
+    // Data store
+    DataStore store(cfg.history_size);
+    store.set_tx_threshold(cfg.tx_threshold_a);
+    store.init_extensions(cfg, db->is_open() ? db.get() : nullptr);
+    LOG_INFO("TX detection threshold: %.2f A (net positive battery discharge)", cfg.tx_threshold_a);
+    if (cfg.solar_enabled)
+        LOG_INFO("Solar: enabled, %g W panels, zip=%s, weather_api_key=%s",
+                 cfg.solar_panel_watts, cfg.solar_zip_code.c_str(),
+                 cfg.weather_api_key.empty() ? "(not set)" : "set");
+    if (!cfg.battery_purchased.empty())
+        store.set_purchase_date(cfg.battery_purchased);
+    if (cfg.rated_capacity_ah > 0) {
+        store.set_rated_capacity(cfg.rated_capacity_ah);
+        LOG_INFO("Rated capacity override: %.1f Ah", cfg.rated_capacity_ah);
+    }
+
+    // Attach DB to store (already opened above)
+    if (db->is_open()) {
+        store.set_database(db.get());
+        store.set_loading_history(true);
         // Pre-populate history rings BEFORE registering the observer (avoids re-inserting)
         for (auto& s : db->load_battery_history(cfg.history_size))
             store.update(std::move(s));
         for (auto& p : db->load_charger_history(cfg.history_size))
             store.update_pwrgate(std::move(p));
+        store.load_system_events_from_db(db->load_system_events(200));
+        store.set_loading_history(false);
 
         int interval = cfg.db_write_interval_s;
         // Battery observer — throttled by db_write_interval_s
@@ -300,8 +474,8 @@ int main(int argc, char** argv) {
         LOG_WARN("DB: running without persistence");
     }
 
-    // HTTP server
-    HttpServer http(store, cfg.http_bind, cfg.http_port, cfg.poll_interval_s);
+    // HTTP server (pass db for settings persistence; works even when db->open() failed, via file fallback)
+    HttpServer http(store, db.get(), cfg.http_bind, cfg.http_port, cfg.poll_interval_s);
     if (!http.start()) {
         LOG_ERROR("HTTP server failed to start on port %d", cfg.http_port);
         return 1;
@@ -443,6 +617,7 @@ int main(int argc, char** argv) {
                 ble->connect_to(id);
             });
         }
+        tui.set_settings_callback([&] { run_tui_settings(db.get(), cfg); });
         std::thread quit_watcher([&]{
             while (!g_quit) std::this_thread::sleep_for(std::chrono::milliseconds(100));
             tui.stop();

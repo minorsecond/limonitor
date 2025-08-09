@@ -283,7 +283,7 @@ void TUI::draw(const BatterySnapshot& snap, const std::string& ble_st,
 
     attron(COLOR_PAIR(C_HEADER));
     mvhline(rows - 1, 0, ' ', cols);
-    mvprintw(rows - 1, 1, " q=quit  ?=help  sw_ver=%s  http://localhost:%d/",
+    mvprintw(rows - 1, 1, " q=quit  s=settings  ?=help  sw_ver=%s  http://localhost:%d/",
              snap.sw_version.c_str(), http_port_);
     attroff(COLOR_PAIR(C_HEADER));
 
@@ -365,12 +365,25 @@ void TUI::draw_picker(const std::vector<DiscoveredDevice>& devs, const std::stri
     refresh();
 }
 
+void TUI::set_settings_callback(std::function<void()> cb) { settings_cb_ = std::move(cb); }
+
 bool TUI::poll_input(const std::vector<DiscoveredDevice>& devs) {
     int ch = getch();
     switch (ch) {
         case 'q': case 'Q': case 3:
             running_ = false;
             return true;
+        case 's': case 'S':
+            if (settings_cb_) {
+                endwin();
+                echo();
+                curs_set(1);
+                settings_cb_();
+                noecho();
+                curs_set(0);
+                refresh();
+            }
+            break;
         case KEY_UP: case 'k':
             picker_sel_--;
             break;
@@ -452,6 +465,7 @@ void TUI::draw_help() {
         "                                                           ",
         "  KEYS                                                     ",
         "  q         Quit                                           ",
+        "  s         Open settings (persisted to DB, restart to apply)",
         "  ?         Toggle this help overlay                      ",
         "  r         Rescan for BLE devices (picker screen)        ",
         "  ↑↓ / jk   Move selection in device picker              ",

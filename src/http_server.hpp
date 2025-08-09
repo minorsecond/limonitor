@@ -1,5 +1,14 @@
 #pragma once
+#include "analytics.hpp"
+#include "analytics/anomaly_detection.hpp"
+#include "analytics/health_score.hpp"
+#include "analytics/resistance_estimator.hpp"
+#include "analytics/solar_simulation.hpp"
+#include "analytics/weather_forecast.hpp"
 #include "data_store.hpp"
+#include "database.hpp"
+#include "system_events.hpp"
+#include "tx_events.hpp"
 #include <atomic>
 #include <cstdint>
 #include <string>
@@ -8,7 +17,7 @@
 // HTTP/1.0 server. GET /, /api/status, /api/cells, /api/history, /metrics
 class HttpServer {
 public:
-    HttpServer(DataStore& store, const std::string& bind_addr, uint16_t port,
+    HttpServer(DataStore& store, Database* db, const std::string& bind_addr, uint16_t port,
                int poll_interval_s = 5);
     ~HttpServer();
 
@@ -19,6 +28,7 @@ public:
 
 private:
     DataStore&   store_;
+    Database*    db_{nullptr};
     std::string  bind_addr_;
     uint16_t     port_;
     int          listen_fd_{-1};
@@ -38,11 +48,28 @@ private:
     static std::string svg_charger_chart(const std::vector<PwrGateSnapshot>& hist);
     static std::string charger_json(const PwrGateSnapshot& pg);
     static std::string charger_history_json(const std::vector<PwrGateSnapshot>& snaps);
+    static std::string flow_json(const BatterySnapshot& bat, const PwrGateSnapshot& chg);
+    static std::string tx_events_json(const std::vector<TxEvent>& events);
+    static std::string system_events_json(const std::vector<SystemEvent>& events);
+    static std::string analytics_json(const AnalyticsSnapshot& a,
+                                      const DataStore* store = nullptr);
+    static std::string anomalies_json(const std::vector<AnomalyEvent>& anomalies);
+    static std::string solar_simulation_json(const SolarSimResult& r);
+    static std::string battery_resistance_json(double mohm, const std::string& trend,
+                                              const std::vector<ResistanceSample>& series);
+    static std::string solar_forecast_json(const WeatherForecastResult& r);
+    std::string solar_forecast_week_json(const SolarForecastWeekResult& r) const;
+    static std::string system_health_json(const HealthScoreResult& r);
     static std::string html_dashboard(const BatterySnapshot& s, const std::string& ble_state,
                                       const PwrGateSnapshot& pg,
                                       const std::string& purchase_date,
                                       double hours,
-                                      int poll_interval_s);
+                                      int poll_interval_s,
+                                      const std::string& init_settings = "",
+                                      const std::string& theme = "");
+    static std::string html_solar_page(const std::string& init_settings = "",
+                                       const std::string& theme = "");
+    static std::string html_settings_page(Database* db);
 
     static void send_response(int fd, int code, const char* content_type, const std::string& body);
 };
