@@ -11,7 +11,6 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-// JSON helpers
 static std::string jstr(const std::string& s) {
     std::string r = "\"";
     for (char c : s) {
@@ -94,7 +93,6 @@ void HttpServer::serve_loop() {
             if (running_) LOG_DEBUG("HTTP: accept error: %s", strerror(errno));
             continue;
         }
-        // Set 5s receive timeout
         struct timeval tv{5, 0};
         setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         handle(client);
@@ -164,6 +162,16 @@ void HttpServer::handle(int fd) {
         if (ni != std::string::npos) { try { count = std::stoul(query.substr(ni + 2)); } catch (...) {} }
         send_response(fd, 200, "application/json",
                       charger_history_json(store_.pwrgate_history(count)));
+    } else if (path == "/api/flow") {
+        send_response(fd, 200, "application/json", flow_json(snap, pg));
+    } else if (path == "/api/tx_events") {
+        size_t count = 100;
+        auto ni = query.find("n=");
+        if (ni != std::string::npos) { try { count = std::stoul(query.substr(ni + 2)); } catch (...) {} }
+        send_response(fd, 200, "application/json", tx_events_json(store_.tx_events(count)));
+    } else if (path == "/api/analytics") {
+        send_response(fd, 200, "application/json",
+                      analytics_json(store_.analytics()));
     } else if (path == "/metrics") {
         send_response(fd, 200, "text/plain; version=0.0.4",
                       prometheus(snap) + prometheus_charger(pg));
@@ -309,6 +317,41 @@ std::string HttpServer::prometheus_charger(const PwrGateSnapshot& pg) {
     g("charger_target_amps",    "Max charge current",                  pg.target_a);
     g("charger_pwm",            "PWM duty cycle (0-1023)",             pg.pwm, 0);
     g("charger_elapsed_minutes","Elapsed charge time minutes",         pg.minutes, 0);
+    return o;
+}
+
+std::string HttpServer::analytics_json(const AnalyticsSnapshot& a) {
+    std::string o = "{\n";
+    o += "  \"energy_charged_today_wh\": "    + jdbl(a.energy_charged_today_wh, 1)    + ",\n";
+    o += "  \"energy_discharged_today_wh\": " + jdbl(a.energy_discharged_today_wh, 1) + ",\n";
+    o += "  \"solar_energy_today_wh\": "      + jdbl(a.solar_energy_today_wh, 1)      + ",\n";
+    o += "  \"net_energy_today_wh\": "        + jdbl(a.net_energy_today_wh, 1)        + ",\n";
+    o += "  \"battery_age_years\": "          + jdbl(a.battery_age_years, 2)          + ",\n";
+    o += "  \"battery_health_pct\": "         + jdbl(a.battery_health_pct, 1)         + ",\n";
+    o += "  \"years_remaining_low\": "        + jdbl(a.years_remaining_low, 0)        + ",\n";
+    o += "  \"years_remaining_high\": "       + jdbl(a.years_remaining_high, 0)       + ",\n";
+    o += "  \"battery_replace_warn\": "       + jbool(a.battery_replace_warn)         + ",\n";
+    o += "  \"charging_stage\": "             + jstr(a.charging_stage)               + ",\n";
+    o += "  \"usable_capacity_ah\": "         + jdbl(a.usable_capacity_ah, 1)        + ",\n";
+    o += "  \"rated_capacity_ah\": "          + jdbl(a.rated_capacity_ah, 1)         + ",\n";
+    o += "  \"capacity_health_pct\": "        + jdbl(a.capacity_health_pct, 1)       + ",\n";
+    o += "  \"cell_delta_mv\": "              + jdbl(a.cell_delta_mv, 1)             + ",\n";
+    o += "  \"cell_balance_status\": "        + jstr(a.cell_balance_status)          + ",\n";
+    o += "  \"temp1_c\": "                    + jdbl(a.temp1_c, 1)                   + ",\n";
+    o += "  \"temp2_c\": "                    + jdbl(a.temp2_c, 1)                   + ",\n";
+    o += "  \"temp_valid\": "                 + jbool(a.temp_valid)                  + ",\n";
+    o += "  \"temp_status\": "                + jstr(a.temp_status)                  + ",\n";
+    o += "  \"charger_efficiency\": "         + jdbl(a.charger_efficiency, 3)        + ",\n";
+    o += "  \"efficiency_valid\": "           + jbool(a.efficiency_valid)            + ",\n";
+    o += "  \"solar_voltage_v\": "            + jdbl(a.solar_voltage_v, 2)           + ",\n";
+    o += "  \"solar_power_w\": "              + jdbl(a.solar_power_w, 1)             + ",\n";
+    o += "  \"solar_active\": "               + jbool(a.solar_active)                + ",\n";
+    o += "  \"depth_of_discharge_pct\": "     + jdbl(a.depth_of_discharge_pct, 1)   + ",\n";
+    o += "  \"dod_status\": "                 + jstr(a.dod_status)                   + ",\n";
+    o += "  \"avg_load_watts\": "             + jdbl(a.avg_load_watts, 1)            + ",\n";
+    o += "  \"peak_load_watts\": "            + jdbl(a.peak_load_watts, 1)           + ",\n";
+    o += "  \"idle_load_watts\": "            + jdbl(a.idle_load_watts, 1)           + "\n";
+    o += "}\n";
     return o;
 }
 
@@ -615,6 +658,35 @@ std::string HttpServer::charger_history_json(const std::vector<PwrGateSnapshot>&
     return o;
 }
 
+std::string HttpServer::flow_json(const BatterySnapshot& bat, const PwrGateSnapshot& chg) {
+    std::string o = "{\n";
+    o += "  \"battery_voltage\": " + jdbl(bat.valid ? bat.total_voltage_v : 0) + ",\n";
+    o += "  \"battery_current\": " + jdbl(bat.valid ? bat.current_a : 0) + ",\n";
+    o += "  \"state_of_charge\": " + jdbl(bat.valid ? bat.soc_pct : 0, 1) + ",\n";
+    o += "  \"solar_voltage\": " + jdbl(chg.valid ? chg.sol_v : 0) + ",\n";
+    o += "  \"charger_voltage\": " + jdbl(chg.valid ? chg.ps_v : 0) + ",\n";
+    o += "  \"charger_state\": " + jstr(chg.valid ? chg.state : "") + ",\n";
+    double power_w = chg.valid ? (chg.bat_v * chg.bat_a) : (bat.valid ? bat.power_w : 0);
+    o += "  \"power_watts\": " + jdbl(std::abs(power_w)) + "\n";
+    o += "}\n";
+    return o;
+}
+
+std::string HttpServer::tx_events_json(const std::vector<TxEvent>& events) {
+    std::string o = "[";
+    bool first = true;
+    for (const auto& e : events) {
+        if (!first) o += ",";
+        first = false;
+        o += "\n  {\"start\":" + jdbl(e.start_time, 0) +
+             ",\"duration\":" + jdbl(e.duration) +
+             ",\"peak_current\":" + jdbl(e.peak_current) +
+             ",\"peak_power\":" + jdbl(e.peak_power) + "}";
+    }
+    o += "\n]\n";
+    return o;
+}
+
 std::string HttpServer::charger_json(const PwrGateSnapshot& pg) {
     if (!pg.valid) return "{\"valid\":false}\n";
     std::string o = "{\n";
@@ -688,7 +760,9 @@ html{transition:background-color .2s;-webkit-tap-highlight-color:transparent}
 body{font-family:'SF Mono',Menlo,Consolas,monospace;background:var(--bg);color:var(--text);font-size:13px;
   transition:background-color .2s,color .15s}
 a{color:var(--green);text-decoration:none}a:hover{text-decoration:underline}
-.wrap{max-width:1100px;margin:0 auto;padding:1.4rem;padding-bottom:max(1.4rem,env(safe-area-inset-bottom))}
+.wrap{max-width:1100px;margin:0 auto;padding:1.4rem;
+  padding-top:max(1.4rem,env(safe-area-inset-top));
+  padding-bottom:max(2.5rem,env(safe-area-inset-bottom))}
 /* ── Header ── */
 header{display:flex;align-items:center;justify-content:space-between;margin-bottom:1.2rem;flex-wrap:wrap;gap:.6rem}
 @media(max-width:640px){header{flex-direction:column;align-items:flex-start;gap:.8rem}}
@@ -700,7 +774,8 @@ h1{color:var(--green);font-size:1.7rem;letter-spacing:.2em;font-weight:700}
 /* ── Stat cards ── */
 .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:.7rem;margin-bottom:.7rem}
 @media(max-width:560px){.stats{grid-template-columns:repeat(2,1fr)}.stat{padding:1rem}}
-@media(max-width:640px){body{font-size:14px}.wrap{padding:1rem}.card{padding:1rem}}
+@media(max-width:640px){body{font-size:14px}.wrap{padding:1rem;padding-top:max(1rem,env(safe-area-inset-top))}.card{padding:1rem}
+.stat-lbl{font-size:.7rem}.stat-sub{font-size:.78rem}.sv{font-size:2.2rem}}}
 .stat{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.9rem 1rem;
   transition:background-color .2s,border-color .2s}
 .stat-lbl{font-size:.6rem;text-transform:uppercase;letter-spacing:.14em;color:var(--muted)}
@@ -747,6 +822,16 @@ details[open].card summary::before{content:'▾  '}
 /* ── Footer ── */
 .footer{font-size:.68rem;color:var(--muted);margin-top:1rem;opacity:.7}
 .footer a{color:var(--muted)}.footer a:hover{color:var(--green)}
+/* ── Analytics grid ── */
+.sec-lbl{font-size:.58rem;text-transform:uppercase;letter-spacing:.14em;color:var(--muted);margin:.6rem 0 .35rem}
+.acards{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:.55rem;margin-bottom:.7rem}
+@media(max-width:480px){.acards{grid-template-columns:1fr 1fr}}
+@media(max-width:320px){.acards{grid-template-columns:1fr}}
+.acard{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.75rem .9rem;
+  transition:background-color .2s,border-color .2s}
+.acard .card-title{margin-bottom:.5rem}
+.acard .dt td{padding:.2rem 0;font-size:.78rem}
+.acard .dt td:first-child{width:48%}
 /* ── Buttons ── */
 .btn{background:none;border:1px solid var(--border);border-radius:4px;color:var(--muted);
   padding:.2rem .6rem;font-size:.72rem;font-family:inherit;cursor:pointer;
@@ -764,9 +849,33 @@ details[open].card summary::before{content:'▾  '}
 .trng-btn.active{background:rgba(74,222,128,.15);border-color:var(--green);color:var(--green);font-weight:600}
 html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--green);color:var(--green)}
 .chart-svg{width:100%;display:block;background:var(--chart-bg);border-radius:4px}
+/* ── Energy Flow Diagram ── */
+.flow-wrap{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1.4rem;margin-bottom:.7rem;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.flow-diagram{width:100%;max-width:720px;margin:0 auto;display:block}
+.flow-diagram svg{width:100%;height:auto;display:block}
+.flow-node{transition:fill .2s,opacity .2s;stroke:rgba(0,0,0,.08);stroke-width:1}
+.flow-node-solar{fill:#f59e0b}
+.flow-node-grid{fill:#2563eb}
+.flow-node-charger{fill:#4b5563}
+.flow-node-battery{fill:#16a34a}
+.flow-node-load{fill:#252530}
+html.light .flow-node-load{fill:#e2e8f0}
+.flow-node-inactive{opacity:.45}
+.flow-arrow-chg{stroke:#16a34a}
+.flow-arrow-dchg{stroke:#ea580c}
+.flow-arrow-idle{stroke:#94a3b8;opacity:.5}
+.flow-arrow{stroke-width:3;fill:none;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:6 6;transition:stroke .2s,opacity .2s}
+.flow-arrow-solar{stroke-width:2}
+.flow-arrow-label{font-size:9px;font-weight:600;font-family:system-ui,sans-serif}
+@keyframes flow{from{stroke-dashoffset:24}to{stroke-dashoffset:0}}
+.flow-arrow-anim{animation:flow linear infinite}
+@media(max-width:640px){.flow-wrap{padding:1rem}.flow-diagram{max-width:100%}}
 )HTML";
-    o += "#bat-chart{height:200px}#chg-chart{height:180px}"
-         "@media(max-width:640px){#bat-chart{height:260px}#chg-chart{height:220px}"
+    o += ".main{display:flex;flex-direction:column;gap:.7rem}"
+         "#bat-chart{height:200px}#chg-chart{height:180px}"
+         "@media(max-width:640px){.main{display:flex;flex-direction:column}"
+         ".stats{order:-2;margin-bottom:.5rem}.card-bat{order:-1}.card-chg{order:0}.col2{order:1}"
+         "#bat-chart{height:280px}#chg-chart{height:260px}.card.card-bat,.card.card-chg{padding-bottom:1.5rem}"
          ".chart-svg{preserve-aspect-ratio:none}}";
     o += R"HTML(
 </style></head><body><div class="wrap">
@@ -796,7 +905,7 @@ html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--gre
     o += "<button id=\"thm-btn\" class=\"btn\" onclick=\"toggleTheme()\" title=\"Toggle theme\">&#9788;</button>";
     o += "</div></header>\n";
 
-    o += "<div class=\"stats\">\n";
+    o += "<main class=\"main\"><div class=\"stats\">\n";
 
     // Voltage
     snprintf(buf, sizeof(buf),
@@ -837,7 +946,14 @@ html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--gre
 
     o += "</div>\n"; // .stats
 
-    o += "<div class=\"card\"><div class=\"card-title\">Battery History</div>"
+    o += "<div class=\"flow-wrap\"><div class=\"card-title\">Energy Flow</div>"
+         "<div id=\"flow-diagram\" class=\"flow-diagram\">"
+         "<svg id=\"flow-svg\" viewBox=\"0 0 720 200\" xmlns=\"http://www.w3.org/2000/svg\">"
+         "<text x=\"50%\" y=\"50%\" fill=\"var(--muted)\" font-size=\"12\" font-family=\"monospace\""
+         " text-anchor=\"middle\" dominant-baseline=\"middle\">Loading…</text>"
+         "</svg></div></div>\n";
+
+    o += "<div class=\"card card-bat\"><div class=\"card-title\">Battery History</div>"
          "<svg id=\"bat-chart\" class=\"chart-svg\" viewBox=\"0 0 800 200\">"
          "<text x=\"50%\" y=\"50%\" fill=\"#444\" font-size=\"12\" font-family=\"monospace\""
          " text-anchor=\"middle\" dominant-baseline=\"middle\">Loading\xe2\x80\xa6</text>"
@@ -909,13 +1025,86 @@ html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--gre
     }
     o += "</table></div>\n";
 
+    o += "<div class=\"card\"><div class=\"card-title\">Radio Activity (24h)</div>"
+         "<table class=\"dt\">\n"
+         "<tr><td>TX events</td><td id=\"tx-count\">—</td></tr>"
+         "<tr><td>Total TX time</td><td id=\"tx-duration\">—</td></tr>"
+         "<tr><td>Duty cycle</td><td id=\"tx-duty\">—</td></tr>"
+         "<tr><td>Energy used</td><td id=\"tx-energy\">—</td></tr>"
+         "<tr><td>Peak TX power</td><td id=\"tx-peak-pwr\">—</td></tr>"
+         "<tr><td>Avg TX current</td><td id=\"tx-avg-cur\">—</td></tr>"
+         "</table></div>\n";
+
     o += "</div>\n"; // .col2
 
-    o += "<div class=\"card\"><div class=\"card-title\">Charger History</div>"
+    o += "<div class=\"card card-chg\"><div class=\"card-title\">Charger History</div>"
          "<svg id=\"chg-chart\" class=\"chart-svg\" viewBox=\"0 0 800 180\">"
          "<text x=\"50%\" y=\"50%\" fill=\"#444\" font-size=\"12\" font-family=\"monospace\""
          " text-anchor=\"middle\" dominant-baseline=\"middle\">Loading\xe2\x80\xa6</text>"
          "</svg></div>\n";
+
+    o += "<div class=\"sec-lbl\">Analytics</div>\n";
+    o += "<div class=\"acards\">\n";
+
+    o += "<div class=\"acard\"><div class=\"card-title\">Energy Today</div><table class=\"dt\">\n"
+         "<tr><td>Charged</td><td><span id=\"an-e-chg\">—</span> Wh</td></tr>\n"
+         "<tr><td>Consumed</td><td><span id=\"an-e-dis\">—</span> Wh</td></tr>\n"
+         "<tr><td>Solar</td><td><span id=\"an-e-sol\">—</span> Wh</td></tr>\n"
+         "<tr><td>Net change</td><td><span id=\"an-e-net\">—</span> Wh</td></tr>\n"
+         "</table></div>\n";
+
+    o += "<div class=\"acard\"><div class=\"card-title\">Battery Replacement</div><table class=\"dt\">\n"
+         "<tr><td>Age</td><td><span id=\"an-bat-age\">—</span></td></tr>\n"
+         "<tr><td>Est. health</td><td><span id=\"an-bat-health\">—</span></td></tr>\n"
+         "<tr><td>Est. remaining</td><td><span id=\"an-bat-repl\">—</span></td></tr>\n"
+         "<tr><td id=\"an-bat-warn-row\" style=\"display:none\" colspan=\"2\">"
+         "<span class=\"warn\">Replacement recommended soon</span></td></tr>\n"
+         "</table></div>\n";
+
+    o += "<div class=\"acard\"><div class=\"card-title\">Battery Health</div><table class=\"dt\">\n"
+         "<tr><td>Health</td><td><span id=\"an-cap-health\">—</span></td></tr>\n"
+         "<tr><td>Est. capacity</td><td><span id=\"an-cap-usable\">—</span></td></tr>\n"
+         "<tr><td>Rated capacity</td><td><span id=\"an-cap-rated\">—</span></td></tr>\n"
+         "</table></div>\n";
+
+    o += "<div class=\"acard\"><div class=\"card-title\">Charging Stage</div><table class=\"dt\">\n"
+         "<tr><td>Stage</td><td><span id=\"an-chg-stage\">—</span></td></tr>\n"
+         "</table></div>\n";
+
+    o += "<div class=\"acard\"><div class=\"card-title\">Cell Balance</div><table class=\"dt\">\n"
+         "<tr><td>Delta</td><td><span id=\"an-cell-delta\">—</span> mV</td></tr>\n"
+         "<tr><td>Status</td><td><span id=\"an-cell-bal\">—</span></td></tr>\n"
+         "</table></div>\n";
+
+    o += "<div class=\"acard\"><div class=\"card-title\">Battery Temperature</div><table class=\"dt\">\n"
+         "<tr><td>T1</td><td><span id=\"an-t1\">—</span></td></tr>\n"
+         "<tr><td>T2</td><td><span id=\"an-t2\">—</span></td></tr>\n"
+         "<tr><td>Status</td><td><span id=\"an-temp-status\">—</span></td></tr>\n"
+         "</table></div>\n";
+
+    o += "<div class=\"acard\"><div class=\"card-title\">Charger Efficiency</div><table class=\"dt\">\n"
+         "<tr><td>Efficiency</td><td><span id=\"an-eff\">—</span></td></tr>\n"
+         "</table></div>\n";
+
+    o += "<div class=\"acard\"><div class=\"card-title\">Solar Input</div><table class=\"dt\">\n"
+         "<tr><td>Voltage</td><td><span id=\"an-sol-v\">—</span> V</td></tr>\n"
+         "<tr><td>Status</td><td><span id=\"an-sol-status\">—</span></td></tr>\n"
+         "<tr><td>Power</td><td><span id=\"an-sol-pwr\">—</span></td></tr>\n"
+         "<tr><td>Energy today</td><td><span id=\"an-sol-energy\">—</span></td></tr>\n"
+         "</table></div>\n";
+
+    o += "<div class=\"acard\"><div class=\"card-title\">Depth of Discharge</div><table class=\"dt\">\n"
+         "<tr><td>DoD today</td><td><span id=\"an-dod\">—</span> %</td></tr>\n"
+         "<tr><td>Status</td><td><span id=\"an-dod-status\">—</span></td></tr>\n"
+         "</table></div>\n";
+
+    o += "<div class=\"acard\"><div class=\"card-title\">System Load Profile</div><table class=\"dt\">\n"
+         "<tr><td>Average</td><td><span id=\"an-avg-load\">—</span> W</td></tr>\n"
+         "<tr><td>Peak</td><td><span id=\"an-peak-load\">—</span> W</td></tr>\n"
+         "<tr><td>Idle</td><td><span id=\"an-idle-load\">—</span> W</td></tr>\n"
+         "</table></div>\n";
+
+    o += "</div>\n"; // .acards
 
     if (!s.cell_voltages_v.empty()) {
         o += "<div class=\"card\"><div class=\"card-title\">Cell Voltages";
@@ -975,8 +1164,11 @@ html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--gre
 </table></details>
 )";
 
-    o += "<div class=\"footer\">API: "
+    o += "</main><div class=\"footer\">API: "
          "<a href=\"/api/status\">/api/status</a> &nbsp;"
+         "<a href=\"/api/analytics\">/api/analytics</a> &nbsp;"
+         "<a href=\"/api/flow\">/api/flow</a> &nbsp;"
+         "<a href=\"/api/tx_events\">/api/tx_events</a> &nbsp;"
          "<a href=\"/api/cells\">/api/cells</a> &nbsp;"
          "<a href=\"/api/history\">/api/history</a> &nbsp;"
          "<a href=\"/api/charger\">/api/charger</a> &nbsp;"
@@ -1061,6 +1253,165 @@ function upChg(){fetch('/api/charger').then(function(r){return r.json()}).then(f
 
 setInterval(upBat,5000); setInterval(upChg,5000)
 upBat(); upChg()
+
+function upFlow(){fetch('/api/flow').then(function(r){return r.json()}).then(function(d){
+  lastFlowData=d;renderFlowDiagram(d)
+}).catch(function(){})}
+var lastFlowData=null
+setInterval(upFlow,3000); upFlow()
+window.addEventListener('resize',function(){if(lastFlowData)renderFlowDiagram(lastFlowData)})
+
+function upTx(){fetch('/api/tx_events').then(function(r){return r.json()}).then(function(evs){
+  var cutoff=Date.now()/1000-86400
+  var in24=evs.filter(function(e){return e.start>=cutoff})
+  var n=in24.length
+  var totalS=in24.reduce(function(a,e){return a+e.duration},0)
+  var peakPwr=0,sumCur=0,energyWh=0
+  in24.forEach(function(e){
+    if(e.peak_power>peakPwr)peakPwr=e.peak_power
+    sumCur+=e.peak_current
+    energyWh+=e.peak_power*e.duration/3600
+  })
+  var avgCur=n>0?sumCur/n:0
+  var dutyCycle=totalS/864
+  $('tx-count').textContent=n>0?n:'—'
+  $('tx-duration').textContent=totalS>0?(totalS>=60?Math.floor(totalS/60)+'m '+Math.round(totalS%60)+'s':Math.round(totalS)+'s'):'—'
+  $('tx-duty').textContent=dutyCycle>0?dutyCycle.toFixed(2)+' %':'—'
+  $('tx-energy').textContent=energyWh>0?energyWh.toFixed(2)+' Wh':'—'
+  $('tx-peak-pwr').textContent=peakPwr>0?fmt(peakPwr,0)+' W':'—'
+  $('tx-avg-cur').textContent=avgCur>0?fmt(avgCur,1)+' A':'—'
+}).catch(function(){})}
+setInterval(upTx,5000); upTx()
+
+function upAnalytics(){fetch('/api/analytics').then(function(r){return r.json()}).then(function(d){
+  function sv(id,v){var e=$(id);if(e)e.textContent=v}
+  function sc(id,cls,v){var e=$(id);if(e){e.textContent=v;e.className=cls}}
+  sv('an-e-chg',   fmt(d.energy_charged_today_wh,0))
+  sv('an-e-dis',   fmt(d.energy_discharged_today_wh,0))
+  sv('an-e-sol',   fmt(d.solar_energy_today_wh,0))
+  var net=d.net_energy_today_wh||0
+  sc('an-e-net',net>=0?'ok':'warn',(net>=0?'+':'')+net.toFixed(0))
+  sv('an-bat-age', d.battery_age_years>=0 ? d.battery_age_years.toFixed(1)+' yr' : '—')
+  var hp=d.battery_health_pct
+  sc('an-bat-health', hp<0?'dim':hp<80?'err':hp<90?'warn':'ok',
+     hp>=0 ? hp.toFixed(1)+'%' : '—')
+  var rl=d.years_remaining_low,rh=d.years_remaining_high
+  sv('an-bat-repl', rl>=0&&rh>=0 ? rl.toFixed(0)+'\u2013'+rh.toFixed(0)+' yr remaining' : '—')
+  var wr=$('an-bat-warn-row')
+  if(wr)wr.style.display=d.battery_replace_warn?'':'none'
+  var stg=d.charging_stage||'—'
+  var stgcls=stg==='Bulk'?'ok':stg==='Absorption'?'ok':stg==='Float'?'dim':'dim'
+  sc('an-chg-stage',stgcls,stg)
+  var ch=d.capacity_health_pct
+  sc('an-cap-health', ch<0?'dim':ch<80?'err':ch<90?'warn':'ok',
+     ch>=0 ? ch.toFixed(1)+'%' : '—')
+  sv('an-cap-usable', d.usable_capacity_ah>0 ? d.usable_capacity_ah.toFixed(1)+' Ah' : '—')
+  sv('an-cap-rated',  d.rated_capacity_ah>0  ? d.rated_capacity_ah.toFixed(1)+' Ah'  : '—')
+  var dm=d.cell_delta_mv||0
+  sc('an-cell-delta', dm>=50?'err':dm>=25?'warn':'ok', dm.toFixed(1))
+  var bs=d.cell_balance_status||'—'
+  sc('an-cell-bal', bs==='Excellent'||bs==='Good'?'ok':bs==='Warning'?'warn':bs==='Imbalance'?'err':'dim', bs)
+  if(d.temp_valid){
+    sv('an-t1', d.temp1_c.toFixed(1)+'\xb0C')
+    sv('an-t2', d.temp2_c.toFixed(1)+'\xb0C')
+    var ts=d.temp_status||'—'
+    sc('an-temp-status', ts==='Normal'?'ok':ts==='Warm'?'warn':'err', ts)
+  }
+  if(d.efficiency_valid&&d.charger_efficiency>=0){
+    var eff=d.charger_efficiency*100
+    sc('an-eff', eff<80?'warn':'ok', eff.toFixed(1)+'%')
+  }
+  sv('an-sol-v', fmt(d.solar_voltage_v,2))
+  sc('an-sol-status', d.solar_active?'ok':'dim', d.solar_active?'Active':'Inactive')
+  sv('an-sol-pwr',    d.solar_active&&d.solar_power_w>0 ? fmt(d.solar_power_w,1)+' W' : '—')
+  sv('an-sol-energy', d.solar_energy_today_wh>0 ? fmt(d.solar_energy_today_wh,0)+' Wh' : '—')
+  var dod=d.depth_of_discharge_pct||0
+  sc('an-dod', dod>=70?'err':dod>=30?'warn':'ok', dod.toFixed(1))
+  var ds=d.dod_status||'—'
+  sc('an-dod-status', ds==='Low stress'?'ok':ds==='Normal'?'':'err', ds)
+  sv('an-avg-load',  fmt(d.avg_load_watts,1))
+  sv('an-peak-load', fmt(d.peak_load_watts,1))
+  sv('an-idle-load', fmt(d.idle_load_watts,1))
+}).catch(function(){})}
+setInterval(upAnalytics,5000); upAnalytics()
+
+function renderFlowDiagram(d){
+  var el=document.getElementById('flow-svg');if(!el)return
+  var bv=d.battery_voltage||0,ba=d.battery_current||0,sol=d.solar_voltage||0,chv=d.charger_voltage||0
+  var pw=d.power_watts||0
+  var batPwr=bv*ba
+  var sysLoad=bv*Math.abs(ba)
+  var charging=ba<-0.1,discharging=ba>0.1,idle=Math.abs(ba)<=0.1
+  var solarActive=sol>1
+  var animSpeed=Math.max(0.5,Math.min(2,Math.abs(batPwr)/50))
+  var dur=(1/animSpeed).toFixed(2)+'s'
+  var chgCls='flow-arrow-chg',dchgCls='flow-arrow-dchg',idleCls='flow-arrow-idle'
+  var chgPwr=chv>0?(pw||0):0
+  var mobile=window.innerWidth<640
+  var vb=mobile?'0 0 200 420':'0 0 720 200'
+  var nodes,arrows
+  var loadAnim=discharging||(sysLoad>1)
+  var chgNodeLbl=charging?'Charging':'Charger'
+  var chgNodeVal=fmt(chgPwr||0,0)+' W'
+  var isDark=!document.documentElement.classList.contains('light')
+  var pillBg=isDark?'rgba(0,0,0,0.55)':'rgba(255,255,255,0.82)'
+  var chgColor=isDark?'#4ade80':'#16a34a'
+  var dchgColor=isDark?'#fb923c':'#ea580c'
+  var wFill='#fff',wMuted='rgba(255,255,255,0.7)'
+  var flowRef='flowShadow',textEnd='<'+'/text>',fillTxt='var(--text)',fillMuted='var(--muted)'
+  if(mobile){
+    nodes=[
+      {id:'solar',x:100,y:52,w:80,h:44,cls:'flow-node flow-node-solar',lbl:'Solar',val:fmt(sol,1)+' V',inactive:!solarActive,tf:wFill,lf:wMuted},
+      {id:'grid',x:100,y:128,w:80,h:44,cls:'flow-node flow-node-grid',lbl:'Grid',val:fmt(chv,2)+' V',inactive:false,tf:wFill,lf:wMuted},
+      {id:'charger',x:100,y:204,w:80,h:44,cls:'flow-node flow-node-charger',lbl:chgNodeLbl,val:chgNodeVal,inactive:false,tf:wFill,lf:wMuted},
+      {id:'battery',x:100,y:280,w:92,h:58,cls:'flow-node flow-node-battery',lbl:'Battery',val:fmt(bv,2)+' V',val2:(ba>=0?'+':'')+fmt(ba,2)+' A',val2Cls:idle?'':charging?'flow-cur-chg':'flow-cur-dchg',inactive:false,tf:wFill,lf:wMuted},
+      {id:'load',x:100,y:368,w:80,h:44,cls:'flow-node flow-node-load',lbl:'Load',val:fmt(sysLoad||0,1)+' W',inactive:false,tf:fillTxt,lf:fillMuted}
+    ]
+    arrows=[
+      {path:'M 100 74 L 100 102',cls:(solarActive?chgCls:idleCls)+' flow-arrow-solar',anim:charging&&solarActive,pwr:solarActive&&charging?fmt(chgPwr,0)+' W':'',mx:118,my:88},
+      {path:'M 100 150 L 100 182',cls:chv>1?chgCls:idleCls,anim:charging&&chv>1,pwr:chv>1&&charging?fmt(chgPwr,0)+' W':'',mx:118,my:166},
+      {path:'M 100 226 L 100 258',cls:chgCls,anim:charging,pwr:charging?fmt(Math.abs(batPwr||0),0)+' W':'',mx:118,my:242},
+      {path:'M 100 302 L 100 346',cls:loadAnim?dchgCls:idleCls,anim:loadAnim,pwr:(sysLoad||0)>0?fmt(sysLoad||0,0)+' W':'',mx:118,my:324}
+    ]
+  }else{
+    nodes=[
+      {id:'solar',x:324,y:55,w:76,h:40,cls:'flow-node flow-node-solar',lbl:'Solar',val:fmt(sol,1)+' V',inactive:!solarActive,tf:wFill,lf:wMuted},
+      {id:'grid',x:180,y:140,w:76,h:44,cls:'flow-node flow-node-grid',lbl:'Grid',val:fmt(chv,2)+' V',inactive:false,tf:wFill,lf:wMuted},
+      {id:'charger',x:324,y:140,w:88,h:44,cls:'flow-node flow-node-charger',lbl:chgNodeLbl,val:chgNodeVal,inactive:false,tf:wFill,lf:wMuted},
+      {id:'battery',x:468,y:140,w:92,h:58,cls:'flow-node flow-node-battery',lbl:'Battery',val:fmt(bv,2)+' V',val2:(ba>=0?'+':'')+fmt(ba,2)+' A',val2Cls:idle?'':charging?'flow-cur-chg':'flow-cur-dchg',inactive:false,tf:wFill,lf:wMuted},
+      {id:'load',x:612,y:140,w:76,h:44,cls:'flow-node flow-node-load',lbl:'Load',val:fmt(sysLoad||0,1)+' W',inactive:false,tf:fillTxt,lf:fillMuted}
+    ]
+    arrows=[
+      {path:'M 324 75 L 324 118',cls:(solarActive?chgCls:idleCls)+' flow-arrow-solar',anim:charging&&solarActive,pwr:solarActive&&charging?fmt(chgPwr,0)+' W':'',mx:336,my:96},
+      {path:'M 218 140 L 280 140',cls:chv>1?chgCls:idleCls,anim:charging&&chv>1,pwr:chv>1&&charging?fmt(chgPwr,0)+' W':'',mx:249,my:133},
+      {path:'M 368 140 L 422 140',cls:chgCls,anim:charging,pwr:charging?fmt(Math.abs(batPwr||0),0)+' W':'',mx:395,my:133},
+      {path:'M 514 140 L 574 140',cls:loadAnim?dchgCls:idleCls,anim:loadAnim,pwr:sysLoad>0?fmt(sysLoad||0,0)+' W':'',mx:544,my:133}
+    ]
+  }
+  var defs='<defs><filter id="flowShadow"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity=".12"/></filter></defs>'
+  var s=defs+'<rect width="'+(mobile?200:720)+'" height="'+(mobile?420:200)+'" fill="transparent"/>'
+  arrows.forEach(function(a){
+    var ac=a.anim?' flow-arrow-anim" style="animation-duration:'+dur+'"':''
+    s+='<path d="'+a.path+'" class="flow-arrow '+a.cls+ac+'"/>'
+    if(a.pwr){
+      var lc=a.cls.indexOf(chgCls)>=0?chgColor:a.cls.indexOf(dchgCls)>=0?dchgColor:'#94a3b8'
+      var tw=a.pwr.length*5.5+10
+      s+='<rect x="'+(a.mx-tw/2).toFixed(1)+'" y="'+(a.my-2)+'" width="'+tw.toFixed(1)+'" height="13" rx="4" fill="'+pillBg+'"/>'
+      s+='<text x="'+a.mx+'" y="'+(a.my+9)+'" text-anchor="middle" font-size="9" font-weight="600" font-family="system-ui,sans-serif" fill="'+lc+'">'+a.pwr+textEnd
+    }
+  })
+  nodes.forEach(function(n){
+    var rx=12,cls=n.cls+(n.inactive?' flow-node-inactive':'')
+    s+='<rect x="'+(n.x-n.w/2)+'" y="'+(n.y-n.h/2)+'" width="'+n.w+'" height="'+n.h+'" rx="'+rx+'" class="'+cls+'" filter=\'url(#'+flowRef+')\'/>'
+    s+='<text x="'+n.x+'" y="'+(n.y-6)+'" text-anchor="middle" font-size="8" font-family="system-ui,sans-serif" font-weight="500" fill="'+(n.lf||fillMuted)+'">'+n.lbl+textEnd
+    s+='<text x="'+n.x+'" y="'+(n.y+10)+'" text-anchor="middle" font-size="11" font-family="system-ui,sans-serif" font-weight="600" fill="'+(n.tf||fillTxt)+'">'+n.val+textEnd
+    if(n.val2){
+      var curFill=n.val2Cls==='flow-cur-chg'?'var(--green)':n.val2Cls==='flow-cur-dchg'?'var(--orange)':fillMuted
+      s+='<text x="'+n.x+'" y="'+(n.y+24)+'" text-anchor="middle" font-size="9" font-family="system-ui,sans-serif" fill="'+curFill+'">'+n.val2+textEnd
+    }
+  })
+  el.outerHTML='<svg id="flow-svg" viewBox="'+vb+'" xmlns="http://www.w3.org/2000/svg">'+s+'</svg>'
+}
 setInterval(function(){
   var s=Math.round((Date.now()-lastUpd)/1000)
   var e=$('ts-disp'); if(!e)return
@@ -1081,57 +1432,97 @@ function loadCharts(){
   var cutoff=Date.now()-currentH*3600000
   var batN=Math.round(currentH*3600/pollIvl*1.15)+50
   var chgN=Math.round(currentH*7200)+100
-  fetch('/api/history?n='+batN)
-    .then(function(r){return r.json()})
-    .then(function(d){renderBatChart(d.filter(function(p){return new Date(p.ts).getTime()>=cutoff}))})
-    .catch(function(){})
+  Promise.all([
+    fetch('/api/history?n='+batN).then(function(r){return r.json()}),
+    fetch('/api/tx_events?n=200').then(function(r){return r.json()})
+  ]).then(function(res){
+    var hist=res[0].filter(function(p){return new Date(p.ts).getTime()>=cutoff})
+    var txEvs=res[1].filter(function(e){return e.start*1000>=cutoff})
+    renderBatChart(hist,txEvs)
+  }).catch(function(){})
   fetch('/api/charger/history?n='+chgN)
     .then(function(r){return r.json()})
     .then(function(d){renderChgChart(d.filter(function(p){return new Date(p.ts).getTime()>=cutoff}))})
     .catch(function(){})
 }
 
-function timeTicks(t0,t1,tspan,pl,cw,chartTop,chartH,labelY){
+function isMobile(){return window.innerWidth<640}
+function chartDims(el,hBat,hChg){
+  if(!isMobile())return null
+  var w=el?el.clientWidth:0
+  if(!w)w=Math.max(340,window.innerWidth-32)
+  return{w:Math.min(500,w),hBat:hBat||280,hChg:hChg||260}
+}
+
+function timeTicks(t0,t1,tspan,pl,cw,chartTop,chartH,labelY,fsTick){
   if(tspan<1000) return ''
+  var fs=fsTick||10
   var ss=tspan/1000
   var ts=ss<=600?120:ss<=1800?300:ss<=5400?900:ss<=21600?3600:ss<=86400?14400:43200
   var tms=ts*1000,firstTk=Math.ceil(t0/tms)*tms
   var multi=new Date(t0).toDateString()!==new Date(t1).toDateString()
   function pad(n){return n.toString().padStart(2,'0')}
-  function fmtT(t){
+  function fmtT(t,prevDay){
     var d=new Date(t),h=pad(d.getHours()),m=pad(d.getMinutes())
-    return (multi&&h==='00'&&m==='00') ? pad(d.getMonth()+1)+'/'+pad(d.getDate()) : h+':'+m
+    var ds=(d.getMonth()+1)+'/'+d.getDate()
+    if(multi&&h==='00'&&m==='00') return ds
+    if(multi&&prevDay!==d.toDateString()) return ds+' '+h+':'+m
+    return h+':'+m
   }
-  function fmtEdge(t){
-    var d=new Date(t),h=pad(d.getHours()),m=pad(d.getMinutes())
-    return multi ? pad(d.getMonth()+1)+'/'+pad(d.getDate())+' '+h+':'+m : h+':'+m
+  function fmtStart(t,short){
+    var d=new Date(t)
+    if(short) return multi ? (d.getMonth()+1)+'/'+d.getDate() : pad(d.getHours())+':'+pad(d.getMinutes())
+    return multi ? (d.getMonth()+1)+'/'+d.getDate()+' '+pad(d.getHours())+':'+pad(d.getMinutes()) : pad(d.getHours())+':'+pad(d.getMinutes())
   }
+  var minGap=Math.max(36,fs*2.8)
+  var firstTkX=firstTk<t1?pl+(firstTk-t0)/tspan*cw:pl+cw
+  var firstTkClose=firstTkX<pl+minGap*2
+  var startLbl=fmtStart(t0,firstTkClose)
+  var startW=Math.max(minGap,startLbl.length*fs*0.7)
   var s="<g stroke='var(--chart-grid)' stroke-width='1' stroke-dasharray='2,4'>"
   for(var tk=firstTk;tk<t1;tk+=tms){
-    var f=(tk-t0)/tspan; if(f<0.02||f>0.98) continue
-    var x=(pl+f*cw).toFixed(1)
-    s+="<line x1='"+x+"' y1='"+chartTop+"' x2='"+x+"' y2='"+(chartTop+chartH)+"'/>"
+    var f=(tk-t0)/tspan; if(f<0.01||f>0.99) continue
+    s+="<line x1='"+(pl+f*cw).toFixed(1)+"' y1='"+chartTop+"' x2='"+(pl+f*cw).toFixed(1)+"' y2='"+(chartTop+chartH)+"'/>"
   }
-  s+="</g><g font-size='10' font-family='monospace' text-anchor='middle' style='fill:var(--chart-tick)'>"
+  s+="</g><g font-size='"+fs+"' font-family='monospace' style='fill:var(--chart-tick)'>"
+  s+="<text x='"+pl+"' y='"+labelY+"' text-anchor='start'>"+startLbl+"</text>"
+  var lastX=pl+startW,prevDay=new Date(t0).toDateString()
   for(var tk=firstTk;tk<t1;tk+=tms){
-    var f=(tk-t0)/tspan; if(f<0.02||f>0.98) continue
-    s+="<text x='"+(pl+f*cw).toFixed(1)+"' y='"+labelY+"'>"+fmtT(tk)+"</text>"
+    var f=(tk-t0)/tspan; if(f<0.01||f>0.99) continue
+    var x=pl+f*cw
+    if(x<lastX||x>pl+cw-minGap) continue
+    var d=new Date(tk)
+    var lbl=fmtT(tk,prevDay)
+    var gap=minGap
+    if(lbl.length>6) gap=Math.max(gap,fs*lbl.length*0.6)
+    lastX=x+gap
+    prevDay=d.toDateString()
+    s+="<text x='"+x.toFixed(1)+"' y='"+labelY+"' text-anchor='middle'>"+lbl+"</text>"
   }
+  s+="<text x='"+(pl+cw)+"' y='"+labelY+"' text-anchor='end'>now</text>"
   s+="</g>"
-  s+="<text x='"+pl+"' y='"+labelY+"' font-size='10' font-family='monospace' style='fill:var(--chart-tick)'>"+fmtEdge(t0)+"</text>"
-  s+="<text x='"+(pl+cw)+"' y='"+labelY+"' font-size='10' font-family='monospace' text-anchor='end' style='fill:var(--chart-tick)'>now</text>"
   return s
 }
 
 function sma(arr,w){return arr.map(function(_,i){var a=0,c=0;for(var j=Math.max(0,i-w+1);j<=i;j++){a+=arr[j];c++}return a/c})}
 
-function renderBatChart(data){
+function renderBatChart(data,txEvs){
   var el=$('bat-chart'); if(!el) return
+  txEvs=txEvs||[]
   if(!data||data.length<2){
-    el.innerHTML="<text x='50%' y='50%' font-size='12' font-family='monospace' text-anchor='middle' dominant-baseline='middle' style='fill:var(--muted)'>Collecting data\u2026</text>"
+    el.innerHTML="<text x='50%' y='50%' font-size='14' font-family='monospace' text-anchor='middle' dominant-baseline='middle' style='fill:var(--muted)'>Collecting data\u2026</text>"
     return
   }
-  var W=800,H=200,PL=52,PR=48,PT=16,PB=24,CW=W-PL-PR,CH=H-PT-PB
+  var md=chartDims(el,280,260)
+  var W,H,PL,PR,PT,PB,fs,fsTick,sw,sw2,legY
+  if(md){
+    W=md.w;H=md.hBat;PL=78;PR=72;PT=32;PB=42
+    fs=16;fsTick=14;sw=4;sw2=3;legY=22
+  }else{
+    W=800;H=200;PL=62;PR=52;PT=16;PB=24
+    fs=11;fsTick=10;sw=2;sw2=1.5;legY=13
+  }
+  var CW=W-PL-PR,CH=H-PT-PB
   var vlo=Infinity,vhi=-Infinity
   data.forEach(function(d){if(d.v<vlo)vlo=d.v;if(d.v>vhi)vhi=d.v})
   var vrng=Math.max(0.1,vhi-vlo);vlo-=vrng*.08;vhi+=vrng*.08;vrng=vhi-vlo
@@ -1140,37 +1531,55 @@ function renderBatChart(data){
   function xp(i){return (PL+(ts[i]-t0)/tspan*CW).toFixed(1)}
   function yv(v){return (PT+CH-(v-vlo)/vrng*CH).toFixed(1)}
   function ys(s){return (PT+CH-(s/100)*CH).toFixed(1)}
-  var s="<rect width='"+W+"' height='"+H+"' style='fill:var(--chart-bg)' rx='4'/>"
+  var s="<rect width='"+W+"' height='"+H+"' style='fill:var(--chart-bg)' rx='6'/>"
   s+="<g stroke='var(--chart-grid)' stroke-width='1'>"
   for(var i=0;i<=4;i++){var gy=(PT+CH*i/4).toFixed(1);s+="<line x1='"+PL+"' y1='"+gy+"' x2='"+(W-PR)+"' y2='"+gy+"'/>"}
   s+="</g>"
-  s+="<g font-size='11' font-family='monospace' text-anchor='end' style='fill:var(--cv)'>"
-  for(var i=0;i<=4;i++) s+="<text x='"+(PL-4)+"' y='"+(PT+CH*i/4+4).toFixed(1)+"'>"+(vhi-vrng*i/4).toFixed(2)+"V</text>"
+  s+="<g font-size='"+fs+"' font-family='monospace' text-anchor='end' style='fill:var(--cv)'>"
+  for(var i=0;i<=4;i++) s+="<text x='"+(PL-6)+"' y='"+(PT+CH*i/4+5).toFixed(1)+"'>"+(vhi-vrng*i/4).toFixed(2)+"V</text>"
   s+="</g>"
-  s+="<g font-size='11' font-family='monospace' text-anchor='start' style='fill:var(--csoc)'>"
-  for(var i=0;i<=4;i++) s+="<text x='"+(W-PR+4)+"' y='"+(PT+CH*i/4+4).toFixed(1)+"'>"+(100-25*i)+"%</text>"
+  s+="<g font-size='"+fs+"' font-family='monospace' text-anchor='start' style='fill:var(--csoc)'>"
+  for(var i=0;i<=4;i++) s+="<text x='"+(W-PR+6)+"' y='"+(PT+CH*i/4+5).toFixed(1)+"'>"+(100-25*i)+"%</text>"
   s+="</g>"
-  s+=timeTicks(t0,t1,tspan,PL,CW,PT,CH,H-5)
+  s+=timeTicks(t0,t1,tspan,PL,CW,PT,CH,H-8,fsTick)
+  txEvs.forEach(function(e){
+    var x=PL+(e.start*1000-t0)/tspan*CW
+    if(x>=PL&&x<=PL+CW){
+      s+="<g><line x1='"+x.toFixed(1)+"' y1='"+PT+"' x2='"+x.toFixed(1)+"' y2='"+(PT+CH)+"' stroke='var(--ca)' stroke-width='1' stroke-dasharray='2,3' opacity='0.7'/>"
+      s+="<text x='"+x.toFixed(1)+"' y='"+(PT-4)+"' text-anchor='middle' font-size='12' fill='var(--ca)'>\u26a1</text>"
+      s+="<title>TX Event\nDuration: "+e.duration.toFixed(1)+" s\nPeak Power: "+e.peak_power.toFixed(0)+" W</title></g>"
+    }
+  })
   var pts=data.map(function(d,i){return xp(i)+','+yv(d.v)}).join(' ')
-  s+="<polyline fill='none' stroke='var(--cv)' stroke-width='2' points='"+pts+"'/>"
+  s+="<polyline fill='none' stroke='var(--cv)' stroke-width='"+sw+"' stroke-linecap='round' stroke-linejoin='round' points='"+pts+"'/>"
   pts=data.map(function(d,i){return xp(i)+','+ys(d.soc)}).join(' ')
-  s+="<polyline fill='none' stroke='var(--csoc)' stroke-width='1.5' stroke-dasharray='5,3' points='"+pts+"'/>"
-  s+="<g font-size='11' font-family='monospace'>"
-  s+="<line x1='60' y1='9' x2='74' y2='9' stroke='var(--cv)' stroke-width='2'/>"
-  s+="<text x='78' y='13' style='fill:var(--cv)'>Voltage</text>"
-  s+="<line x1='142' y1='9' x2='156' y2='9' stroke='var(--csoc)' stroke-width='1.5' stroke-dasharray='5,3'/>"
-  s+="<text x='160' y='13' style='fill:var(--csoc)'>SoC</text>"
+  s+="<polyline fill='none' stroke='var(--csoc)' stroke-width='"+sw2+"' stroke-dasharray='6,4' stroke-linecap='round' stroke-linejoin='round' points='"+pts+"'/>"
+  s+="<g font-size='"+fs+"' font-family='monospace'>"
+  s+="<line x1='"+(PL+8)+"' y1='"+legY+"' x2='"+(PL+28)+"' y2='"+legY+"' stroke='var(--cv)' stroke-width='"+sw+"' stroke-linecap='round'/>"
+  s+="<text x='"+(PL+34)+"' y='"+(legY+4)+"' style='fill:var(--cv)'>Voltage</text>"
+  s+="<line x1='"+(PL+110)+"' y1='"+legY+"' x2='"+(PL+130)+"' y2='"+legY+"' stroke='var(--csoc)' stroke-width='"+sw2+"' stroke-dasharray='6,4' stroke-linecap='round'/>"
+  s+="<text x='"+(PL+136)+"' y='"+(legY+4)+"' style='fill:var(--csoc)'>SoC</text>"
   s+="</g>"
+  el.setAttribute('viewBox','0 0 '+W+' '+H)
   el.innerHTML=s
 }
 
 function renderChgChart(data){
   var el=$('chg-chart'); if(!el) return
   if(!data||data.length<2){
-    el.innerHTML="<text x='50%' y='50%' font-size='12' font-family='monospace' text-anchor='middle' dominant-baseline='middle' style='fill:var(--muted)'>Collecting data\u2026</text>"
+    el.innerHTML="<text x='50%' y='50%' font-size='14' font-family='monospace' text-anchor='middle' dominant-baseline='middle' style='fill:var(--muted)'>Collecting data\u2026</text>"
     return
   }
-  var W=800,H=180,PL=52,PR=48,PT=16,PB=24,CW=W-PL-PR,CH=H-PT-PB
+  var md=chartDims(el,280,260)
+  var W,H,PL,PR,PT,PB,fs,fsTick,sw,sw2,legY
+  if(md){
+    W=md.w;H=md.hChg;PL=78;PR=72;PT=32;PB=42
+    fs=16;fsTick=14;sw=4;sw2=3;legY=22
+  }else{
+    W=800;H=180;PL=62;PR=52;PT=16;PB=24
+    fs=11;fsTick=10;sw=2;sw2=1.5;legY=13
+  }
+  var CW=W-PL-PR,CH=H-PT-PB
   var win=Math.max(3,Math.floor(data.length/60))
   var rawV=data.map(function(d){return d.bat_v})
   var rawA=data.map(function(d){return d.bat_a})
@@ -1189,43 +1598,44 @@ function renderChgChart(data){
   function xp(i){return (PL+(ts[i]-t0)/tspan*CW).toFixed(1)}
   function yv(v){return (PT+CH-(v-vlo)/vrng*CH).toFixed(1)}
   function ya(a){return (PT+CH-(a-alo)/arng*CH).toFixed(1)}
-  var s="<rect width='"+W+"' height='"+H+"' style='fill:var(--chart-bg)' rx='4'/>"
+  var s="<rect width='"+W+"' height='"+H+"' style='fill:var(--chart-bg)' rx='6'/>"
   s+="<g stroke='var(--chart-grid)' stroke-width='1'>"
   for(var i=0;i<=4;i++){var gy=(PT+CH*i/4).toFixed(1);s+="<line x1='"+PL+"' y1='"+gy+"' x2='"+(W-PR)+"' y2='"+gy+"'/>"}
   s+="</g>"
-  s+="<g font-size='11' font-family='monospace' text-anchor='end' style='fill:var(--cv)'>"
-  for(var i=0;i<=4;i++) s+="<text x='"+(PL-4)+"' y='"+(PT+CH*i/4+4).toFixed(1)+"'>"+(vhi-vrng*i/4).toFixed(2)+"V</text>"
+  s+="<g font-size='"+fs+"' font-family='monospace' text-anchor='end' style='fill:var(--cv)'>"
+  for(var i=0;i<=4;i++) s+="<text x='"+(PL-6)+"' y='"+(PT+CH*i/4+5).toFixed(1)+"'>"+(vhi-vrng*i/4).toFixed(2)+"V</text>"
   s+="</g>"
-  s+="<g font-size='11' font-family='monospace' text-anchor='start' style='fill:var(--ca)'>"
-  for(var i=0;i<=4;i++) s+="<text x='"+(W-PR+4)+"' y='"+(PT+CH*i/4+4).toFixed(1)+"'>"+(ahi-arng*i/4).toFixed(1)+"A</text>"
+  s+="<g font-size='"+fs+"' font-family='monospace' text-anchor='start' style='fill:var(--ca)'>"
+  for(var i=0;i<=4;i++) s+="<text x='"+(W-PR+6)+"' y='"+(PT+CH*i/4+5).toFixed(1)+"'>"+(ahi-arng*i/4).toFixed(1)+"A</text>"
   s+="</g>"
-  s+=timeTicks(t0,t1,tspan,PL,CW,PT,CH,H-5)
+  s+=timeTicks(t0,t1,tspan,PL,CW,PT,CH,H-8,fsTick)
   var pts=smoothV.map(function(v,i){return xp(i)+','+yv(v)}).join(' ')
-  s+="<polyline fill='none' stroke='var(--cv)' stroke-width='2' points='"+pts+"'/>"
+  s+="<polyline fill='none' stroke='var(--cv)' stroke-width='"+sw+"' stroke-linecap='round' stroke-linejoin='round' points='"+pts+"'/>"
   pts=smoothA.map(function(a,i){return xp(i)+','+ya(a)}).join(' ')
-  s+="<polyline fill='none' stroke='var(--ca)' stroke-width='1.5' stroke-dasharray='5,3' points='"+pts+"'/>"
+  s+="<polyline fill='none' stroke='var(--ca)' stroke-width='"+sw2+"' stroke-dasharray='6,4' stroke-linecap='round' stroke-linejoin='round' points='"+pts+"'/>"
   if(hasSol){
     pts=data.map(function(d,i){return xp(i)+','+yv(d.sol_v)}).join(' ')
-    s+="<polyline fill='none' stroke='var(--csol)' stroke-width='1.5' stroke-dasharray='3,4' points='"+pts+"'/>"
-    s+="<line x1='222' y1='9' x2='236' y2='9' stroke='var(--csol)' stroke-width='1.5' stroke-dasharray='3,4'/>"
-    s+="<text x='240' y='13' style='fill:var(--csol)'>Solar V</text>"
+    s+="<polyline fill='none' stroke='var(--csol)' stroke-width='"+sw2+"' stroke-dasharray='4,5' stroke-linecap='round' stroke-linejoin='round' points='"+pts+"'/>"
+    s+="<line x1='"+(PL+180)+"' y1='"+legY+"' x2='"+(PL+200)+"' y2='"+legY+"' stroke='var(--csol)' stroke-width='"+sw2+"' stroke-dasharray='4,5' stroke-linecap='round'/>"
+    s+="<text x='"+(PL+206)+"' y='"+(legY+4)+"' font-size='"+fs+"' style='fill:var(--csol)'>Solar</text>"
   }
-  s+="<g font-size='11' font-family='monospace'>"
-  s+="<line x1='60' y1='9' x2='74' y2='9' stroke='var(--cv)' stroke-width='2'/>"
-  s+="<text x='78' y='13' style='fill:var(--cv)'>Bat V</text>"
-  s+="<line x1='130' y1='9' x2='144' y2='9' stroke='var(--ca)' stroke-width='1.5' stroke-dasharray='5,3'/>"
-  s+="<text x='148' y='13' style='fill:var(--ca)'>Charge A</text>"
+  s+="<g font-size='"+fs+"' font-family='monospace'>"
+  s+="<line x1='"+(PL+8)+"' y1='"+legY+"' x2='"+(PL+28)+"' y2='"+legY+"' stroke='var(--cv)' stroke-width='"+sw+"' stroke-linecap='round'/>"
+  s+="<text x='"+(PL+34)+"' y='"+(legY+4)+"' style='fill:var(--cv)'>Bat V</text>"
+  s+="<line x1='"+(PL+100)+"' y1='"+legY+"' x2='"+(PL+120)+"' y2='"+legY+"' stroke='var(--ca)' stroke-width='"+sw2+"' stroke-dasharray='6,4' stroke-linecap='round'/>"
+  s+="<text x='"+(PL+126)+"' y='"+(legY+4)+"' style='fill:var(--ca)'>Charge A</text>"
   s+="</g>"
+  el.setAttribute('viewBox','0 0 '+W+' '+H)
   el.innerHTML=s
 }
 
 loadCharts()
 setInterval(loadCharts,Math.max(pollIvl*1000,10000))
+(function(){var rt;window.addEventListener('resize',function(){clearTimeout(rt);rt=setTimeout(loadCharts,150)})})()
 </script></div></body></html>)";
 
     return o;
 }
-
 
 void HttpServer::send_response(int fd, int code, const char* content_type, const std::string& body) {
     const char* status_msg = "OK";
