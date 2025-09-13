@@ -1,5 +1,6 @@
 #include "http_server.hpp"
 #include "logger.hpp"
+#include "analytics/extensions.hpp"
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cerrno>
@@ -145,6 +146,8 @@ void HttpServer::handle(int fd) {
         send_response(fd, 200, "text/html",
                       html_dashboard(snap, ble_st, pg,
                                      store_.purchase_date(), h, poll_interval_s_));
+    } else if (path == "/solar" || path == "/solar.html") {
+        send_response(fd, 200, "text/html", html_solar_page());
     } else if (path == "/api/charger") {
         send_response(fd, 200, "application/json", charger_json(pg));
     } else if (path == "/api/status") {
@@ -171,7 +174,86 @@ void HttpServer::handle(int fd) {
         send_response(fd, 200, "application/json", tx_events_json(store_.tx_events(count)));
     } else if (path == "/api/analytics") {
         send_response(fd, 200, "application/json",
-                      analytics_json(store_.analytics()));
+                      analytics_json(store_.analytics(), &store_));
+    } else if (path == "/api/events") {
+        size_t count = 50;
+        auto ni = query.find("n=");
+        if (ni != std::string::npos) { try { count = std::stoul(query.substr(ni + 2)); } catch (...) {} }
+        send_response(fd, 200, "application/json",
+                      system_events_json(store_.system_events(count)));
+    } else if (path == "/api/anomalies") {
+        auto* ext = store_.extensions();
+        if (ext)
+            send_response(fd, 200, "application/json",
+                         anomalies_json(ext->anomaly_detector().anomalies()));
+        else
+            send_response(fd, 200, "application/json", "{\"anomalies\":[]}\n");
+    } else if (path == "/api/solar_simulation") {
+        auto* ext = store_.extensions();
+        if (ext) {
+            double max_a = ext->effective_max_charge_a();
+            double v = snap.valid && snap.total_voltage_v > 1 ? snap.total_voltage_v : 51.2;
+            double nom = snap.valid && snap.nominal_ah > 0 ? snap.nominal_ah : 100.0;
+            auto r = ext->solar_simulator().compute(
+                snap.valid ? snap.soc_pct : 0, -1, max_a, v, nom);
+            send_response(fd, 200, "application/json", solar_simulation_json(r));
+        } else {
+            send_response(fd, 200, "application/json",
+                         "{\"panel_watts\":0,\"expected_today_wh\":0,\"battery_projection\":\"—\"}\n");
+        }
+    } else if (path == "/api/battery/resistance") {
+        auto* ext = store_.extensions();
+        if (ext) {
+            double mohm = ext->resistance_estimator().internal_resistance_mohm();
+            std::string trend = ext->resistance_estimator().trend();
+            auto series = ext->resistance_estimator().time_series(100);
+            send_response(fd, 200, "application/json",
+                         battery_resistance_json(mohm, trend, series));
+        } else {
+            send_response(fd, 200, "application/json",
+                         "{\"internal_resistance_milliohms\":0,\"trend\":\"stable\"}\n");
+        }
+    } else if (path == "/api/solar_forecast_week") {
+        auto* ext = store_.extensions();
+        if (ext) {
+            const auto& cfg = ext->solar_simulator().config();
+            double max_a = ext->effective_max_charge_a();
+            double v = snap.valid && snap.total_voltage_v > 1 ? snap.total_voltage_v : 51.2;
+            double nom = snap.valid && snap.nominal_ah > 0 ? snap.nominal_ah : 100.0;
+            auto r = ext->weather_forecast().get_forecast_week(
+                cfg.panel_watts, cfg.system_efficiency, max_a, v, nom,
+                snap.valid ? snap.soc_pct : 0);
+            send_response(fd, 200, "application/json", solar_forecast_week_json(r));
+        } else {
+            send_response(fd, 200, "application/json",
+                         "{\"valid\":false,\"error\":\"Extensions not available\",\"daily\":[]}\n");
+        }
+    } else if (path == "/api/solar_forecast") {
+        auto* ext = store_.extensions();
+        if (ext) {
+            const auto& cfg = ext->solar_simulator().config();
+            double max_a = ext->effective_max_charge_a();
+            double v = snap.valid && snap.total_voltage_v > 1 ? snap.total_voltage_v : 51.2;
+            double nom = snap.valid && snap.nominal_ah > 0 ? snap.nominal_ah : 100.0;
+            auto r = ext->weather_forecast().get_forecast(
+                cfg.panel_watts, cfg.system_efficiency, max_a, v, nom,
+                snap.valid ? snap.soc_pct : 0);
+            send_response(fd, 200, "application/json", solar_forecast_json(r));
+        } else {
+            send_response(fd, 200, "application/json",
+                         "{\"tomorrow_generation_wh\":0,\"cloud_cover\":0,\"expected_battery_state\":\"—\"}\n");
+        }
+    } else if (path == "/api/system_health") {
+        auto* ext = store_.extensions();
+        if (ext) {
+            auto an = store_.analytics();
+            auto anomalies = ext->anomaly_detector().anomalies();
+            auto r = ext->health_scorer().compute(an, anomalies);
+            send_response(fd, 200, "application/json", system_health_json(r));
+        } else {
+            send_response(fd, 200, "application/json",
+                         "{\"score\":0,\"battery\":\"—\",\"cells\":\"—\",\"charging\":\"—\"}\n");
+        }
     } else if (path == "/metrics") {
         send_response(fd, 200, "text/plain; version=0.0.4",
                       prometheus(snap) + prometheus_charger(pg));
@@ -320,7 +402,24 @@ std::string HttpServer::prometheus_charger(const PwrGateSnapshot& pg) {
     return o;
 }
 
-std::string HttpServer::analytics_json(const AnalyticsSnapshot& a) {
+std::string HttpServer::system_events_json(const std::vector<SystemEvent>& events) {
+    std::string o = "[";
+    for (size_t i = events.size(); i > 0; --i) {
+        const auto& e = events[i - 1];
+        if (i < events.size()) o += ",";
+        char tbuf[32];
+        std::time_t t = std::chrono::system_clock::to_time_t(e.timestamp);
+        struct tm tm_b{};
+        localtime_r(&t, &tm_b);
+        std::strftime(tbuf, sizeof(tbuf), "%m/%d %H:%M", &tm_b);
+        o += "\n  {\"time\":" + jstr(tbuf) + ",\"message\":" + jstr(e.message) + "}";
+    }
+    o += "\n]\n";
+    return o;
+}
+
+std::string HttpServer::analytics_json(const AnalyticsSnapshot& a,
+                                       const DataStore* store) {
     std::string o = "{\n";
     o += "  \"energy_charged_today_wh\": "    + jdbl(a.energy_charged_today_wh, 1)    + ",\n";
     o += "  \"energy_discharged_today_wh\": " + jdbl(a.energy_discharged_today_wh, 1) + ",\n";
@@ -350,7 +449,151 @@ std::string HttpServer::analytics_json(const AnalyticsSnapshot& a) {
     o += "  \"dod_status\": "                 + jstr(a.dod_status)                   + ",\n";
     o += "  \"avg_load_watts\": "             + jdbl(a.avg_load_watts, 1)            + ",\n";
     o += "  \"peak_load_watts\": "            + jdbl(a.peak_load_watts, 1)           + ",\n";
-    o += "  \"idle_load_watts\": "            + jdbl(a.idle_load_watts, 1)           + "\n";
+    o += "  \"idle_load_watts\": "            + jdbl(a.idle_load_watts, 1)           + ",\n";
+    // Extended analytics
+    o += "  \"system_status\": "              + jstr(a.system_status)               + ",\n";
+    o += "  \"battery_stress\": "             + jstr(a.battery_stress)             + ",\n";
+    o += "  \"charger_runtime_today\": "      + jdbl(a.charger_runtime_today_sec, 0) + ",\n";
+    o += "  \"energy_used_today_wh\": "        + jdbl(a.energy_discharged_today_wh, 1)+ ",\n";
+    o += "  \"energy_used_week_wh\": "        + jdbl(a.energy_used_week_wh, 1)      + ",\n";
+    o += "  \"voltage_trend\": "              + jstr(a.voltage_trend)               + ",\n";
+    o += "  \"soc_trend\": "                  + jstr(a.soc_trend)                  + ",\n";
+    o += "  \"soc_rate_pct_per_h\": "        + jdbl(a.soc_rate_pct_per_h, 2)       + ",\n";
+    o += "  \"charger_abnormal_warning\": "   + jstr(a.charger_abnormal_warning)    + ",\n";
+    o += "  \"psu_limited_warning\": "        + jstr(a.psu_limited_warning)         + ",\n";
+    o += "  \"charge_slowdown_warning\": "    + jstr(a.charge_slowdown_warning)     + ",\n";
+    o += "  \"charge_rate_recent_pct_per_h\": "+ jdbl(a.charge_rate_recent_pct_per_h, 2)+ ",\n";
+    o += "  \"charge_rate_baseline_pct_per_h\":"+ jdbl(a.charge_rate_baseline_pct_per_h, 2)+ ",\n";
+    o += "  \"runtime_from_full_h\": "       + jdbl(a.runtime_from_full_h, 1)       + ",\n";
+    o += "  \"runtime_from_current_h\": "    + jdbl(a.runtime_from_current_h, 1)    + ",\n";
+    o += "  \"runtime_full_exceeds_cap\": "   + jbool(a.runtime_full_exceeds_cap)   + ",\n";
+    o += "  \"runtime_current_exceeds_cap\": " + jbool(a.runtime_current_exceeds_cap) + ",\n";
+    o += "  \"runtime_from_charger\": "       + jbool(a.runtime_from_charger)       + ",\n";
+    o += "  \"avg_discharge_24h_w\": "       + jdbl(a.avg_discharge_24h_w, 1)        + ",\n";
+    o += "  \"solar_readiness\": "            + jstr(a.solar_readiness)            + ",\n";
+    o += "  \"charge_rate_w\": "              + jdbl(a.charge_rate_w, 1)            + ",\n";
+    o += "  \"charge_rate_pct_per_h\": "      + jdbl(a.charge_rate_pct_per_h, 1)    + ",\n";
+    o += "  \"health_alerts\": [";
+    for (size_t i = 0; i < a.health_alerts.size(); ++i) {
+        if (i) o += ",";
+        o += jstr(a.health_alerts[i]);
+    }
+    o += "]";
+    if (store) {
+        auto now_s = std::chrono::steady_clock::now();
+        auto uptime = std::chrono::duration_cast<std::chrono::seconds>(
+            now_s - store->startup_time()).count();
+        auto last_bms = store->last_bms_update();
+        auto last_chg = store->last_charger_update();
+        auto now_tp = std::chrono::system_clock::now();
+        long bms_ago = -1, chg_ago = -1;
+        if (store->latest().has_value())
+            bms_ago = static_cast<long>(std::chrono::duration_cast<std::chrono::seconds>(
+                now_tp - last_bms).count());
+        if (store->latest_pwrgate().has_value())
+            chg_ago = static_cast<long>(std::chrono::duration_cast<std::chrono::seconds>(
+                now_tp - last_chg).count());
+        o += ",\n  \"uptime_sec\": " + std::to_string(uptime);
+        o += ",\n  \"last_bms_update_ago_sec\": " + (bms_ago >= 0 ? std::to_string(bms_ago) : "null");
+        o += ",\n  \"last_charger_update_ago_sec\": " + (chg_ago >= 0 ? std::to_string(chg_ago) : "null");
+    }
+    o += "\n}\n";
+    return o;
+}
+
+std::string HttpServer::anomalies_json(const std::vector<AnomalyEvent>& anomalies) {
+    std::string o = "{\n  \"anomalies\": [\n";
+    for (size_t i = 0; i < anomalies.size(); ++i) {
+        const auto& a = anomalies[i];
+        if (i) o += ",\n";
+        o += "    {\n";
+        o += "      \"type\": " + jstr(a.type) + ",\n";
+        o += "      \"timestamp\": " + jstr(iso8601(a.timestamp)) + ",\n";
+        o += "      \"message\": " + jstr(a.message);
+        if (a.type == "load_spike") {
+            o += ",\n      \"load_w\": " + jdbl(a.load_w, 0);
+            o += ",\n      \"baseline_w\": " + jdbl(a.baseline_w, 0);
+        } else if (a.type == "slow_charging") {
+            o += ",\n      \"charge_current\": " + jdbl(a.charge_current, 2);
+            o += ",\n      \"expected_current\": " + jdbl(a.expected_current, 2);
+        } else if (a.type == "resistance_increase") {
+            o += ",\n      \"r_internal_today\": " + jdbl(a.r_internal_today, 2);
+            o += ",\n      \"r_internal_30day_avg\": " + jdbl(a.r_internal_30day_avg, 2);
+        }
+        o += "\n    }";
+    }
+    o += "\n  ]\n}\n";
+    return o;
+}
+
+std::string HttpServer::solar_simulation_json(const SolarSimResult& r) {
+    std::string o = "{\n";
+    o += "  \"panel_watts\": " + jdbl(r.panel_watts, 0) + ",\n";
+    o += "  \"expected_today_wh\": " + jdbl(r.expected_today_wh, 0) + ",\n";
+    o += "  \"battery_projection\": " + jstr(r.battery_projection) + "\n";
+    o += "}\n";
+    return o;
+}
+
+std::string HttpServer::battery_resistance_json(double mohm, const std::string& trend,
+                                               const std::vector<ResistanceSample>& series) {
+    std::string o = "{\n";
+    o += "  \"internal_resistance_milliohms\": " + jdbl(mohm, 1) + ",\n";
+    o += "  \"trend\": " + jstr(trend) + ",\n";
+    o += "  \"time_series\": [";
+    for (size_t i = 0; i < series.size(); ++i) {
+        if (i) o += ", ";
+        o += "{\"timestamp\":" + jdbl(series[i].timestamp, 0) +
+             ",\"resistance_mohm\":" + jdbl(series[i].resistance_mohm, 2) + "}";
+    }
+    o += "]\n}\n";
+    return o;
+}
+
+std::string HttpServer::solar_forecast_json(const WeatherForecastResult& r) {
+    std::string o = "{\n";
+    o += "  \"valid\": " + jbool(r.valid) + ",\n";
+    o += "  \"tomorrow_generation_wh\": " + jdbl(r.tomorrow_generation_wh, 0) + ",\n";
+    o += "  \"cloud_cover\": " + jdbl(r.cloud_cover, 2) + ",\n";
+    o += "  \"expected_battery_state\": " + jstr(r.expected_battery_state);
+    if (!r.error.empty())
+        o += ",\n  \"error\": " + jstr(r.error);
+    o += "\n}\n";
+    return o;
+}
+
+std::string HttpServer::solar_forecast_week_json(const SolarForecastWeekResult& r) {
+    std::string o = "{\n";
+    o += "  \"valid\": " + jbool(r.valid) + ",\n";
+    o += "  \"week_total_kwh\": " + jdbl(r.week_total_kwh, 2) + ",\n";
+    o += "  \"recovery_wh\": " + jdbl(r.recovery_wh, 0) + ",\n";
+    o += "  \"days_to_full\": " + std::to_string(r.days_to_full) + ",\n";
+    o += "  \"best_day\": " + jstr(r.best_day) + ",\n";
+    if (!r.error.empty())
+        o += "  \"error\": " + jstr(r.error) + ",\n";
+    o += "  \"daily\": [";
+    for (size_t i = 0; i < r.daily.size(); ++i) {
+        const auto& d = r.daily[i];
+        if (i) o += ",";
+        o += "\n    {\"date\":" + jstr(d.date) +
+             ",\"kwh\":" + jdbl(d.kwh, 2) +
+             ",\"cloud_cover\":" + jdbl(d.cloud_cover, 2) +
+             ",\"optimal_start\":" + jstr(d.optimal_start) +
+             ",\"optimal_end\":" + jstr(d.optimal_end) +
+             ",\"sun_hours_effective\":" + jdbl(d.sun_hours_effective, 1) + "}";
+    }
+    o += "\n  ]\n}\n";
+    return o;
+}
+
+std::string HttpServer::system_health_json(const HealthScoreResult& r) {
+    std::string o = "{\n";
+    o += "  \"score\": " + std::to_string(r.score) + ",\n";
+    o += "  \"battery\": " + jstr(r.battery) + ",\n";
+    o += "  \"cells\": " + jstr(r.cells) + ",\n";
+    o += "  \"charging\": " + jstr(r.charging) + ",\n";
+    o += "  \"temperature\": " + jstr(r.temperature) + ",\n";
+    o += "  \"anomalies\": " + jstr(r.anomalies) + "\n";
     o += "}\n";
     return o;
 }
@@ -848,6 +1091,11 @@ details[open].card summary::before{content:'▾  '}
 .trng-btn:hover{border-color:var(--muted);color:var(--text)}
 .trng-btn.active{background:rgba(74,222,128,.15);border-color:var(--green);color:var(--green);font-weight:600}
 html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--green);color:var(--green)}
+/* ── Tab nav ── */
+.tabs{display:flex;gap:0;margin-bottom:1rem;border-bottom:1px solid var(--border)}
+.tab{padding:.5rem 1rem;font-size:.8rem;color:var(--muted);background:none;border:none;border-bottom:2px solid transparent;cursor:pointer;font-family:inherit;text-decoration:none}
+.tab:hover{color:var(--text)}
+.tab.active{color:var(--green);border-bottom-color:var(--green);font-weight:600}
 .chart-svg{width:100%;display:block;background:var(--chart-bg);border-radius:4px}
 /* ── Energy Flow Diagram ── */
 .flow-wrap{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1.4rem;margin-bottom:.7rem;box-shadow:0 1px 3px rgba(0,0,0,.06)}
@@ -881,6 +1129,7 @@ html.light .flow-node-load{fill:#e2e8f0}
 </style></head><body><div class="wrap">
 )HTML";
 
+    o += "<nav class=\"tabs\"><a href=\"/\" class=\"tab active\">Dashboard</a><a href=\"/solar\" class=\"tab\">Solar</a></nav>";
     o += "<header><h1>limonitor</h1><div class=\"hstat\">";
     o += "<span><span class=\"dot " + dot_cls + "\"></span>" + ble_st + "</span>";
     if (s.valid && !s.device_name.empty())
@@ -905,12 +1154,20 @@ html.light .flow-node-load{fill:#e2e8f0}
     o += "<button id=\"thm-btn\" class=\"btn\" onclick=\"toggleTheme()\" title=\"Toggle theme\">&#9788;</button>";
     o += "</div></header>\n";
 
-    o += "<main class=\"main\"><div class=\"stats\">\n";
+    o += "<main class=\"main\">\n";
+    o += "<div id=\"sys-status-panel\" class=\"card\" style=\"margin-bottom:.7rem\">"
+         "<div class=\"card-title\">System Status</div>"
+         "<div id=\"sys-status-lines\" style=\"font-size:.85rem;line-height:1.6\">—</div>"
+         "<div id=\"sys-status-alerts\" style=\"margin-top:.5rem\"></div>"
+         "</div>\n";
 
-    // Voltage
+    o += "<div class=\"stats\">\n";
+
+    // Voltage (with trend indicator)
     snprintf(buf, sizeof(buf),
-        "<div class=\"stat\"><div class=\"stat-lbl\">Voltage</div>"
-        "<div class=\"sv ok\"><span id=\"sv\">%.2f</span><span class=\"u\">V</span></div>"
+        "<div class=\"stat\"><div class=\"stat-lbl\">Battery Voltage</div>"
+        "<div class=\"sv ok\"><span id=\"sv\">%.2f</span><span class=\"u\">V</span>"
+        "<span id=\"sv-trend\" style=\"font-size:1rem;margin-left:.2em\"></span></div>"
         "<div class=\"stat-sub\" id=\"sv-sub\">%.3f&nbsp;min &middot; %.3f&nbsp;max</div></div>\n",
         s.valid ? s.total_voltage_v : 0.0,
         s.valid ? s.cell_min_v : 0.0,
@@ -929,7 +1186,8 @@ html.light .flow-node-load{fill:#e2e8f0}
     int soc_bar = static_cast<int>(std::max(0.0, std::min(100.0, s.soc_pct)));
     snprintf(buf, sizeof(buf),
         "<div class=\"stat\"><div class=\"stat-lbl\">State of Charge</div>"
-        "<div class=\"sv ok\"><span id=\"ssoc\">%.1f</span><span class=\"u\">%%</span></div>"
+        "<div class=\"sv ok\"><span id=\"ssoc\">%.1f</span><span class=\"u\">%%</span>"
+        "<span id=\"ssoc-trend\" style=\"font-size:1rem;margin-left:.2em\"></span></div>"
         "<div class=\"soc-track\"><div class=\"soc-fill\" id=\"soc-bar\" style=\"width:%d%%\"></div></div>"
         "<div class=\"stat-sub\" id=\"ssoc-sub\">%.2f&nbsp;/&nbsp;%.2f&nbsp;Ah</div></div>\n",
         s.soc_pct, soc_bar, s.remaining_ah, s.nominal_ah);
@@ -963,7 +1221,9 @@ html.light .flow-node-load{fill:#e2e8f0}
 
     // Battery details
     o += "<div class=\"card\"><div class=\"card-title\">Battery</div><table class=\"dt\">\n";
-    snprintf(buf, sizeof(buf), "%.2f / %.2f Ah", s.remaining_ah, s.nominal_ah);
+    double rem_wh = s.remaining_ah * (s.total_voltage_v > 1 ? s.total_voltage_v : 51.2);
+    double nom_wh = s.nominal_ah * (s.total_voltage_v > 1 ? s.total_voltage_v : 51.2);
+    snprintf(buf, sizeof(buf), "%.2f / %.2f Ah (%.0f / %.0f Wh)", s.remaining_ah, s.nominal_ah, rem_wh, nom_wh);
     o += "<tr><td>Capacity</td><td id=\"bat-cap\">" + std::string(buf) + "</td></tr>\n";
     snprintf(buf, sizeof(buf), "%.1f h %s", s.time_remaining_h, rem_dir);
     o += "<tr><td>Est. remaining</td><td id=\"bat-rem\">" + std::string(buf) + "</td></tr>\n";
@@ -1024,6 +1284,10 @@ html.light .flow-node-load{fill:#e2e8f0}
         crow("chg-tmp",   "Temp",         "—");
     }
     o += "</table></div>\n";
+
+    o += "<div class=\"card\"><div class=\"card-title\">System Events</div>"
+         "<div id=\"sys-events\" style=\"font-size:.78rem;max-height:140px;overflow-y:auto\">—</div>"
+         "</div>\n";
 
     o += "<div class=\"card\"><div class=\"card-title\">Radio Activity (24h)</div>"
          "<table class=\"dt\">\n"
@@ -1104,6 +1368,79 @@ html.light .flow-node-load{fill:#e2e8f0}
          "<tr><td>Idle</td><td><span id=\"an-idle-load\">—</span> W</td></tr>\n"
          "</table></div>\n";
 
+    o += "<div class=\"acard\"><div class=\"card-title\">Battery Utilization</div><table class=\"dt\">\n"
+         "<tr><td>Energy used today</td><td><span id=\"an-util-today\">—</span></td></tr>\n"
+         "<tr><td>Energy used this week</td><td><span id=\"an-util-week\">—</span></td></tr>\n"
+         "</table></div>\n";
+
+    o += "<div class=\"acard\"><div class=\"card-title\">Solar Readiness</div><table class=\"dt\">\n"
+         "<tr><td><span id=\"an-solar-ready\">—</span></td></tr>\n"
+         "</table></div>\n";
+
+    o += "<div class=\"acard\"><div class=\"card-title\">Charger Runtime Today</div><table class=\"dt\">\n"
+         "<tr><td>Runtime</td><td><span id=\"an-chg-runtime\">—</span></td></tr>\n"
+         "</table></div>\n";
+
+    o += "<div class=\"acard\"><div class=\"card-title\">Charge Rate</div><table class=\"dt\">\n"
+         "<tr><td>Power</td><td><span id=\"an-chg-rate-w\">—</span></td></tr>\n"
+         "<tr><td>Speed</td><td><span id=\"an-chg-rate-pct\">—</span></td></tr>\n"
+         "<tr><td>Recent vs earlier</td><td><span id=\"an-chg-rate-compare\">—</span></td></tr>\n"
+         "</table></div>\n";
+
+    o += "<div class=\"acard\"><div class=\"card-title\">Charge Status</div><table class=\"dt\">\n"
+         "<tr><td><span id=\"an-psu-status\">—</span></td></tr>\n"
+         "</table></div>\n";
+
+    o += "<div class=\"acard\"><div class=\"card-title\">Battery Stress</div><table class=\"dt\">\n"
+         "<tr><td>Stress level</td><td><span id=\"an-stress\">—</span></td></tr>\n"
+         "</table></div>\n";
+
+    o += "<div class=\"acard\"><div class=\"card-title\">Runtime Estimates</div><table class=\"dt\">\n"
+         "<tr><td>Full → 10%</td><td><span id=\"an-runtime-full\">—</span></td></tr>\n"
+         "<tr><td>Current → 10%</td><td><span id=\"an-runtime-now\">—</span></td></tr>\n"
+         "<tr><td>24h avg load</td><td><span id=\"an-avg-load-24h\">—</span></td></tr>\n"
+         "</table></div>\n";
+
+    o += "<div class=\"acard\"><div class=\"card-title\">Monitor Status</div><table class=\"dt\">\n"
+         "<tr><td>Uptime</td><td><span id=\"an-uptime\">—</span></td></tr>\n"
+         "<tr><td>Last BMS update</td><td><span id=\"an-bms-ago\">—</span></td></tr>\n"
+         "<tr><td>Last charger update</td><td><span id=\"an-chg-ago\">—</span></td></tr>\n"
+         "</table></div>\n";
+
+    o += "<div class=\"acard\"><div class=\"card-title\">System Health</div><table class=\"dt\">\n"
+         "<tr><td>Score</td><td><span id=\"health-score\">—</span> / 100</td></tr>\n"
+         "<tr><td>Battery</td><td><span id=\"health-battery\">—</span></td></tr>\n"
+         "<tr><td>Cells</td><td><span id=\"health-cells\">—</span></td></tr>\n"
+         "<tr><td>Charging</td><td><span id=\"health-charging\">—</span></td></tr>\n"
+         "</table></div>\n";
+
+    o += "<div class=\"acard\"><div class=\"card-title\">Solar Simulation</div><table class=\"dt\">\n"
+         "<tr><td>Expected today</td><td><span id=\"solar-sim-wh\">—</span></td></tr>\n"
+         "<tr><td>Battery projection</td><td><span id=\"solar-sim-bat\">—</span></td></tr>\n"
+         "</table></div>\n";
+
+    o += "<div class=\"acard\"><div class=\"card-title\">7-Day Solar</div><table class=\"dt\">\n"
+         "<tr><td>Week total</td><td><span id=\"solar-week-kwh\">—</span></td></tr>\n"
+         "<tr><td>Days to full</td><td><span id=\"solar-days-full\">—</span></td></tr>\n"
+         "<tr><td><a href=\"/solar\" style=\"font-size:.75rem\">Full solar page →</a></td><td></td></tr>\n"
+         "</table></div>\n";
+
+    o += "<div class=\"acard\"><div class=\"card-title\">Solar Forecast</div><table class=\"dt\">\n"
+         "<tr><td>Tomorrow</td><td><span id=\"solar-forecast-wh\">—</span></td></tr>\n"
+         "<tr><td>Cloud cover</td><td><span id=\"solar-forecast-cloud\">—</span></td></tr>\n"
+         "<tr><td>Projected battery</td><td><span id=\"solar-forecast-bat\">—</span></td></tr>\n"
+         "<tr id=\"solar-forecast-err-row\" style=\"display:none\"><td colspan=\"2\"><span id=\"solar-forecast-err\" class=\"warn\"></span></td></tr>\n"
+         "</table></div>\n";
+
+    o += "<div class=\"acard\"><div class=\"card-title\">Battery Internal Resistance</div><table class=\"dt\">\n"
+         "<tr><td>Resistance</td><td><span id=\"resistance-mohm\">—</span> mΩ</td></tr>\n"
+         "<tr><td>Trend</td><td><span id=\"resistance-trend\">—</span></td></tr>\n"
+         "<tr id=\"resistance-note-row\" style=\"display:none\"><td colspan=\"2\"><span id=\"resistance-note\" class=\"dim\" style=\"font-size:.7rem\">Requires radio TX events</span></td></tr>\n"
+         "</table></div>\n";
+
+    o += "<div class=\"acard\"><div class=\"card-title\">Anomalies</div>"
+         "<div id=\"anomalies-list\" style=\"font-size:.78rem;max-height:140px;overflow-y:auto\">—</div></div>\n";
+
     o += "</div>\n"; // .acards
 
     if (!s.cell_voltages_v.empty()) {
@@ -1147,20 +1484,39 @@ html.light .flow-node-load{fill:#e2e8f0}
 <table class="ht">
 <tr class="sec"><td colspan="2">Battery (BLE)</td></tr>
 <tr><td>Voltage</td><td>Total pack voltage (sum of all cells)</td></tr>
-<tr><td>Current</td><td>Positive = discharging &nbsp;·&nbsp; Negative = charging</td></tr>
+<tr><td>Current</td><td>Positive = discharging &nbsp;&middot;&nbsp; Negative = charging</td></tr>
 <tr><td>SoC</td><td>State of Charge &mdash; % of rated capacity remaining</td></tr>
-<tr><td>Power</td><td>V &times; A. Negative while charging</td></tr>
-<tr><td>Capacity</td><td>Remaining Ah / Nominal (rated) Ah</td></tr>
+<tr><td>Power</td><td>V &times; A &mdash; positive while discharging, negative while charging</td></tr>
+<tr><td>Capacity</td><td>Remaining Ah / Nominal (rated) Ah reported by BMS</td></tr>
 <tr><td>Est. remaining</td><td>Time to full (charging) or empty (discharging) at current rate</td></tr>
-<tr><td>Cell delta</td><td>Spread weakest to strongest cell. &lt;5 mV excellent, &gt;50 mV needs balancing</td></tr>
+<tr><td>Cell delta</td><td>Spread between weakest and strongest cell. &lt;10 mV excellent, &gt;50 mV needs balancing</td></tr>
+<tr><td>Cycles</td><td>Charge cycle count reported by BMS</td></tr>
+<tr><td>FETs chg/dchg</td><td>Charge and discharge MOSFET states &mdash; OFF indicates BMS protection triggered</td></tr>
 <tr class="sec"><td colspan="2">Charger (EpicPowerGate 2)</td></tr>
-<tr><td>Power supply</td><td>Input voltage measured by charger (grid / alternator)</td></tr>
-<tr><td>Solar</td><td>Solar panel voltage (0 V when no solar input)</td></tr>
-<tr><td>Battery</td><td>Battery voltage and charge current as measured by charger</td></tr>
-<tr><td>Target</td><td>Bulk target V / max charge A / stop (termination) A</td></tr>
+<tr><td>Power supply</td><td>Input voltage measured by charger (grid / alternator / shore power)</td></tr>
+<tr><td>Solar</td><td>Solar panel open-circuit voltage &mdash; 0 V when no panel connected or no sun</td></tr>
+<tr><td>Battery</td><td>Battery voltage and charge current as measured by the charger</td></tr>
+<tr><td>Target</td><td>Absorption (bulk) target voltage / max charge current / tail-current stop threshold</td></tr>
 <tr><td>PWM</td><td>Charge duty cycle &mdash; 1023 = 100% = full power</td></tr>
-<tr><td>Elapsed</td><td>Minutes since current charge session started</td></tr>
-<tr><td>Temp</td><td>Charger PCB temperature (raw ADC &mdash; not in &deg;C)</td></tr>
+<tr><td>Elapsed</td><td>Minutes since the current charge session started</td></tr>
+<tr><td>Temp</td><td>Charger PCB temperature sensor (raw ADC value &mdash; not in &deg;C)</td></tr>
+<tr class="sec"><td colspan="2">Analytics</td></tr>
+<tr><td>Energy Today</td><td>Wh integrated since midnight UTC. Charged = energy put into the battery; Consumed = energy drawn from it; Solar = energy sourced from the solar panel; Net = charged &minus; consumed.</td></tr>
+<tr><td>Battery Replacement</td><td>Age computed from the configured purchase date. Estimated health degrades ~2.5&nbsp;%/yr. Replacement window is the range of years until estimated health falls below 80&nbsp;% or age exceeds 8&nbsp;years. A warning appears when either threshold is crossed.</td></tr>
+<tr><td>Battery Health</td><td>Once a full discharge cycle (&ge;5&nbsp;Ah swing) is observed, health is shown as usable&nbsp;Ah / rated&nbsp;Ah. Before that, an age-based estimate is shown with an <em>(est)</em> label.</td></tr>
+<tr><td>Charging Stage</td><td>Inferred from charger voltage and current trend: <b>Bulk</b> = charging hard below target voltage; <b>Absorption</b> = near target voltage, current falling; <b>Float</b> = maintenance charge; <b>Idle</b> = charger not in a charge state.</td></tr>
+<tr><td>Cell Balance</td><td>Max &minus; min cell voltage. &lt;10&nbsp;mV Excellent, 10&ndash;25&nbsp;mV Good, 25&ndash;50&nbsp;mV Warning, &ge;50&nbsp;mV Imbalance (balancing recommended).</td></tr>
+<tr><td>Battery Temperature</td><td>T1 and T2 from BMS NTC sensors. &lt;40&nbsp;&deg;C Normal, 40&ndash;50&nbsp;&deg;C Warm, &ge;50&nbsp;&deg;C Warning.</td></tr>
+<tr><td>Charger Efficiency</td><td>Ratio of battery voltage to charger input voltage (bat_v / ps_v). Reflects resistive and PWM losses in the charge path.</td></tr>
+<tr><td>Charge Status</td><td>PSU limitation: charger in Bulk, PWM high, but voltage plateaus below target for 15+ min. Charge slowdown: observed charge rate (SoC change) has dropped significantly vs. a few minutes earlier — may indicate PSU limit, increased load, or charger throttling.</td></tr>
+<tr><td>Solar Input</td><td>Solar panel voltage and estimated power (panel_v &times; charge_current). Energy today is integrated over the day.</td></tr>
+<tr><td>Depth of Discharge</td><td>Today&apos;s peak SoC minus today&apos;s trough SoC. &lt;30&nbsp;% Low stress, 30&ndash;70&nbsp;% Normal, &ge;70&nbsp;% High stress (reduces cycle life).</td></tr>
+<tr><td>Runtime Estimates</td><td>Time from full charge (100%) or current SoC down to 10% (LiFePO4 cutoff). Prefers battery discharge data; when charging, uses charger power as fallback (est. load when grid drops).</td></tr>
+<tr><td>System Load Profile</td><td>Rolling ~1-hour window of discharge-only samples. Average = mean load; Peak = highest seen; Idle = mean of samples below 15&nbsp;W.</td></tr>
+<tr class="sec"><td colspan="2">Radio Activity</td></tr>
+<tr><td>TX events</td><td>Count of radio transmission events detected in the last 24&nbsp;h based on net battery current spikes above the configured threshold.</td></tr>
+<tr><td>Duty cycle</td><td>Total TX time as a percentage of 24&nbsp;h.</td></tr>
+<tr><td>Energy used</td><td>Estimated energy consumed by radio transmissions (peak_power &times; duration).</td></tr>
 </table></details>
 )";
 
@@ -1168,7 +1524,15 @@ html.light .flow-node-load{fill:#e2e8f0}
          "<a href=\"/api/status\">/api/status</a> &nbsp;"
          "<a href=\"/api/analytics\">/api/analytics</a> &nbsp;"
          "<a href=\"/api/flow\">/api/flow</a> &nbsp;"
+         "<a href=\"/api/events\">/api/events</a> &nbsp;"
          "<a href=\"/api/tx_events\">/api/tx_events</a> &nbsp;"
+         "<a href=\"/api/anomalies\">/api/anomalies</a> &nbsp;"
+         "<a href=\"/api/system_health\">/api/system_health</a> &nbsp;"
+         "<a href=\"/api/solar_simulation\">/api/solar_simulation</a> &nbsp;"
+         "<a href=\"/api/solar_forecast\">/api/solar_forecast</a> &nbsp;"
+         "<a href=\"/api/solar_forecast_week\">/api/solar_forecast_week</a> &nbsp;"
+         "<a href=\"/solar\">/solar</a> &nbsp;"
+         "<a href=\"/api/battery/resistance\">/api/battery/resistance</a> &nbsp;"
          "<a href=\"/api/cells\">/api/cells</a> &nbsp;"
          "<a href=\"/api/history\">/api/history</a> &nbsp;"
          "<a href=\"/api/charger\">/api/charger</a> &nbsp;"
@@ -1214,11 +1578,13 @@ function upBat(){fetch('/api/status').then(function(r){return r.json()}).then(fu
   $('sa-sub').textContent=adir
   $('ssoc').textContent=fmt(d.soc_pct,1)
   $('soc-bar').style.width=Math.max(0,Math.min(100,d.soc_pct))+'%'
-  $('ssoc-sub').textContent=fmt(d.remaining_ah,2)+'\xa0/\xa0'+fmt(d.nominal_ah,2)+'\xa0Ah'
+  var v=d.voltage_v||0;if(v<1)v=51.2
+  var remWh=d.remaining_ah*v,nomWh=d.nominal_ah*v
+  $('ssoc-sub').textContent=fmt(d.remaining_ah,2)+'\xa0/\xa0'+fmt(d.nominal_ah,2)+'\xa0Ah\xa0('+fmt(remWh,0)+'\xa0/\xa0'+fmt(nomWh,0)+'\xa0Wh)'
   $('spw').textContent=fmt(Math.abs(d.power_w),1)
   var rd=a<-0.01?'to full':'to empty'
   $('spw-sub').textContent=fmt(d.time_remaining_h,1)+'\xa0h\xa0'+rd
-  $('bat-cap').textContent=fmt(d.remaining_ah,2)+' / '+fmt(d.nominal_ah,2)+' Ah'
+  $('bat-cap').textContent=fmt(d.remaining_ah,2)+' / '+fmt(d.nominal_ah,2)+' Ah ('+fmt(remWh,0)+' / '+fmt(nomWh,0)+' Wh)'
   $('bat-rem').textContent=fmt(d.time_remaining_h,1)+' h '+rd
   if(d.cells&&d.cells.length){
     var vs=d.cells.map(function(c){return c.voltage_v})
@@ -1285,7 +1651,8 @@ setInterval(upTx,5000); upTx()
 
 function upAnalytics(){fetch('/api/analytics').then(function(r){return r.json()}).then(function(d){
   function sv(id,v){var e=$(id);if(e)e.textContent=v}
-  function sc(id,cls,v){var e=$(id);if(e){e.textContent=v;e.className=cls}}
+  function sc(id,cls,v){var e=$(id);if(e){e.textContent=v;e.className=cls;e.removeAttribute('title')}}
+  function sct(id,cls,v,title){var e=$(id);if(e){e.textContent=v;e.className=cls;e.title=title||''}}
   sv('an-e-chg',   fmt(d.energy_charged_today_wh,0))
   sv('an-e-dis',   fmt(d.energy_discharged_today_wh,0))
   sv('an-e-sol',   fmt(d.solar_energy_today_wh,0))
@@ -1293,47 +1660,202 @@ function upAnalytics(){fetch('/api/analytics').then(function(r){return r.json()}
   sc('an-e-net',net>=0?'ok':'warn',(net>=0?'+':'')+net.toFixed(0))
   sv('an-bat-age', d.battery_age_years>=0 ? d.battery_age_years.toFixed(1)+' yr' : '—')
   var hp=d.battery_health_pct
-  sc('an-bat-health', hp<0?'dim':hp<80?'err':hp<90?'warn':'ok',
-     hp>=0 ? hp.toFixed(1)+'%' : '—')
+  var hpTip=hp>=0?(hp<80?hp.toFixed(1)+'% — consider replacement':hp.toFixed(1)+'% (age/capacity est.)'):''
+  sct('an-bat-health', hp<0?'dim':hp<80?'err':hp<90?'warn':'ok',
+     hp>=0 ? hp.toFixed(1)+'%' : '—', hpTip)
   var rl=d.years_remaining_low,rh=d.years_remaining_high
   sv('an-bat-repl', rl>=0&&rh>=0 ? rl.toFixed(0)+'\u2013'+rh.toFixed(0)+' yr remaining' : '—')
   var wr=$('an-bat-warn-row')
   if(wr)wr.style.display=d.battery_replace_warn?'':'none'
   var stg=d.charging_stage||'—'
   var stgcls=stg==='Bulk'?'ok':stg==='Absorption'?'ok':stg==='Float'?'dim':'dim'
-  sc('an-chg-stage',stgcls,stg)
+  var stgTip=stg==='Bulk'?'Charging below target voltage; full current.':
+    stg==='Absorption'?'Near target voltage; current tapering off.':
+    stg==='Float'?'Maintenance charge; battery full.':
+    stg==='Idle'?'Charger not in active charge state.':''
+  sct('an-chg-stage',stgcls,stg,stgTip)
+  // Prefer observed capacity health; fall back to age-based estimate until a
+  // full discharge cycle has been seen.
   var ch=d.capacity_health_pct
-  sc('an-cap-health', ch<0?'dim':ch<80?'err':ch<90?'warn':'ok',
-     ch>=0 ? ch.toFixed(1)+'%' : '—')
-  sv('an-cap-usable', d.usable_capacity_ah>0 ? d.usable_capacity_ah.toFixed(1)+' Ah' : '—')
+  var capObserved=ch>=0
+  var dispH=capObserved?ch:(d.battery_health_pct>=0?d.battery_health_pct:-1)
+  var chTip=dispH>=0?(capObserved?dispH.toFixed(1)+'% (observed)':dispH.toFixed(1)+'% (age est., no full discharge yet)'):''
+  sct('an-cap-health', dispH<0?'dim':dispH<80?'err':dispH<90?'warn':'ok',
+     dispH>=0 ? dispH.toFixed(1)+'%'+(capObserved?'':' (est)') : '—', chTip)
+  // Est. capacity: observed value, or estimate from health × rated
+  var estAh=d.usable_capacity_ah>0 ? d.usable_capacity_ah
+            : (dispH>=0&&d.rated_capacity_ah>0 ? dispH/100*d.rated_capacity_ah : -1)
+  sv('an-cap-usable', estAh>0 ? estAh.toFixed(1)+' Ah'+(capObserved?'':' (est)') : '—')
   sv('an-cap-rated',  d.rated_capacity_ah>0  ? d.rated_capacity_ah.toFixed(1)+' Ah'  : '—')
   var dm=d.cell_delta_mv||0
-  sc('an-cell-delta', dm>=50?'err':dm>=25?'warn':'ok', dm.toFixed(1))
+  var dmTip=dm>=50?'Imbalance: '+dm.toFixed(1)+' mV (≥50)':dm>=25?'Warning: '+dm.toFixed(1)+' mV (25–50)':dm>=10?'Good: '+dm.toFixed(1)+' mV (10–25)':'Excellent: '+dm.toFixed(1)+' mV (<10)'
+  sct('an-cell-delta', dm>=50?'err':dm>=25?'warn':'ok', dm.toFixed(1), dmTip)
   var bs=d.cell_balance_status||'—'
-  sc('an-cell-bal', bs==='Excellent'||bs==='Good'?'ok':bs==='Warning'?'warn':bs==='Imbalance'?'err':'dim', bs)
+  var bsTip=bs==='Excellent'?'Δ '+dm.toFixed(1)+' mV (<10 mV)':
+    bs==='Good'?'Δ '+dm.toFixed(1)+' mV (10–25 mV)':
+    bs==='Warning'?'Δ '+dm.toFixed(1)+' mV (25–50 mV)':
+    bs==='Imbalance'?'Δ '+dm.toFixed(1)+' mV (≥50 mV)':''
+  sct('an-cell-bal', bs==='Excellent'||bs==='Good'?'ok':bs==='Warning'?'warn':bs==='Imbalance'?'err':'dim', bs, bsTip)
   if(d.temp_valid){
     sv('an-t1', d.temp1_c.toFixed(1)+'\xb0C')
     sv('an-t2', d.temp2_c.toFixed(1)+'\xb0C')
     var ts=d.temp_status||'—'
-    sc('an-temp-status', ts==='Normal'?'ok':ts==='Warm'?'warn':'err', ts)
+    var tsTip=ts==='Normal'?'T1 '+d.temp1_c.toFixed(1)+'°C, T2 '+d.temp2_c.toFixed(1)+'°C (<40°C)':
+      ts==='Warm'?'T1 '+d.temp1_c.toFixed(1)+'°C, T2 '+d.temp2_c.toFixed(1)+'°C (40–50°C)':
+      ts==='Warning'?'T1 '+d.temp1_c.toFixed(1)+'°C, T2 '+d.temp2_c.toFixed(1)+'°C (≥50°C)':''
+    sct('an-temp-status', ts==='Normal'?'ok':ts==='Warm'?'warn':'err', ts, tsTip)
   }
   if(d.efficiency_valid&&d.charger_efficiency>=0){
     var eff=d.charger_efficiency*100
-    sc('an-eff', eff<80?'warn':'ok', eff.toFixed(1)+'%')
+    var effTip=eff<80?eff.toFixed(1)+'% — check for losses':eff.toFixed(1)+'% output/input'
+    sct('an-eff', eff<80?'warn':'ok', eff.toFixed(1)+'%', effTip)
   }
   sv('an-sol-v', fmt(d.solar_voltage_v,2))
-  sc('an-sol-status', d.solar_active?'ok':'dim', d.solar_active?'Active':'Inactive')
+  var solTip=d.solar_active?fmt(d.solar_voltage_v,1)+' V — contributing to charge':'No solar voltage'
+  sct('an-sol-status', d.solar_active?'ok':'dim', d.solar_active?'Active':'Inactive', solTip)
   sv('an-sol-pwr',    d.solar_active&&d.solar_power_w>0 ? fmt(d.solar_power_w,1)+' W' : '—')
   sv('an-sol-energy', d.solar_energy_today_wh>0 ? fmt(d.solar_energy_today_wh,0)+' Wh' : '—')
   var dod=d.depth_of_discharge_pct||0
   sc('an-dod', dod>=70?'err':dod>=30?'warn':'ok', dod.toFixed(1))
   var ds=d.dod_status||'—'
-  sc('an-dod-status', ds==='Low stress'?'ok':ds==='Normal'?'':'err', ds)
+  var dsTip=ds==='Low stress'?dod.toFixed(1)+'% SoC swing (<30%)':
+    ds==='Normal'?dod.toFixed(1)+'% SoC swing (30–70%)':
+    ds==='High stress'?dod.toFixed(1)+'% SoC swing (≥70%)':''
+  sct('an-dod-status', ds==='Low stress'?'ok':ds==='Normal'?'':'err', ds, dsTip)
   sv('an-avg-load',  fmt(d.avg_load_watts,1))
   sv('an-peak-load', fmt(d.peak_load_watts,1))
   sv('an-idle-load', fmt(d.idle_load_watts,1))
+  // Extended analytics
+  var trend=d.voltage_trend||''
+  var te=$('sv-trend');if(te){
+    te.textContent=trend==='up'?'\u2191':trend==='down'?'\u2193':''
+    te.title=trend==='up'?'Voltage rising':trend==='down'?'Voltage falling':trend==='stable'?'Stable':''
+  }
+  var socTrend=d.soc_trend||''
+  var socRate=d.soc_rate_pct_per_h||0
+  var ste=$('ssoc-trend');if(ste){
+    ste.textContent=socTrend==='up'?'\u2191':socTrend==='down'?'\u2193':''
+    ste.title=socTrend==='up'?'Increasing: +'+socRate.toFixed(2)+'%/h over last ~1 min':
+      socTrend==='down'?'Decreasing: '+socRate.toFixed(2)+'%/h over last ~1 min':
+      socTrend==='stable'?'Steady: '+socRate.toFixed(2)+'%/h (no significant change)':''
+  }
+  var sl=$('sys-status-lines');if(sl)sl.innerHTML=(d.system_status||'\u2014').replace(/\u00b7 /g,'<br>')
+  var sa=$('sys-status-alerts');var pan=$('sys-status-panel');if(sa&&pan){
+    var alerts=d.health_alerts||[]
+    if(alerts.length){sa.innerHTML='<span class=\"warn\">'+alerts.join(' \u00b7 ')+'</span>';sa.style.display='';pan.style.borderColor='var(--orange)'}
+    else{sa.innerHTML='';sa.style.display='none';pan.style.borderColor=''}
+  }
+  sv('an-util-today', d.energy_used_today_wh!=null?fmt(d.energy_used_today_wh,0)+' Wh':'—')
+  sv('an-util-week',  d.energy_used_week_wh!=null?(d.energy_used_week_wh>=1000?(d.energy_used_week_wh/1000).toFixed(1)+' kWh':fmt(d.energy_used_week_wh,0)+' Wh'):'—')
+  sv('an-solar-ready',d.solar_readiness||'—')
+  var rt=d.charger_runtime_today
+  if(rt!=null&&rt>=0){var h=Math.floor(rt/3600),m=Math.floor((rt%3600)/60);sv('an-chg-runtime',h+'h '+m+'m')}
+  else sv('an-chg-runtime','—')
+  sv('an-chg-rate-w',  d.charge_rate_w>0?('+'+fmt(d.charge_rate_w,0)+' W'):'—')
+  sv('an-chg-rate-pct',d.charge_rate_pct_per_h>0?fmt(d.charge_rate_pct_per_h,1)+'% per hour':'—')
+  var rec=d.charge_rate_recent_pct_per_h,base=d.charge_rate_baseline_pct_per_h
+  var compEl=$('an-chg-rate-compare')
+  if(compEl){
+    if(rec!=null&&base!=null&&base>0.01){
+      compEl.textContent=fmt(rec,2)+' vs '+fmt(base,2)+' %/h'
+      compEl.title='Recent (last ~2 min) vs earlier (~4 min ago). Declining may indicate PSU limit or load.'
+    }else compEl.textContent='—'
+  }
+  var psuW=d.psu_limited_warning||''
+  var slowW=d.charge_slowdown_warning||''
+  var psuEl=$('an-psu-status')
+  if(psuEl){
+    if(slowW){psuEl.innerHTML='<span class=\"warn\">Charge rate slowing</span>';psuEl.title=slowW}
+    else if(psuW){psuEl.innerHTML='<span class=\"warn\">PSU may be limiting</span>';psuEl.title=psuW}
+    else{psuEl.innerHTML='<span class=\"ok\">Normal</span>';psuEl.title='Charger reaching target voltage'}
+  }
+  var st=d.battery_stress||'—'
+  var dod=d.depth_of_discharge_pct||0
+  var mxT=Math.max(d.temp1_c||0,d.temp2_c||0)
+  var tempValid=d.temp_valid
+  var stTip=''
+  if(st==='high'){
+    var reasons=[]
+    if(dod>=50)reasons.push('DoD '+dod.toFixed(0)+'% today (≥50% triggers high)')
+    if(tempValid&&mxT>=45)reasons.push('temperature '+mxT.toFixed(0)+'°C (≥45°C triggers high)')
+    stTip='High: '+reasons.join(', ')
+  }else if(st==='moderate'){
+    var reasons=[]
+    if(dod>=30&&dod<50)reasons.push('DoD '+dod.toFixed(0)+'% today (30–50% range)')
+    if(tempValid&&mxT>=40&&mxT<45)reasons.push('temperature '+mxT.toFixed(0)+'°C (40–45°C range)')
+    stTip=reasons.length?'Moderate: '+reasons.join(', '):'DoD '+dod.toFixed(0)+'%, temp '+mxT.toFixed(0)+'°C'
+  }else if(st==='low'){
+    stTip='DoD '+dod.toFixed(0)+'%'+(tempValid?', temp '+mxT.toFixed(0)+'°C':'')
+  }
+  sct('an-stress',st==='low'?'ok':st==='moderate'?'warn':st==='high'?'err':'dim',st,stTip)
+  var rf=d.runtime_from_full_h,rn=d.runtime_from_current_h,avg24=d.avg_discharge_24h_w
+  var excF=d.runtime_full_exceeds_cap,excN=d.runtime_current_exceeds_cap
+  sv('an-runtime-full',rf>0?(excF?'> 1000 h':fmt(rf,1)+' h'):'—')
+  sv('an-runtime-now', rn>0?(excN?'> 1000 h':fmt(rn,1)+' h'):'—')
+  sv('an-avg-load-24h',avg24>0?fmt(avg24,1)+' W':'—')
+  var a24=$('an-avg-load-24h');if(a24)a24.title=d.runtime_from_charger?'From charger power when charging (est. load when grid drops).':'Load used for runtime. From 24h discharge or 1h profile (BMS+charger).'
+  var rtTip=d.runtime_from_charger?'From charger power when charging (est. load when grid drops). 10% = LiFePO4 cutoff.':'24h discharge or 1h load profile. When charging, uses charger power as fallback. 10% = LiFePO4 cutoff.'
+  var rfe=$('an-runtime-full');if(rfe)rfe.title=rtTip
+  var rne=$('an-runtime-now');if(rne)rne.title=rtTip
+  if(d.uptime_sec!=null){var u=d.uptime_sec,days=Math.floor(u/86400);sv('an-uptime',days>0?days+' days':Math.floor(u/3600)+'h')}
+  else sv('an-uptime','—')
+  if(d.last_bms_update_ago_sec!=null){var b=d.last_bms_update_ago_sec;sv('an-bms-ago',b<60?b+' s ago':b<3600?Math.floor(b/60)+' m ago':'—')}
+  else sv('an-bms-ago','—')
+  if(d.last_charger_update_ago_sec!=null){var c=d.last_charger_update_ago_sec;sv('an-chg-ago',c<60?c+' s ago':c<3600?Math.floor(c/60)+' m ago':'—')}
+  else sv('an-chg-ago','—')
 }).catch(function(){})}
 setInterval(upAnalytics,5000); upAnalytics()
+
+function upHealth(){fetch('/api/system_health').then(function(r){return r.json()}).then(function(d){
+  var e=function(id){return document.getElementById(id)}
+  if(e('health-score'))e('health-score').textContent=d.score
+  if(e('health-battery'))e('health-battery').textContent=d.battery||'—'
+  if(e('health-cells'))e('health-cells').textContent=d.cells||'—'
+  if(e('health-charging'))e('health-charging').textContent=d.charging||'—'
+}).catch(function(){})}
+function upSolarWeek(){fetch('/api/solar_forecast_week').then(function(r){return r.json()}).then(function(d){
+  var e=function(id){return document.getElementById(id)}
+  if(e('solar-week-kwh'))e('solar-week-kwh').textContent=d.valid?d.week_total_kwh.toFixed(1)+' kWh':'—'
+  if(e('solar-days-full'))e('solar-days-full').textContent=d.valid&&d.days_to_full>0?d.days_to_full:'—'
+}).catch(function(){})}
+function upSolarSim(){fetch('/api/solar_simulation').then(function(r){return r.json()}).then(function(d){
+  var e=function(id){return document.getElementById(id)}
+  if(e('solar-sim-wh'))e('solar-sim-wh').textContent=d.expected_today_wh>0?d.expected_today_wh.toFixed(0)+' Wh':'—'
+  if(e('solar-sim-bat'))e('solar-sim-bat').textContent=d.battery_projection||'—'
+}).catch(function(){})}
+function upSolarForecast(){fetch('/api/solar_forecast').then(function(r){return r.json()}).then(function(d){
+  var e=function(id){return document.getElementById(id)}
+  if(e('solar-forecast-wh'))e('solar-forecast-wh').textContent=d.valid?(d.tomorrow_generation_wh/1000).toFixed(1)+' kWh':'—'
+  if(e('solar-forecast-cloud'))e('solar-forecast-cloud').textContent=d.valid?Math.round(d.cloud_cover*100)+'%':'—'
+  if(e('solar-forecast-bat'))e('solar-forecast-bat').textContent=d.valid?(d.expected_battery_state||'—'):'—'
+  var errRow=e('solar-forecast-err-row'),errEl=e('solar-forecast-err')
+  if(errRow&&errEl){if(d.error&&!d.valid){errEl.textContent=d.error;errRow.style.display=''}else{errEl.textContent='';errRow.style.display='none'}}
+}).catch(function(){})}
+function upResistance(){fetch('/api/battery/resistance').then(function(r){return r.json()}).then(function(d){
+  var e=function(id){return document.getElementById(id)}
+  var hasData=d.internal_resistance_milliohms>0
+  if(e('resistance-mohm'))e('resistance-mohm').textContent=hasData?d.internal_resistance_milliohms.toFixed(1):'—'
+  if(e('resistance-trend'))e('resistance-trend').textContent=d.trend||'—'
+  var noteRow=e('resistance-note-row');if(noteRow)noteRow.style.display=hasData?'none':''
+}).catch(function(){})}
+function upAnomalies(){fetch('/api/anomalies').then(function(r){return r.json()}).then(function(d){
+  var el=document.getElementById('anomalies-list');if(!el)return
+  var a=d.anomalies||[]
+  if(!a.length){el.textContent='—';return}
+  el.innerHTML=a.slice(-5).reverse().map(function(x){
+    var msg=x.message||x.type
+    return '<div class=\"warn\" style=\"margin-bottom:.3rem\">⚠ '+msg.replace(/\n/g,'<br>')+'</div>'
+  }).join('')
+}).catch(function(){})}
+setInterval(upHealth,10000); setInterval(upSolarWeek,300000); setInterval(upSolarSim,30000); setInterval(upSolarForecast,60000); setInterval(upResistance,10000); setInterval(upAnomalies,10000)
+upHealth(); upSolarWeek(); upSolarSim(); upSolarForecast(); upResistance(); upAnomalies()
+
+function upEvents(){fetch('/api/events?n=30').then(function(r){return r.json()}).then(function(evs){
+  var el=$('sys-events');if(!el)return
+  if(!evs||!evs.length){el.textContent='—';return}
+  el.innerHTML=evs.map(function(e){return '<div>'+e.time+' '+e.message+'</div>'}).join('')
+}).catch(function(){})}
+setInterval(upEvents,5000); upEvents()
 
 function renderFlowDiagram(d){
   var el=document.getElementById('flow-svg');if(!el)return
@@ -1634,6 +2156,79 @@ setInterval(loadCharts,Math.max(pollIvl*1000,10000))
 (function(){var rt;window.addEventListener('resize',function(){clearTimeout(rt);rt=setTimeout(loadCharts,150)})})()
 </script></div></body></html>)";
 
+    return o;
+}
+
+std::string HttpServer::html_solar_page() {
+    std::string o;
+    o.reserve(16000);
+    o += R"HTML(<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Solar Forecast — limonitor</title>
+<style>
+:root{--bg:#0d0d11;--card:#16161c;--border:#2e2e3a;--text:#e0e0ea;--muted:#9090a8;--green:#4ade80;--orange:#fb923c;--cyan:#22d3ee}
+html.light{--bg:#f2f3f7;--card:#fff;--border:#d4d4e0;--text:#1a1a2c;--muted:#5a5a72;--green:#16a34a;--orange:#c2410c;--cyan:#0891b2}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'SF Mono',Menlo,Consolas,monospace;background:var(--bg);color:var(--text);font-size:13px;padding:1.4rem}
+a{color:var(--green);text-decoration:none}a:hover{text-decoration:underline}
+h1{font-size:1.5rem;color:var(--green);margin-bottom:.5rem}
+.sub{font-size:.72rem;color:var(--muted);margin-bottom:1rem}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem;margin-bottom:.7rem}
+.card-title{font-size:.6rem;text-transform:uppercase;letter-spacing:.14em;color:var(--muted);margin-bottom:.6rem}
+.stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:.6rem;margin-bottom:1rem}
+.stat{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.8rem}
+.stat-lbl{font-size:.6rem;color:var(--muted);text-transform:uppercase}
+.stat-val{font-size:1.4rem;font-weight:700;color:var(--green);margin-top:.2rem}
+table{width:100%;border-collapse:collapse;font-size:.85rem}
+th,td{padding:.4rem .5rem;text-align:left;border-bottom:1px solid var(--border)}
+th{color:var(--muted);font-weight:500}
+.ok{color:var(--green)}.warn{color:var(--orange)}.dim{color:var(--muted)}
+.footer{font-size:.68rem;color:var(--muted);margin-top:1rem}
+.tabs{display:flex;gap:0;margin-bottom:1rem;border-bottom:1px solid var(--border)}
+.tab{padding:.5rem 1rem;font-size:.8rem;color:var(--muted);background:none;border:none;border-bottom:2px solid transparent;cursor:pointer;font-family:inherit;text-decoration:none}
+.tab:hover{color:var(--text)}
+.tab.active{color:var(--green);border-bottom-color:var(--green);font-weight:600}
+</style></head><body>
+)HTML";
+    o += "<nav class=\"tabs\"><a href=\"/\" class=\"tab\">Dashboard</a><a href=\"/solar\" class=\"tab active\">Solar</a></nav>";
+    o += "<h1>Solar Forecast</h1>";
+    o += "<p class=\"sub\">";
+    o += "<a href=\"/api/solar_forecast_week\">/api/solar_forecast_week</a> &nbsp;"
+         "<a href=\"/api/solar_simulation\">/api/solar_simulation</a> &nbsp;"
+         "<a href=\"/api/solar_forecast\">/api/solar_forecast</a></p>";
+
+    o += "<div class=\"stats\" id=\"solar-stats\">";
+    o += "<div class=\"stat\"><div class=\"stat-lbl\">Week total</div><div class=\"stat-val\" id=\"week-kwh\">—</div><div class=\"stat-lbl\">kWh</div></div>";
+    o += "<div class=\"stat\"><div class=\"stat-lbl\">Days to full</div><div class=\"stat-val\" id=\"days-full\">—</div><div class=\"stat-lbl\">solar only</div></div>";
+    o += "<div class=\"stat\"><div class=\"stat-lbl\">Best day</div><div class=\"stat-val\" id=\"best-day\">—</div><div class=\"stat-lbl\">highest yield</div></div>";
+    o += "<div class=\"stat\"><div class=\"stat-lbl\">Recovery</div><div class=\"stat-val\" id=\"recovery-wh\">—</div><div class=\"stat-lbl\">Wh this week</div></div>";
+    o += "</div>";
+
+    o += "<div class=\"card\"><div class=\"card-title\">Daily Forecast</div>";
+    o += "<table><thead><tr><th>Date</th><th>kWh</th><th>Cloud</th><th>Sun hrs</th><th>Optimal window</th></tr></thead>";
+    o += "<tbody id=\"daily-table\"><tr><td colspan=\"5\" class=\"dim\">Loading…</td></tr></tbody></table></div>";
+
+    o += "<div class=\"card\"><div class=\"card-title\">Today & Tomorrow (from /api/solar_simulation & /api/solar_forecast)</div>";
+    o += "<table><tr><td>Expected today</td><td id=\"today-wh\">—</td></tr>";
+    o += "<tr><td>Tomorrow</td><td id=\"tomorrow-wh\">—</td></tr>";
+    o += "<tr><td>Battery projection</td><td id=\"bat-proj\">—</td></tr></table></div>";
+
+    o += "<div class=\"footer\">Data from OpenWeather 5-day forecast. Cached 30 min. Optimal window = clearest daytime hours.</div>";
+
+    o += "<script>\n"
+         "function $(id){return document.getElementById(id)}\n"
+         "function fmt(v,d){return(v==null||isNaN(+v))?'—':(+v).toFixed(d)}\n"
+         "function loadWeek(){fetch('/api/solar_forecast_week').then(function(r){return r.json()}).then(function(d){\n"
+         "if(!d.valid){$('week-kwh').textContent='—';$('days-full').textContent='—';$('best-day').textContent=d.error||'—';$('recovery-wh').textContent='—';$('daily-table').innerHTML='<tr><td colspan=5 class=warn>'+d.error+'</td></tr>';return}\n"
+         "$('week-kwh').textContent=fmt(d.week_total_kwh,2);$('days-full').textContent=d.days_to_full>0?d.days_to_full:'—';$('best-day').textContent=d.best_day||'—';$('recovery-wh').textContent=d.recovery_wh>0?fmt(d.recovery_wh,0):'—'\n"
+         "var tbody=$('daily-table');if(!d.daily||!d.daily.length){tbody.innerHTML='<tr><td colspan=5 class=dim>No data</td></tr>';return}\n"
+         "tbody.innerHTML=d.daily.map(function(x){return '<tr><td>'+x.date+'</td><td class=ok>'+fmt(x.kwh,2)+' kWh</td><td>'+Math.round((x.cloud_cover||0)*100)+'%</td><td>'+fmt(x.sun_hours_effective,1)+' h</td><td>'+x.optimal_start+' – '+x.optimal_end+'</td></tr>'}).join('')\n"
+         "}).catch(function(){})}\n"
+         "function loadToday(){Promise.all([fetch('/api/solar_simulation').then(function(r){return r.json()}),fetch('/api/solar_forecast').then(function(r){return r.json()})]).then(function(arr){\n"
+         "var sim=arr[0],fore=arr[1];$('today-wh').textContent=sim.expected_today_wh>0?fmt(sim.expected_today_wh,0)+' Wh':'—';$('tomorrow-wh').textContent=fore.valid?fmt(fore.tomorrow_generation_wh/1000,1)+' kWh':'—';$('bat-proj').textContent=sim.battery_projection||fore.expected_battery_state||'—'\n"
+         "}).catch(function(){})}\n"
+         "loadWeek();loadToday();setInterval(loadWeek,300000);setInterval(loadToday,60000)\n"
+         "</script></body></html>";
     return o;
 }
 
