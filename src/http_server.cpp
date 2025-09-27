@@ -38,9 +38,9 @@ static std::string iso8601(std::chrono::system_clock::time_point tp) {
     return buf;
 }
 
-HttpServer::HttpServer(DataStore& store, const std::string& bind_addr, uint16_t port,
+HttpServer::HttpServer(DataStore& store, Database* db, const std::string& bind_addr, uint16_t port,
                        int poll_interval_s)
-    : store_(store), bind_addr_(bind_addr), port_(port),
+    : store_(store), db_(db), bind_addr_(bind_addr), port_(port),
       poll_interval_s_(std::max(1, poll_interval_s)) {}
 
 HttpServer::~HttpServer() { stop(); }
@@ -117,12 +117,62 @@ void HttpServer::handle(int fd) {
     std::string method, path, proto;
     ss >> method >> path >> proto;
 
-    if (method != "GET") { send_response(fd, 405, "text/plain", "Method Not Allowed"); return; }
-
     // Strip query string for routing
     std::string query;
     auto qpos = path.find('?');
     if (qpos != std::string::npos) { query = path.substr(qpos + 1); path = path.substr(0, qpos); }
+
+    // CORS preflight — browser sends OPTIONS before POST when cross-origin
+    if (method == "OPTIONS") {
+        std::string hdr = "HTTP/1.0 204 No Content\r\n"
+            "Content-Length: 0\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+            "Access-Control-Allow-Headers: Content-Type\r\n"
+            "Access-Control-Max-Age: 86400\r\n"
+            "Connection: close\r\n\r\n";
+        send(fd, hdr.data(), hdr.size(), MSG_NOSIGNAL);
+        return;
+    }
+
+    // POST /api/settings — persist JSON body {"theme":"dark","time":"24",...}
+    if (method == "POST" && path == "/api/settings") {
+        if (!db_) {
+            send_response(fd, 503, "application/json", "{\"error\":\"Settings not available\"}\n");
+            return;
+        }
+        auto body_start = req.find("\r\n\r\n");
+        if (body_start != std::string::npos) body_start += 4;
+        else { body_start = req.find("\n\n"); if (body_start != std::string::npos) body_start += 2; }
+        std::string body = (body_start != std::string::npos && body_start < req.size())
+            ? req.substr(body_start) : "";
+        size_t p = 0;
+        while (p < body.size()) {
+            auto k1 = body.find('"', p); if (k1 == std::string::npos) break;
+            auto k2 = body.find('"', k1 + 1); if (k2 == std::string::npos) break;
+            auto c = body.find(':', k2); if (c == std::string::npos) break;
+            std::string key = body.substr(k1 + 1, k2 - k1 - 1);
+            std::string val;
+            auto v1 = body.find('"', c);
+            if (v1 != std::string::npos && v1 - c <= 3) {
+                auto v2 = body.find('"', v1 + 1); if (v2 == std::string::npos) break;
+                val = body.substr(v1 + 1, v2 - v1 - 1);
+                p = v2 + 1;
+            } else {
+                auto end = body.find_first_of(",}", c + 1);
+                if (end == std::string::npos) break;
+                val = body.substr(c + 1, end - c - 1);
+                while (!val.empty() && (val.back() == ' ' || val.back() == '\t' || val.back() == '\r' || val.back() == '\n')) val.pop_back();
+                while (!val.empty() && (val.front() == ' ' || val.front() == '\t')) val.erase(0, 1);
+                p = end;
+            }
+            db_->set_setting(key, val);
+        }
+        send_response(fd, 200, "application/json", "{\"ok\":true}\n");
+        return;
+    }
+
+    if (method != "GET") { send_response(fd, 405, "text/plain", "Method Not Allowed"); return; }
 
     auto snap_opt = store_.latest();
     BatterySnapshot snap;
@@ -142,12 +192,37 @@ void HttpServer::handle(int fd) {
         }
         h = std::max(0.1, std::min(h, 168.0));
     }
-    if (path == "/" || path == "/index.html") {
+    std::string init_settings;
+    if (db_) {
+        init_settings = "{\"theme\":" + jstr(db_->get_setting("theme")) +
+            ",\"time\":" + jstr(db_->get_setting("time")) +
+            ",\"range\":" + jstr(db_->get_setting("range")) +
+            ",\"show-extended\":" + jstr(db_->get_setting("show-extended")) +
+            ",\"locale\":" + jstr(db_->get_setting("locale")) + "}";
+    }
+    bool web_needs_setup = false;
+    if (db_) {
+        std::string dn = db_->get_setting("device_name");
+        std::string da = db_->get_setting("device_address");
+        std::string sd = db_->get_setting("serial_device");
+        std::string pr = db_->get_setting("pwrgate_remote");
+        web_needs_setup = dn.empty() && da.empty() && sd.empty() && pr.empty();
+    }
+
+    if (path == "/settings" || path == "/settings.html") {
+        send_response(fd, 200, "text/html", html_settings_page(db_));
+    } else if (path == "/setup") {
+        send_response(fd, 200, "text/html", html_settings_page(db_));
+    } else if ((path == "/" || path == "/index.html") && web_needs_setup) {
+        send_response(fd, 200, "text/html", html_settings_page(db_));
+    } else if (path == "/" || path == "/index.html") {
+        std::string theme = db_ ? db_->get_setting("theme") : "";
         send_response(fd, 200, "text/html",
                       html_dashboard(snap, ble_st, pg,
-                                     store_.purchase_date(), h, poll_interval_s_));
+                                     store_.purchase_date(), h, poll_interval_s_, init_settings, theme));
     } else if (path == "/solar" || path == "/solar.html") {
-        send_response(fd, 200, "text/html", html_solar_page());
+        std::string theme = db_ ? db_->get_setting("theme") : "";
+        send_response(fd, 200, "text/html", html_solar_page(init_settings, theme));
     } else if (path == "/api/charger") {
         send_response(fd, 200, "application/json", charger_json(pg));
     } else if (path == "/api/status") {
@@ -198,6 +273,7 @@ void HttpServer::handle(int fd) {
                 snap.valid ? snap.soc_pct : 0, -1, max_a, v, nom);
             send_response(fd, 200, "application/json", solar_simulation_json(r));
         } else {
+            LOG_DEBUG("Solar /api/solar_simulation: extensions not available");
             send_response(fd, 200, "application/json",
                          "{\"panel_watts\":0,\"expected_today_wh\":0,\"battery_projection\":\"—\"}\n");
         }
@@ -223,8 +299,11 @@ void HttpServer::handle(int fd) {
             auto r = ext->weather_forecast().get_forecast_week(
                 cfg.panel_watts, cfg.system_efficiency, max_a, v, nom,
                 snap.valid ? snap.soc_pct : 0);
+            if (!r.valid && !r.error.empty())
+                LOG_DEBUG("Solar /api/solar_forecast_week: %s", r.error.c_str());
             send_response(fd, 200, "application/json", solar_forecast_week_json(r));
         } else {
+            LOG_DEBUG("Solar /api/solar_forecast_week: extensions not available");
             send_response(fd, 200, "application/json",
                          "{\"valid\":false,\"error\":\"Extensions not available\",\"daily\":[]}\n");
         }
@@ -238,10 +317,66 @@ void HttpServer::handle(int fd) {
             auto r = ext->weather_forecast().get_forecast(
                 cfg.panel_watts, cfg.system_efficiency, max_a, v, nom,
                 snap.valid ? snap.soc_pct : 0);
+            if (!r.valid && !r.error.empty())
+                LOG_DEBUG("Solar /api/solar_forecast: %s", r.error.c_str());
             send_response(fd, 200, "application/json", solar_forecast_json(r));
         } else {
+            LOG_DEBUG("Solar /api/solar_forecast: extensions not available");
             send_response(fd, 200, "application/json",
                          "{\"tomorrow_generation_wh\":0,\"cloud_cover\":0,\"expected_battery_state\":\"—\"}\n");
+        }
+    } else if (path == "/api/settings") {
+        if (!db_) {
+            send_response(fd, 200, "application/json", "{\"theme\":\"\",\"time\":\"24\",\"range\":\"1\",\"show-extended\":\"0\",\"locale\":\"\"}\n");
+        } else {
+            std::string t = db_->get_setting("theme");
+            std::string tf = db_->get_setting("time");
+            std::string r = db_->get_setting("range");
+            std::string se = db_->get_setting("show-extended");
+            std::string loc = db_->get_setting("locale");
+            if (tf.empty()) tf = "24";
+            if (r.empty()) r = "1";
+            if (se.empty()) se = "0";
+            std::string out = "{\"theme\":" + jstr(t) + ",\"time\":" + jstr(tf) +
+                ",\"range\":" + jstr(r) + ",\"show-extended\":" + jstr(se) +
+                ",\"locale\":" + jstr(loc) + "}\n";
+            send_response(fd, 200, "application/json", out);
+        }
+    } else if (path == "/api/config") {
+        if (!db_) {
+            send_response(fd, 503, "application/json", "{\"error\":\"Config not available\"}\n");
+        } else {
+            auto g = [this](const std::string& k, const std::string& d) {
+                std::string v = db_->get_setting(k);
+                return v.empty() ? d : v;
+            };
+            std::string out = "{\"device_address\":" + jstr(g("device_address", "")) +
+                ",\"device_name\":" + jstr(g("device_name", "")) +
+                ",\"adapter_path\":" + jstr(g("adapter_path", "/org/bluez/hci0")) +
+                ",\"service_uuid\":" + jstr(g("service_uuid", "0000ffe0-0000-1000-8000-00805f9b34fb")) +
+                ",\"notify_uuid\":" + jstr(g("notify_uuid", "0000ffe1-0000-1000-8000-00805f9b34fb")) +
+                ",\"write_uuid\":" + jstr(g("write_uuid", "0000ffe2-0000-1000-8000-00805f9b34fb")) +
+                ",\"poll_interval\":" + jstr(g("poll_interval", "5")) +
+                ",\"http_port\":" + jstr(g("http_port", "8080")) +
+                ",\"http_bind\":" + jstr(g("http_bind", "0.0.0.0")) +
+                ",\"log_file\":" + jstr(g("log_file", "")) +
+                ",\"verbose\":" + jstr(g("verbose", "0")) +
+                ",\"serial_device\":" + jstr(g("serial_device", "")) +
+                ",\"serial_baud\":" + jstr(g("serial_baud", "115200")) +
+                ",\"pwrgate_remote\":" + jstr(g("pwrgate_remote", "")) +
+                ",\"db_path\":" + jstr(g("db_path", "")) +
+                ",\"db_interval\":" + jstr(g("db_interval", "60")) +
+                ",\"daemon\":" + jstr(g("daemon", "0")) +
+                ",\"battery_purchased\":" + jstr(g("battery_purchased", "")) +
+                ",\"rated_capacity_ah\":" + jstr(g("rated_capacity_ah", "0")) +
+                ",\"tx_threshold\":" + jstr(g("tx_threshold", "1.0")) +
+                ",\"solar_enabled\":" + jstr(g("solar_enabled", "0")) +
+                ",\"solar_panel_watts\":" + jstr(g("solar_panel_watts", "400")) +
+                ",\"solar_system_efficiency\":" + jstr(g("solar_system_efficiency", "0.75")) +
+                ",\"solar_zip_code\":" + jstr(g("solar_zip_code", "80112")) +
+                ",\"weather_api_key\":" + jstr(g("weather_api_key", "")) +
+                ",\"weather_zip_code\":" + jstr(g("weather_zip_code", "80112")) + "}\n";
+            send_response(fd, 200, "application/json", out);
         }
     } else if (path == "/api/system_health") {
         auto* ext = store_.extensions();
@@ -580,7 +715,18 @@ std::string HttpServer::solar_forecast_week_json(const SolarForecastWeekResult& 
              ",\"cloud_cover\":" + jdbl(d.cloud_cover, 2) +
              ",\"optimal_start\":" + jstr(d.optimal_start) +
              ",\"optimal_end\":" + jstr(d.optimal_end) +
-             ",\"sun_hours_effective\":" + jdbl(d.sun_hours_effective, 1) + "}";
+             ",\"optimal_reason\":" + jstr(d.optimal_reason) +
+             ",\"sun_hours_effective\":" + jdbl(d.sun_hours_effective, 1) +
+             ",\"max_recovery_pct\":" + jdbl(d.max_recovery_pct, 1) +
+             ",\"max_recovery_pct_lo\":" + jdbl(d.max_recovery_pct_lo, 1) +
+             ",\"max_recovery_pct_hi\":" + jdbl(d.max_recovery_pct_hi, 1) +
+             ",\"max_recovery_ah\":" + jdbl(d.max_recovery_ah, 2) +
+             ",\"max_recovery_ah_lo\":" + jdbl(d.max_recovery_ah_lo, 2) +
+             ",\"max_recovery_ah_hi\":" + jdbl(d.max_recovery_ah_hi, 2) +
+             ",\"max_recovery_wh\":" + jdbl(d.max_recovery_wh, 0) +
+             ",\"max_recovery_wh_lo\":" + jdbl(d.max_recovery_wh_lo, 0) +
+             ",\"max_recovery_wh_hi\":" + jdbl(d.max_recovery_wh_hi, 0) +
+             ",\"is_extended\":" + std::string(d.is_extended ? "true" : "false") + "}";
     }
     o += "\n  ]\n}\n";
     return o;
@@ -955,7 +1101,9 @@ std::string HttpServer::html_dashboard(const BatterySnapshot& s, const std::stri
                                        const PwrGateSnapshot& pg,
                                        const std::string& purchase_date,
                                        double hours,
-                                       int poll_interval_s) {
+                                       int poll_interval_s,
+                                       const std::string& init_settings,
+                                       const std::string& theme) {
     char buf[512];
 
     const char* cur_cls = s.current_a >  0.01 ? "sv warn" :
@@ -973,10 +1121,13 @@ std::string HttpServer::html_dashboard(const BatterySnapshot& s, const std::stri
     std::string o;
     o.reserve(65536);
 
-    o += R"HTML(<!DOCTYPE html><html lang="en"><head>
+    std::string html_class = (theme == "light") ? " class=\"light\"" : "";
+    o += "<!DOCTYPE html><html lang=\"en\"" + html_class + "><head>\n";
+    o += R"HTML(
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0d0d11" media="(prefers-color-scheme:dark)">
 <meta name="theme-color" content="#f2f3f7" media="(prefers-color-scheme:light)">
+<link rel="prefetch" href="/solar"><link rel="prefetch" href="/settings">
 <title>limonitor</title>
 <style>
 /* ── Dark theme (default) ── */
@@ -1067,6 +1218,12 @@ details[open].card summary::before{content:'▾  '}
 .footer a{color:var(--muted)}.footer a:hover{color:var(--green)}
 /* ── Analytics grid ── */
 .sec-lbl{font-size:.58rem;text-transform:uppercase;letter-spacing:.14em;color:var(--muted);margin:.6rem 0 .35rem}
+.atabs{display:flex;gap:0;margin-bottom:.6rem;border-bottom:1px solid var(--border)}
+.atab{padding:.4rem .9rem;font-size:.8rem;color:var(--muted);background:none;border:none;border-bottom:2px solid transparent;cursor:pointer;font-family:inherit}
+.atab:hover{color:var(--text)}
+.atab.active{color:var(--green);border-bottom-color:var(--green);font-weight:600}
+.atab-pane{display:none}
+.atab-pane.active{display:block}
 .acards{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:.55rem;margin-bottom:.7rem}
 @media(max-width:480px){.acards{grid-template-columns:1fr 1fr}}
 @media(max-width:320px){.acards{grid-template-columns:1fr}}
@@ -1081,6 +1238,13 @@ details[open].card summary::before{content:'▾  '}
   transition:border-color .15s,color .15s,background .15s}
 .btn:hover{border-color:var(--muted);color:var(--text)}
 .btn:focus-visible,.trng-btn:focus-visible{outline:2px solid var(--green);outline-offset:2px}
+/* ── Settings modal ── */
+.set-modal{position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:1000}
+.set-panel{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1.2rem;min-width:260px}
+.set-title{font-size:.9rem;font-weight:600;margin-bottom:.8rem;color:var(--text)}
+.set-row{margin-bottom:.6rem;display:flex;align-items:center;gap:.6rem}
+.set-row label{min-width:90px;font-size:.8rem;color:var(--muted)}
+.set-row select{flex:1;padding:.35rem .5rem;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-family:inherit;font-size:.8rem}
 /* ── Time range ── */
 .trng{display:flex;gap:.2rem;align-items:center}
 .trng-lbl{font-size:.62rem;color:var(--muted);margin-right:.2rem;text-transform:uppercase;letter-spacing:.1em}
@@ -1126,10 +1290,12 @@ html.light .flow-node-load{fill:#e2e8f0}
          "#bat-chart{height:280px}#chg-chart{height:260px}.card.card-bat,.card.card-chg{padding-bottom:1.5rem}"
          ".chart-svg{preserve-aspect-ratio:none}}";
     o += R"HTML(
-</style></head><body><div class="wrap">
+</style>
+<link rel="prefetch" href="/solar">
+</head><body><div class="wrap">
 )HTML";
 
-    o += "<nav class=\"tabs\"><a href=\"/\" class=\"tab active\">Dashboard</a><a href=\"/solar\" class=\"tab\">Solar</a></nav>";
+    o += "<nav class=\"tabs\"><a href=\"/\" class=\"tab active\">Dashboard</a><a href=\"/solar\" class=\"tab\">Solar</a><a href=\"/settings\" class=\"tab\">Settings</a></nav>";
     o += "<header><h1>limonitor</h1><div class=\"hstat\">";
     o += "<span><span class=\"dot " + dot_cls + "\"></span>" + ble_st + "</span>";
     if (s.valid && !s.device_name.empty())
@@ -1152,7 +1318,17 @@ html.light .flow-node-load{fill:#e2e8f0}
     }
     o += "<button class=\"btn\" onclick=\"loadCharts()\" title=\"Refresh charts\">&#8635;</button>";
     o += "<button id=\"thm-btn\" class=\"btn\" onclick=\"toggleTheme()\" title=\"Toggle theme\">&#9788;</button>";
+    o += "<button id=\"set-btn\" class=\"btn\" onclick=\"toggleSettings()\" title=\"Settings\">&#9881;</button>";
     o += "</div></header>\n";
+    o += "<div id=\"settings-modal\" class=\"set-modal\" style=\"display:none\">"
+         "<div class=\"set-panel\"><div class=\"set-title\">Settings</div>"
+         "<div class=\"set-row\"><label>Theme</label><select id=\"set-theme\" onchange=\"applySetting('theme',this.value)\">"
+         "<option value=\"dark\">Dark</option><option value=\"light\">Light</option></select></div>"
+         "<div class=\"set-row\"><label>Time format</label><select id=\"set-time\" onchange=\"applySetting('time',this.value)\">"
+         "<option value=\"24\">24-hour</option><option value=\"12\">12-hour</option></select></div>"
+         "<div class=\"set-row\"><label>Chart range</label><select id=\"set-range\" onchange=\"applySetting('range',this.value)\">"
+         "<option value=\"0.5\">30 min</option><option value=\"1\">1 hour</option><option value=\"4\">4 hours</option><option value=\"24\">24 hours</option></select></div>"
+         "<button class=\"btn\" onclick=\"toggleSettings()\" style=\"margin-top:.5rem\">Close</button></div></div>\n";
 
     o += "<main class=\"main\">\n";
     o += "<div id=\"sys-status-panel\" class=\"card\" style=\"margin-bottom:.7rem\">"
@@ -1308,8 +1484,13 @@ html.light .flow-node-load{fill:#e2e8f0}
          "</svg></div>\n";
 
     o += "<div class=\"sec-lbl\">Analytics</div>\n";
-    o += "<div class=\"acards\">\n";
+    o += "<div class=\"atabs\"><button class=\"atab active\" data-atab=\"battery\">Battery</button>"
+         "<button class=\"atab\" data-atab=\"solar\">Solar</button>"
+         "<button class=\"atab\" data-atab=\"charging\">Charging</button>"
+         "<button class=\"atab\" data-atab=\"system\">System</button></div>\n";
 
+    o += "<div class=\"atab-pane active\" data-atab=\"battery\"><div class=\"acards\">\n";
+    // Battery group
     o += "<div class=\"acard\"><div class=\"card-title\">Energy Today</div><table class=\"dt\">\n"
          "<tr><td>Charged</td><td><span id=\"an-e-chg\">—</span> Wh</td></tr>\n"
          "<tr><td>Consumed</td><td><span id=\"an-e-dis\">—</span> Wh</td></tr>\n"
@@ -1331,10 +1512,6 @@ html.light .flow-node-load{fill:#e2e8f0}
          "<tr><td>Rated capacity</td><td><span id=\"an-cap-rated\">—</span></td></tr>\n"
          "</table></div>\n";
 
-    o += "<div class=\"acard\"><div class=\"card-title\">Charging Stage</div><table class=\"dt\">\n"
-         "<tr><td>Stage</td><td><span id=\"an-chg-stage\">—</span></td></tr>\n"
-         "</table></div>\n";
-
     o += "<div class=\"acard\"><div class=\"card-title\">Cell Balance</div><table class=\"dt\">\n"
          "<tr><td>Delta</td><td><span id=\"an-cell-delta\">—</span> mV</td></tr>\n"
          "<tr><td>Status</td><td><span id=\"an-cell-bal\">—</span></td></tr>\n"
@@ -1345,60 +1522,86 @@ html.light .flow-node-load{fill:#e2e8f0}
          "<tr><td>T2</td><td><span id=\"an-t2\">—</span></td></tr>\n"
          "<tr><td>Status</td><td><span id=\"an-temp-status\">—</span></td></tr>\n"
          "</table></div>\n";
-
-    o += "<div class=\"acard\"><div class=\"card-title\">Charger Efficiency</div><table class=\"dt\">\n"
-         "<tr><td>Efficiency</td><td><span id=\"an-eff\">—</span></td></tr>\n"
+    o += "<div class=\"acard\"><div class=\"card-title\">Depth of Discharge</div><table class=\"dt\">\n"
+         "<tr><td>DoD today</td><td><span id=\"an-dod\">—</span> %</td></tr>\n"
+         "<tr><td>Status</td><td><span id=\"an-dod-status\">—</span></td></tr>\n"
+         "</table></div>\n";
+    o += "<div class=\"acard\"><div class=\"card-title\">Battery Utilization</div><table class=\"dt\">\n"
+         "<tr><td>Energy used today</td><td><span id=\"an-util-today\">—</span></td></tr>\n"
+         "<tr><td>Energy used this week</td><td><span id=\"an-util-week\">—</span></td></tr>\n"
+         "</table></div>\n";
+    o += "<div class=\"acard\"><div class=\"card-title\">Battery Stress</div><table class=\"dt\">\n"
+         "<tr><td>Stress level</td><td><span id=\"an-stress\">—</span></td></tr>\n"
+         "</table></div>\n";
+    o += "<div class=\"acard\"><div class=\"card-title\">Runtime Estimates</div><table class=\"dt\">\n"
+         "<tr><td>Full → 10%</td><td><span id=\"an-runtime-full\">—</span></td></tr>\n"
+         "<tr><td>Current → 10%</td><td><span id=\"an-runtime-now\">—</span></td></tr>\n"
+         "<tr><td>24h avg load</td><td><span id=\"an-avg-load-24h\">—</span></td></tr>\n"
+         "</table></div>\n";
+    o += "<div class=\"acard\"><div class=\"card-title\">Battery Internal Resistance</div><table class=\"dt\">\n"
+         "<tr><td>Resistance</td><td><span id=\"resistance-mohm\">—</span> mΩ</td></tr>\n"
+         "<tr><td>Trend</td><td><span id=\"resistance-trend\">—</span></td></tr>\n"
+         "<tr id=\"resistance-note-row\" style=\"display:none\"><td colspan=\"2\"><span id=\"resistance-note\" class=\"dim\" style=\"font-size:.7rem\">Requires radio TX events</span></td></tr>\n"
          "</table></div>\n";
 
+    o += "</div></div>\n"; // end Battery
+
+    o += "<div class=\"atab-pane\" data-atab=\"solar\"><div class=\"acards\">\n";
+    // Solar group
     o += "<div class=\"acard\"><div class=\"card-title\">Solar Input</div><table class=\"dt\">\n"
          "<tr><td>Voltage</td><td><span id=\"an-sol-v\">—</span> V</td></tr>\n"
          "<tr><td>Status</td><td><span id=\"an-sol-status\">—</span></td></tr>\n"
          "<tr><td>Power</td><td><span id=\"an-sol-pwr\">—</span></td></tr>\n"
          "<tr><td>Energy today</td><td><span id=\"an-sol-energy\">—</span></td></tr>\n"
          "</table></div>\n";
-
-    o += "<div class=\"acard\"><div class=\"card-title\">Depth of Discharge</div><table class=\"dt\">\n"
-         "<tr><td>DoD today</td><td><span id=\"an-dod\">—</span> %</td></tr>\n"
-         "<tr><td>Status</td><td><span id=\"an-dod-status\">—</span></td></tr>\n"
-         "</table></div>\n";
-
-    o += "<div class=\"acard\"><div class=\"card-title\">System Load Profile</div><table class=\"dt\">\n"
-         "<tr><td>Average</td><td><span id=\"an-avg-load\">—</span> W</td></tr>\n"
-         "<tr><td>Peak</td><td><span id=\"an-peak-load\">—</span> W</td></tr>\n"
-         "<tr><td>Idle</td><td><span id=\"an-idle-load\">—</span> W</td></tr>\n"
-         "</table></div>\n";
-
-    o += "<div class=\"acard\"><div class=\"card-title\">Battery Utilization</div><table class=\"dt\">\n"
-         "<tr><td>Energy used today</td><td><span id=\"an-util-today\">—</span></td></tr>\n"
-         "<tr><td>Energy used this week</td><td><span id=\"an-util-week\">—</span></td></tr>\n"
-         "</table></div>\n";
-
     o += "<div class=\"acard\"><div class=\"card-title\">Solar Readiness</div><table class=\"dt\">\n"
          "<tr><td><span id=\"an-solar-ready\">—</span></td></tr>\n"
          "</table></div>\n";
+    o += "<div class=\"acard\"><div class=\"card-title\">Solar Simulation</div><table class=\"dt\">\n"
+         "<tr><td>Expected today</td><td><span id=\"solar-sim-wh\">—</span></td></tr>\n"
+         "<tr><td>Battery projection</td><td><span id=\"solar-sim-bat\">—</span></td></tr>\n"
+         "</table></div>\n";
+    o += "<div class=\"acard\"><div class=\"card-title\">7-Day Solar</div><table class=\"dt\">\n"
+         "<tr><td>Week total</td><td><span id=\"solar-week-kwh\">—</span></td></tr>\n"
+         "<tr><td>Days to full</td><td><span id=\"solar-days-full\">—</span></td></tr>\n"
+         "<tr><td><a href=\"/solar\" style=\"font-size:.75rem\">Full solar page →</a></td><td></td></tr>\n"
+         "</table></div>\n";
+    o += "<div class=\"acard\"><div class=\"card-title\">Solar Forecast</div><table class=\"dt\">\n"
+         "<tr><td>Tomorrow</td><td><span id=\"solar-forecast-wh\">—</span></td></tr>\n"
+         "<tr><td>Cloud cover</td><td><span id=\"solar-forecast-cloud\">—</span></td></tr>\n"
+         "<tr><td>Projected battery</td><td><span id=\"solar-forecast-bat\">—</span></td></tr>\n"
+         "<tr id=\"solar-forecast-err-row\" style=\"display:none\"><td colspan=\"2\"><span id=\"solar-forecast-err\" class=\"warn\"></span></td></tr>\n"
+         "</table></div>\n";
 
+    o += "</div></div>\n"; // end Solar
+
+    o += "<div class=\"atab-pane\" data-atab=\"charging\"><div class=\"acards\">\n";
+    // Charging group
+    o += "<div class=\"acard\"><div class=\"card-title\">Charging Stage</div><table class=\"dt\">\n"
+         "<tr><td>Stage</td><td><span id=\"an-chg-stage\">—</span></td></tr>\n"
+         "</table></div>\n";
+    o += "<div class=\"acard\"><div class=\"card-title\">Charger Efficiency</div><table class=\"dt\">\n"
+         "<tr><td>Efficiency</td><td><span id=\"an-eff\">—</span></td></tr>\n"
+         "</table></div>\n";
     o += "<div class=\"acard\"><div class=\"card-title\">Charger Runtime Today</div><table class=\"dt\">\n"
          "<tr><td>Runtime</td><td><span id=\"an-chg-runtime\">—</span></td></tr>\n"
          "</table></div>\n";
-
     o += "<div class=\"acard\"><div class=\"card-title\">Charge Rate</div><table class=\"dt\">\n"
          "<tr><td>Power</td><td><span id=\"an-chg-rate-w\">—</span></td></tr>\n"
          "<tr><td>Speed</td><td><span id=\"an-chg-rate-pct\">—</span></td></tr>\n"
          "<tr><td>Recent vs earlier</td><td><span id=\"an-chg-rate-compare\">—</span></td></tr>\n"
          "</table></div>\n";
-
     o += "<div class=\"acard\"><div class=\"card-title\">Charge Status</div><table class=\"dt\">\n"
          "<tr><td><span id=\"an-psu-status\">—</span></td></tr>\n"
          "</table></div>\n";
+    o += "</div></div>\n"; // end Charging
 
-    o += "<div class=\"acard\"><div class=\"card-title\">Battery Stress</div><table class=\"dt\">\n"
-         "<tr><td>Stress level</td><td><span id=\"an-stress\">—</span></td></tr>\n"
-         "</table></div>\n";
-
-    o += "<div class=\"acard\"><div class=\"card-title\">Runtime Estimates</div><table class=\"dt\">\n"
-         "<tr><td>Full → 10%</td><td><span id=\"an-runtime-full\">—</span></td></tr>\n"
-         "<tr><td>Current → 10%</td><td><span id=\"an-runtime-now\">—</span></td></tr>\n"
-         "<tr><td>24h avg load</td><td><span id=\"an-avg-load-24h\">—</span></td></tr>\n"
+    o += "<div class=\"atab-pane\" data-atab=\"system\"><div class=\"acards\">\n";
+    // System group
+    o += "<div class=\"acard\"><div class=\"card-title\">System Load Profile</div><table class=\"dt\">\n"
+         "<tr><td>Average</td><td><span id=\"an-avg-load\">—</span> W</td></tr>\n"
+         "<tr><td>Peak</td><td><span id=\"an-peak-load\">—</span> W</td></tr>\n"
+         "<tr><td>Idle</td><td><span id=\"an-idle-load\">—</span> W</td></tr>\n"
          "</table></div>\n";
 
     o += "<div class=\"acard\"><div class=\"card-title\">Monitor Status</div><table class=\"dt\">\n"
@@ -1414,34 +1617,10 @@ html.light .flow-node-load{fill:#e2e8f0}
          "<tr><td>Charging</td><td><span id=\"health-charging\">—</span></td></tr>\n"
          "</table></div>\n";
 
-    o += "<div class=\"acard\"><div class=\"card-title\">Solar Simulation</div><table class=\"dt\">\n"
-         "<tr><td>Expected today</td><td><span id=\"solar-sim-wh\">—</span></td></tr>\n"
-         "<tr><td>Battery projection</td><td><span id=\"solar-sim-bat\">—</span></td></tr>\n"
-         "</table></div>\n";
-
-    o += "<div class=\"acard\"><div class=\"card-title\">7-Day Solar</div><table class=\"dt\">\n"
-         "<tr><td>Week total</td><td><span id=\"solar-week-kwh\">—</span></td></tr>\n"
-         "<tr><td>Days to full</td><td><span id=\"solar-days-full\">—</span></td></tr>\n"
-         "<tr><td><a href=\"/solar\" style=\"font-size:.75rem\">Full solar page →</a></td><td></td></tr>\n"
-         "</table></div>\n";
-
-    o += "<div class=\"acard\"><div class=\"card-title\">Solar Forecast</div><table class=\"dt\">\n"
-         "<tr><td>Tomorrow</td><td><span id=\"solar-forecast-wh\">—</span></td></tr>\n"
-         "<tr><td>Cloud cover</td><td><span id=\"solar-forecast-cloud\">—</span></td></tr>\n"
-         "<tr><td>Projected battery</td><td><span id=\"solar-forecast-bat\">—</span></td></tr>\n"
-         "<tr id=\"solar-forecast-err-row\" style=\"display:none\"><td colspan=\"2\"><span id=\"solar-forecast-err\" class=\"warn\"></span></td></tr>\n"
-         "</table></div>\n";
-
-    o += "<div class=\"acard\"><div class=\"card-title\">Battery Internal Resistance</div><table class=\"dt\">\n"
-         "<tr><td>Resistance</td><td><span id=\"resistance-mohm\">—</span> mΩ</td></tr>\n"
-         "<tr><td>Trend</td><td><span id=\"resistance-trend\">—</span></td></tr>\n"
-         "<tr id=\"resistance-note-row\" style=\"display:none\"><td colspan=\"2\"><span id=\"resistance-note\" class=\"dim\" style=\"font-size:.7rem\">Requires radio TX events</span></td></tr>\n"
-         "</table></div>\n";
-
     o += "<div class=\"acard\"><div class=\"card-title\">Anomalies</div>"
          "<div id=\"anomalies-list\" style=\"font-size:.78rem;max-height:140px;overflow-y:auto\">—</div></div>\n";
 
-    o += "</div>\n"; // .acards
+    o += "</div></div>\n"; // .acards, .atab-pane system
 
     if (!s.cell_voltages_v.empty()) {
         o += "<div class=\"card\"><div class=\"card-title\">Cell Voltages";
@@ -1540,32 +1719,71 @@ html.light .flow-node-load{fill:#e2e8f0}
          "</div>\n";
 
     {
-        char jshdr[96];
+        char jshdr[256];
         std::snprintf(jshdr, sizeof(jshdr),
             "<script>\nvar currentH=%.4g,pollIvl=%d,lastUpd=Date.now()\n",
             hours, std::max(1, poll_interval_s));
         o += jshdr;
+        if (!init_settings.empty())
+            o += "var lmSettings=" + init_settings + ";\n";
+        else
+            o += "var lmSettings={theme:\"\",time:\"24\",range:\"1\",\"show-extended\":\"0\"};\n";
     }
 
     o += R"(
 function $(id){return document.getElementById(id)}
 function fmt(v,d){return(v==null||isNaN(+v))? '\u2014':(+v).toFixed(d)}
 
-function initTheme(){
-  var t=localStorage.getItem('lm-theme')
-  if(!t) t=window.matchMedia('(prefers-color-scheme:light)').matches?'light':'dark'
-  applyTheme(t,false)
+function getSetting(k,d){return(lmSettings&&lmSettings[k]!==undefined)?lmSettings[k]:d}
+function setSetting(k,v){if(!lmSettings)lmSettings={};lmSettings[k]=v;fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(lmSettings)}).catch(function(){})}
+function initSettings(){
+  if(!lmSettings)lmSettings={theme:'',time:'24',range:'1','show-extended':'0'}
+  var t=getSetting('theme','');if(!t)t=window.matchMedia('(prefers-color-scheme:light)').matches?'light':'dark'
+  lmSettings.theme=t;applyTheme(t,false)
+  var tf=getSetting('time','24');var se=$('set-time');if(se)se.value=tf
+  var r=getSetting('range','');if(r&&currentH){var sh=parseFloat(r);if(!isNaN(sh)&&[0.5,1,4,24].indexOf(sh)>=0)currentH=sh}
+  var sr=$('set-range');if(sr)sr.value=String(currentH)
+  var st=$('set-theme');if(st)st.value=t
 }
 function applyTheme(t,redraw){
   document.documentElement.classList.toggle('light',t==='light')
-  var b=$('thm-btn'); if(b) b.textContent=t==='light'?'\u263d':'\u2600'
-  localStorage.setItem('lm-theme',t)
-  if(redraw) loadCharts()
+  var b=$('thm-btn');if(b)b.textContent=t==='light'?'\u263d':'\u2600'
+  if(!lmSettings)lmSettings={};lmSettings.theme=t;fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(lmSettings)}).catch(function(){})
+  var st=$('set-theme');if(st)st.value=t
+  if(redraw)loadCharts()
 }
-function toggleTheme(){
-  applyTheme(document.documentElement.classList.contains('light')?'dark':'light',true)
+function toggleTheme(){applyTheme(document.documentElement.classList.contains('light')?'dark':'light',true)}
+function toggleSettings(){
+  var m=$('settings-modal');if(!m)return
+  m.style.display=m.style.display==='none'?'flex':'none'
+  if(m.style.display==='flex'){var st=$('set-theme');if(st)st.value=getSetting('theme','dark');var se=$('set-time');if(se)se.value=getSetting('time','24');var sr=$('set-range');if(sr)sr.value=String(currentH)}
 }
-initTheme()
+function applySetting(k,v){
+  if(!lmSettings)lmSettings={};lmSettings[k]=v
+  var toSend={theme:lmSettings.theme||'',time:lmSettings.time||'24',range:lmSettings.range||'1','show-extended':lmSettings['show-extended']||'0',locale:lmSettings.locale||''}
+  Object.keys(lmSettings).forEach(function(x){toSend[x]=lmSettings[x]})
+  fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(toSend)}).catch(function(){})
+  if(k==='theme'){applyTheme(v,true)}
+  else if(k==='time'){loadCharts()}
+  else if(k==='range'){var h=parseFloat(v);if(!isNaN(h))switchRange(h)}
+}
+function initTheme(){
+  var t=getSetting('theme','');if(!t)t=window.matchMedia('(prefers-color-scheme:light)').matches?'light':'dark'
+  applyTheme(t,false)
+}
+function initAtabs(){
+  var btns=document.querySelectorAll('.atab'),panes=document.querySelectorAll('.atab-pane')
+  btns.forEach(function(b){
+    b.addEventListener('click',function(){
+      var t=b.getAttribute('data-atab')
+      btns.forEach(function(x){x.classList.toggle('active',x===b)})
+      panes.forEach(function(p){p.classList.toggle('active',p.getAttribute('data-atab')===t)})
+    })
+  })
+}
+(function(){var n=document.querySelectorAll('nav a[href^="/"]');for(var i=0;i<n.length;i++){n[i].addEventListener('click',function(e){if(e.ctrlKey||e.metaKey||e.shiftKey)return;var h=this.getAttribute('href');if(!h)return;e.preventDefault();location.href=h})}})();
+initSettings()
+initAtabs()
 
 function upBat(){fetch('/api/status').then(function(r){return r.json()}).then(function(d){
   if(!d.valid)return
@@ -1820,7 +2038,7 @@ function upSolarWeek(){fetch('/api/solar_forecast_week').then(function(r){return
 }).catch(function(){})}
 function upSolarSim(){fetch('/api/solar_simulation').then(function(r){return r.json()}).then(function(d){
   var e=function(id){return document.getElementById(id)}
-  if(e('solar-sim-wh'))e('solar-sim-wh').textContent=d.expected_today_wh>0?d.expected_today_wh.toFixed(0)+' Wh':'—'
+  if(e('solar-sim-wh'))e('solar-sim-wh').textContent=d.expected_today_wh>0?(d.expected_today_wh/1000).toFixed(2)+' kWh':'—'
   if(e('solar-sim-bat'))e('solar-sim-bat').textContent=d.battery_projection||'—'
 }).catch(function(){})}
 function upSolarForecast(){fetch('/api/solar_forecast').then(function(r){return r.json()}).then(function(d){
@@ -1976,6 +2194,11 @@ function chartDims(el,hBat,hChg){
   return{w:Math.min(500,w),hBat:hBat||280,hChg:hChg||260}
 }
 
+function fmtTime(h,m){
+  var pad=function(n){return n.toString().padStart(2,'0')}
+  if(getSetting('time','24')==='12'){var h12=h%12;if(h12===0)h12=12;return h12+':'+pad(m)+(h<12?' AM':' PM')}
+  return pad(h)+':'+pad(m)
+}
 function timeTicks(t0,t1,tspan,pl,cw,chartTop,chartH,labelY,fsTick){
   if(tspan<1000) return ''
   var fs=fsTick||10
@@ -1985,16 +2208,16 @@ function timeTicks(t0,t1,tspan,pl,cw,chartTop,chartH,labelY,fsTick){
   var multi=new Date(t0).toDateString()!==new Date(t1).toDateString()
   function pad(n){return n.toString().padStart(2,'0')}
   function fmtT(t,prevDay){
-    var d=new Date(t),h=pad(d.getHours()),m=pad(d.getMinutes())
+    var d=new Date(t),h=d.getHours(),m=d.getMinutes(),tm=fmtTime(h,m)
     var ds=(d.getMonth()+1)+'/'+d.getDate()
-    if(multi&&h==='00'&&m==='00') return ds
-    if(multi&&prevDay!==d.toDateString()) return ds+' '+h+':'+m
-    return h+':'+m
+    if(multi&&h===0&&m===0) return ds
+    if(multi&&prevDay!==d.toDateString()) return ds+' '+tm
+    return tm
   }
   function fmtStart(t,short){
-    var d=new Date(t)
-    if(short) return multi ? (d.getMonth()+1)+'/'+d.getDate() : pad(d.getHours())+':'+pad(d.getMinutes())
-    return multi ? (d.getMonth()+1)+'/'+d.getDate()+' '+pad(d.getHours())+':'+pad(d.getMinutes()) : pad(d.getHours())+':'+pad(d.getMinutes())
+    var d=new Date(t),h=d.getHours(),m=d.getMinutes(),tm=fmtTime(h,m)
+    if(short) return multi ? (d.getMonth()+1)+'/'+d.getDate() : tm
+    return multi ? (d.getMonth()+1)+'/'+d.getDate()+' '+tm : tm
   }
   var minGap=Math.max(36,fs*2.8)
   var firstTkX=firstTk<t1?pl+(firstTk-t0)/tspan*cw:pl+cw
@@ -2152,17 +2375,20 @@ function renderChgChart(data){
 }
 
 loadCharts()
-setInterval(loadCharts,Math.max(pollIvl*1000,10000))
+setInterval(loadCharts,Math.max(pollIvl*1000,10000));
 (function(){var rt;window.addEventListener('resize',function(){clearTimeout(rt);rt=setTimeout(loadCharts,150)})})()
 </script></div></body></html>)";
 
     return o;
 }
 
-std::string HttpServer::html_solar_page() {
+std::string HttpServer::html_solar_page(const std::string& init_settings,
+                                        const std::string& theme) {
     std::string o;
     o.reserve(16000);
-    o += R"HTML(<!DOCTYPE html><html lang="en"><head>
+    std::string html_class = (theme == "light") ? " class=\"light\"" : "";
+    o += "<!DOCTYPE html><html lang=\"en\"" + html_class + "><head>\n";
+    o += R"HTML(
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Solar Forecast — limonitor</title>
 <style>
@@ -2177,6 +2403,7 @@ h1{font-size:1.5rem;color:var(--green);margin-bottom:.5rem}
 .card-title{font-size:.6rem;text-transform:uppercase;letter-spacing:.14em;color:var(--muted);margin-bottom:.6rem}
 .stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:.6rem;margin-bottom:1rem}
 .stat{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.8rem}
+.stat-best .stat-val{min-width:0;overflow:hidden;text-overflow:ellipsis;font-size:1rem}
 .stat-lbl{font-size:.6rem;color:var(--muted);text-transform:uppercase}
 .stat-val{font-size:1.4rem;font-weight:700;color:var(--green);margin-top:.2rem}
 table{width:100%;border-collapse:collapse;font-size:.85rem}
@@ -2188,9 +2415,31 @@ th{color:var(--muted);font-weight:500}
 .tab{padding:.5rem 1rem;font-size:.8rem;color:var(--muted);background:none;border:none;border-bottom:2px solid transparent;cursor:pointer;font-family:inherit;text-decoration:none}
 .tab:hover{color:var(--text)}
 .tab.active{color:var(--green);border-bottom-color:var(--green);font-weight:600}
-</style></head><body>
+.theme-wrap{display:flex;align-items:center;gap:.5rem;margin-bottom:1rem}
+.btn{background:var(--card);border:1px solid var(--border);color:var(--text);padding:.4rem .7rem;border-radius:6px;cursor:pointer;font-family:inherit;font-size:.85rem}
+.btn:hover{background:var(--border)}
+.set-modal{position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:1000}
+.set-panel{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1.2rem;min-width:260px}
+.set-title{font-size:.9rem;font-weight:600;margin-bottom:.8rem;color:var(--text)}
+.set-row{margin-bottom:.6rem;display:flex;align-items:center;gap:.6rem}
+.set-row label{min-width:90px;font-size:.8rem;color:var(--muted)}
+.set-row select{flex:1;padding:.35rem .5rem;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-family:inherit;font-size:.8rem}
+</style>
+<link rel="prefetch" href="/"><link rel="prefetch" href="/settings">
+</head><body>
 )HTML";
-    o += "<nav class=\"tabs\"><a href=\"/\" class=\"tab\">Dashboard</a><a href=\"/solar\" class=\"tab active\">Solar</a></nav>";
+    o += "<nav class=\"tabs\"><a href=\"/\" class=\"tab\">Dashboard</a><a href=\"/solar\" class=\"tab active\">Solar</a><a href=\"/settings\" class=\"tab\">Settings</a>";
+    o += "<button id=\"thm-btn\" class=\"btn\" onclick=\"toggleTheme()\" title=\"Toggle theme\" style=\"margin-left:auto\">&#9788;</button>";
+    o += "<button id=\"set-btn\" class=\"btn\" onclick=\"toggleSettings()\" title=\"Settings\">&#9881;</button></nav>";
+    o += "<div id=\"settings-modal\" class=\"set-modal\" style=\"display:none\">"
+         "<div class=\"set-panel\"><div class=\"set-title\">Settings</div>"
+         "<div class=\"set-row\"><label>Theme</label><select id=\"set-theme\" onchange=\"applySetting('theme',this.value)\">"
+         "<option value=\"dark\">Dark</option><option value=\"light\">Light</option></select></div>"
+         "<div class=\"set-row\"><label>Time format</label><select id=\"set-time\" onchange=\"applySetting('time',this.value)\">"
+         "<option value=\"24\">24-hour</option><option value=\"12\">12-hour</option></select></div>"
+         "<div class=\"set-row\"><label>Locale</label><select id=\"set-locale\" onchange=\"applySetting('locale',this.value)\">"
+         "<option value=\"auto\">Auto (browser)</option><option value=\"en-US\">English (US)</option><option value=\"en-GB\">English (UK)</option><option value=\"de-DE\">Deutsch</option><option value=\"fr-FR\">Français</option><option value=\"es-ES\">Español</option></select></div>"
+         "<button class=\"btn\" onclick=\"toggleSettings()\" style=\"margin-top:.5rem\">Close</button></div></div>";
     o += "<h1>Solar Forecast</h1>";
     o += "<p class=\"sub\">";
     o += "<a href=\"/api/solar_forecast_week\">/api/solar_forecast_week</a> &nbsp;"
@@ -2198,15 +2447,15 @@ th{color:var(--muted);font-weight:500}
          "<a href=\"/api/solar_forecast\">/api/solar_forecast</a></p>";
 
     o += "<div class=\"stats\" id=\"solar-stats\">";
-    o += "<div class=\"stat\"><div class=\"stat-lbl\">Week total</div><div class=\"stat-val\" id=\"week-kwh\">—</div><div class=\"stat-lbl\">kWh</div></div>";
+    o += "<div class=\"stat\"><div class=\"stat-lbl\">Week total</div><div class=\"stat-val\" id=\"week-kwh\">—</div><div class=\"stat-lbl\">kilowatt-hours</div></div>";
     o += "<div class=\"stat\"><div class=\"stat-lbl\">Days to full</div><div class=\"stat-val\" id=\"days-full\">—</div><div class=\"stat-lbl\">solar only</div></div>";
-    o += "<div class=\"stat\"><div class=\"stat-lbl\">Best day</div><div class=\"stat-val\" id=\"best-day\">—</div><div class=\"stat-lbl\">highest yield</div></div>";
-    o += "<div class=\"stat\"><div class=\"stat-lbl\">Recovery</div><div class=\"stat-val\" id=\"recovery-wh\">—</div><div class=\"stat-lbl\">Wh this week</div></div>";
+    o += "<div class=\"stat stat-best\"><div class=\"stat-lbl\">Best day</div><div class=\"stat-val\" id=\"best-day\">—</div><div class=\"stat-lbl\">highest yield</div></div>";
     o += "</div>";
 
     o += "<div class=\"card\"><div class=\"card-title\">Daily Forecast</div>";
-    o += "<table><thead><tr><th>Date</th><th>kWh</th><th>Cloud</th><th>Sun hrs</th><th>Optimal window</th></tr></thead>";
-    o += "<tbody id=\"daily-table\"><tr><td colspan=\"5\" class=\"dim\">Loading…</td></tr></tbody></table></div>";
+    o += "<div style=\"margin-bottom:.5rem\"><label style=\"font-size:.8rem;color:var(--muted)\"><input type=\"checkbox\" id=\"show-extended\" onchange=\"applySetting('show-extended',this.checked?'1':'0');renderDaily()\"> Show extended (6–16 days, from 16-day API if available)</label></div>";
+    o += "<div style=\"overflow-x:auto\"><table><thead><tr><th></th><th>Date</th><th>Energy (kilowatt-hours)</th><th>Cloud</th><th>Sun hours</th><th>Optimal window</th></tr></thead>";
+    o += "<tbody id=\"daily-table\"><tr><td colspan=\"6\" class=\"dim\">Loading…</td></tr></tbody></table></div></div>";
 
     o += "<div class=\"card\"><div class=\"card-title\">Today & Tomorrow (from /api/solar_simulation & /api/solar_forecast)</div>";
     o += "<table><tr><td>Expected today</td><td id=\"today-wh\">—</td></tr>";
@@ -2215,19 +2464,156 @@ th{color:var(--muted);font-weight:500}
 
     o += "<div class=\"footer\">Data from OpenWeather 5-day forecast. Cached 30 min. Optimal window = clearest daytime hours.</div>";
 
-    o += "<script>\n"
-         "function $(id){return document.getElementById(id)}\n"
+    o += "<script>\n";
+    if (!init_settings.empty())
+        o += "var lmSettings=" + init_settings + ";\n";
+    else
+        o += "var lmSettings={theme:\"\",time:\"24\",\"show-extended\":\"0\",locale:\"\"};\n";
+    o += "function $(id){return document.getElementById(id)}\n"
          "function fmt(v,d){return(v==null||isNaN(+v))?'—':(+v).toFixed(d)}\n"
-         "function loadWeek(){fetch('/api/solar_forecast_week').then(function(r){return r.json()}).then(function(d){\n"
-         "if(!d.valid){$('week-kwh').textContent='—';$('days-full').textContent='—';$('best-day').textContent=d.error||'—';$('recovery-wh').textContent='—';$('daily-table').innerHTML='<tr><td colspan=5 class=warn>'+d.error+'</td></tr>';return}\n"
-         "$('week-kwh').textContent=fmt(d.week_total_kwh,2);$('days-full').textContent=d.days_to_full>0?d.days_to_full:'—';$('best-day').textContent=d.best_day||'—';$('recovery-wh').textContent=d.recovery_wh>0?fmt(d.recovery_wh,0):'—'\n"
-         "var tbody=$('daily-table');if(!d.daily||!d.daily.length){tbody.innerHTML='<tr><td colspan=5 class=dim>No data</td></tr>';return}\n"
-         "tbody.innerHTML=d.daily.map(function(x){return '<tr><td>'+x.date+'</td><td class=ok>'+fmt(x.kwh,2)+' kWh</td><td>'+Math.round((x.cloud_cover||0)*100)+'%</td><td>'+fmt(x.sun_hours_effective,1)+' h</td><td>'+x.optimal_start+' – '+x.optimal_end+'</td></tr>'}).join('')\n"
-         "}).catch(function(){})}\n"
-         "function loadToday(){Promise.all([fetch('/api/solar_simulation').then(function(r){return r.json()}),fetch('/api/solar_forecast').then(function(r){return r.json()})]).then(function(arr){\n"
-         "var sim=arr[0],fore=arr[1];$('today-wh').textContent=sim.expected_today_wh>0?fmt(sim.expected_today_wh,0)+' Wh':'—';$('tomorrow-wh').textContent=fore.valid?fmt(fore.tomorrow_generation_wh/1000,1)+' kWh':'—';$('bat-proj').textContent=sim.battery_projection||fore.expected_battery_state||'—'\n"
-         "}).catch(function(){})}\n"
-         "loadWeek();loadToday();setInterval(loadWeek,300000);setInterval(loadToday,60000)\n"
+         "function getSetting(k,d){return(lmSettings&&lmSettings[k]!==undefined)?lmSettings[k]:d}\n"
+         "function setSetting(k,v){if(!lmSettings)lmSettings={};lmSettings[k]=v;fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(lmSettings)}).catch(function(){})}\n"
+         "function getLocale(){var loc=getSetting('locale','');return loc===''||loc==='auto'?(navigator.language||'en-US'):loc}\n"
+         "function fmtDate(iso){try{var d=new Date(iso+'T12:00:00');return d.toLocaleDateString(getLocale(),{weekday:'short',month:'short',day:'numeric'})}catch(e){return iso}}\n"
+         "var lastDailyData=null;\n"
+         "function dayEmoji(cloud){var c=(cloud||0)*100;return c<=25?'☀️':c<=50?'⛅':c<=75?'☁️':'🌧️'}\n"
+         "function renderDaily(){if(!lastDailyData)return;var showExt=!!($('show-extended')&&$('show-extended').checked);var list=lastDailyData.daily.filter(function(x){return !x.is_extended||showExt});var tbody=$('daily-table');if(!tbody)return;tbody.innerHTML=list.map(function(x){var opt=x.optimal_start==='\u2014'?(x.optimal_reason||'No clear window'):fmtOptTime(x.optimal_start)+'\u2013'+fmtOptTime(x.optimal_end);return '<tr'+(x.is_extended?' class=dim':'')+'><td>'+dayEmoji(x.cloud_cover)+'</td><td>'+fmtDate(x.date)+'</td><td class=ok>'+fmt(x.kwh,2)+'</td><td>'+Math.round((x.cloud_cover||0)*100)+'%</td><td>'+fmt(x.sun_hours_effective,1)+'</td><td>'+opt+'</td></tr>'}).join('')}\n"
+         "function loadAll(){var t=15000;var base=window.location.origin||(window.location.protocol+'//'+window.location.host);function to(url){return Promise.race([fetch(url),new Promise(function(_,rej){setTimeout(function(){rej(new Error('timeout'))},t)})]).then(function(r){return r.ok?r.json():Promise.reject(new Error(r.status))})}\n"
+         "Promise.all([to(base+'/api/solar_forecast_week'),to(base+'/api/solar_simulation'),to(base+'/api/solar_forecast')]).then(function(arr){\n"
+         "var d=arr[0],sim=arr[1],fore=arr[2];\n"
+         "if(!d.valid){$('week-kwh').textContent='—';$('days-full').textContent='—';$('best-day').textContent=d.error||'—';$('daily-table').innerHTML='<tr><td colspan=6 class=warn>'+d.error+'</td></tr>'}else{\n"
+         "$('week-kwh').textContent=fmt(d.week_total_kwh,2);$('days-full').textContent=d.days_to_full>0?d.days_to_full:'—';$('best-day').textContent=d.best_day?fmtDate(d.best_day):'—';\n"
+         "var tbody=$('daily-table');if(!d.daily||!d.daily.length){tbody.innerHTML='<tr><td colspan=6 class=dim>No data</td></tr>'}else{lastDailyData=d;var cb=$('show-extended');if(cb)cb.checked=getSetting('show-extended','0')==='1';renderDaily()}}\n"
+         "$('today-wh').textContent=sim.expected_today_wh>0?fmt(sim.expected_today_wh/1000,2)+' kilowatt-hours':'—';$('tomorrow-wh').textContent=fore.valid?fmt(fore.tomorrow_generation_wh/1000,1)+' kilowatt-hours':'—';$('bat-proj').textContent=sim.battery_projection||fore.expected_battery_state||'—';\n"
+         "}).catch(function(err){try{console.error('Solar loadAll failed:',err);}catch(e){}var t=$('daily-table');if(t)t.innerHTML='<tr><td colspan=6 class=warn>Error loading data. Check solar_enabled and weather_api_key in Settings.</td></tr>';$('week-kwh').textContent='—';$('days-full').textContent='—';$('best-day').textContent='—';$('today-wh').textContent='—';$('tomorrow-wh').textContent='—';$('bat-proj').textContent='—'})}\n"
+         "function fmtOptTime(s){if(!s||s==='\u2014')return s;var m=s.match(/^(\\d{1,2}):(\\d{2})$/);if(!m)return s;var h=parseInt(m[1],10),mn=parseInt(m[2],10);var loc=getLocale();if(getSetting('time','24')==='12'){var h12=h%12;if(h12===0)h12=12;return h12+':'+(mn<10?'0':'')+mn+(h<12?' AM':' PM')}try{var d=new Date(2000,0,1,h,mn);return d.toLocaleTimeString(loc,{hour:'2-digit',minute:'2-digit',hour12:getSetting('time','24')==='12'})}catch(e){return h+':'+(mn<10?'0':'')+mn}}\n"
+         "function initSettings(){if(!lmSettings)lmSettings={theme:'',time:'24','show-extended':'0',locale:''};var t=getSetting('theme','');if(!t)t=window.matchMedia('(prefers-color-scheme:light)').matches?'light':'dark';lmSettings.theme=t;document.documentElement.classList.toggle('light',t==='light');var b=$('thm-btn');if(b)b.textContent=t==='light'?'\u263d':'\u2600';var st=$('set-theme');if(st)st.value=t;var se=$('set-time');if(se)se.value=getSetting('time','24');var sl=$('set-locale');if(sl)sl.value=getSetting('locale','auto')}\n"
+         "function applyTheme(t){document.documentElement.classList.toggle('light',t==='light');var b=$('thm-btn');if(b)b.textContent=t==='light'?'\u263d':'\u2600';if(!lmSettings)lmSettings={};lmSettings.theme=t;fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(lmSettings)}).catch(function(){});var st=$('set-theme');if(st)st.value=t}\n"
+         "function toggleTheme(){applyTheme(document.documentElement.classList.contains('light')?'dark':'light')}\n"
+         "function toggleSettings(){var m=$('settings-modal');if(!m)return;m.style.display=m.style.display==='none'?'flex':'none';if(m.style.display==='flex'){var st=$('set-theme');if(st)st.value=getSetting('theme','dark');var se=$('set-time');if(se)se.value=getSetting('time','24');var sl=$('set-locale');if(sl)sl.value=getSetting('locale','auto')}}\n"
+         "function applySetting(k,v){if(!lmSettings)lmSettings={};lmSettings[k]=v;fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(lmSettings)}).catch(function(){});if(k==='theme')applyTheme(v);else if(k==='time'||k==='locale')loadAll()}\n"
+         "(function(){var n=document.querySelectorAll('nav a[href^=\"/\"]');for(var i=0;i<n.length;i++){n[i].addEventListener('click',function(e){if(e.ctrlKey||e.metaKey||e.shiftKey)return;var h=this.getAttribute('href');if(!h)return;e.preventDefault();location.href=h})}})();\n"
+         "initSettings();loadAll();setInterval(loadAll,300000)\n"
+         "</script></body></html>";
+    return o;
+}
+
+std::string HttpServer::html_settings_page(Database* db) {
+    auto g = [db](const std::string& k, const std::string& d) {
+        if (!db) return d;
+        std::string v = db->get_setting(k);
+        return v.empty() ? d : v;
+    };
+    auto esc = [](const std::string& s) {
+        std::string r;
+        for (char c : s) {
+            if (c == '"') r += "&quot;";
+            else if (c == '&') r += "&amp;";
+            else if (c == '<') r += "&lt;";
+            else r += c;
+        }
+        return r;
+    };
+    std::string o;
+    o.reserve(8000);
+    std::string theme = g("theme", "");
+    if (theme.empty()) theme = "dark";
+    o += R"HTML(<!DOCTYPE html><html lang="en" class=")HTML";
+    o += (theme == "light") ? "light" : "";
+    o += R"HTML("><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Settings — limonitor</title>
+<link rel="prefetch" href="/"><link rel="prefetch" href="/solar">
+<style>
+:root{--bg:#0d0d11;--card:#16161c;--border:#2e2e3a;--text:#e0e0ea;--muted:#9090a8;--green:#4ade80;--input-bg:#1a1a22}
+html.light{--bg:#f2f3f7;--card:#fff;--border:#d4d4e0;--text:#1a1a2c;--muted:#5a5a72;--green:#16a34a;--input-bg:#fafafa}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5;padding:1.5rem;max-width:560px;margin:0 auto;transition:background .2s,color .2s}
+nav{display:flex;align-items:center;gap:.5rem;margin-bottom:1.5rem;padding-bottom:1rem;border-bottom:1px solid var(--border)}
+nav a{color:var(--muted);text-decoration:none;font-size:.9rem;padding:.35rem .6rem;border-radius:6px;transition:color .15s,background .15s}
+nav a:hover{color:var(--text);background:var(--card)}
+nav a.active{color:var(--green);font-weight:600}
+nav .spacer{flex:1}
+nav .thm{background:var(--card);border:1px solid var(--border);color:var(--text);padding:.35rem .6rem;border-radius:6px;cursor:pointer;font-size:.85rem}
+h1{font-size:1.35rem;font-weight:600;color:var(--green);margin-bottom:.25rem}
+.sub{font-size:.8rem;color:var(--muted);margin-bottom:1.25rem}
+.form-wrap{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1.25rem;margin-bottom:1rem;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.section-title{font-size:.65rem;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);margin:1rem 0 .5rem;font-weight:600}
+.section-title:first-child{margin-top:0}
+.row{margin-bottom:.75rem}
+.row:last-of-type{margin-bottom:0}
+.row label{display:block;font-size:.8rem;color:var(--muted);margin-bottom:.3rem;font-weight:500}
+.row input,.row select{width:100%;padding:.5rem .6rem;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text);font-family:inherit;font-size:.9rem;transition:border-color .15s}
+.row input:focus,.row select:focus{outline:none;border-color:var(--green)}
+.row input[type=checkbox]{width:auto;margin-right:.5rem;vertical-align:middle}
+.btn{background:var(--green);color:#fff;border:none;padding:.55rem 1.25rem;border-radius:6px;cursor:pointer;font-family:inherit;font-size:.9rem;font-weight:600;margin-top:.5rem}
+.btn:hover{opacity:.92;transform:translateY(-1px)}
+.msg{font-size:.8rem;color:var(--muted);margin-top:.6rem}
+.err{color:#dc2626}
+</style></head><body>
+<nav><a href="/">Dashboard</a><a href="/solar">Solar</a><a href="/settings" class="active">Settings</a><span class="spacer"></span><button class="thm" id="thm-btn" onclick="toggleTheme()" title="Toggle theme">)HTML";
+    o += (theme == "light") ? "&#9788;" : "&#263d;";
+    o += R"HTML(</button></nav>
+<h1>Settings</h1>
+<p class="sub">Application configuration. Restart limonitor after saving to apply hardware changes.</p>
+<form id="cfg-form" class="form-wrap">
+<div class="section-title">BLE</div>
+<div class="row"><label>Device name</label><input type="text" name="device_name" placeholder="e.g. L-12100BNNA70" value=")HTML";
+    o += esc(g("device_name", ""));
+    o += "\"></div><div class=\"row\"><label>Device address (MAC)</label><input type=\"text\" name=\"device_address\" placeholder=\"AA:BB:CC:DD:EE:FF\" value=\"";
+    o += esc(g("device_address", ""));
+    o += "\"></div><div class=\"row\"><label>Adapter path</label><input type=\"text\" name=\"adapter_path\" value=\"";
+    o += esc(g("adapter_path", "/org/bluez/hci0"));
+    o += "\"></div><div class=\"section-title\">HTTP</div><div class=\"row\"><label>Port</label><input type=\"number\" name=\"http_port\" min=\"1\" max=\"65535\" value=\"";
+    o += esc(g("http_port", "8080"));
+    o += "\"></div><div class=\"row\"><label>Bind address</label><input type=\"text\" name=\"http_bind\" value=\"";
+    o += esc(g("http_bind", "0.0.0.0"));
+    o += "\"></div><div class=\"row\"><label>Log file</label><input type=\"text\" name=\"log_file\" placeholder=\"(stderr only)\" value=\"";
+    o += esc(g("log_file", ""));
+    o += "\"></div><div class=\"row\"><label>Verbose (DEBUG logs)</label><input type=\"checkbox\" name=\"verbose\" ";
+    o += (g("verbose", "0") == "1" || g("verbose", "0") == "true") ? "checked" : "";
+    o += "></div><div class=\"section-title\">EpicPowerGate / Serial</div><div class=\"row\"><label>Serial device</label><input type=\"text\" name=\"serial_device\" placeholder=\"/dev/ttyACM0\" value=\"";
+    o += esc(g("serial_device", ""));
+    o += "\"></div><div class=\"row\"><label>Serial baud</label><input type=\"number\" name=\"serial_baud\" value=\"";
+    o += esc(g("serial_baud", "115200"));
+    o += "\"></div><div class=\"row\"><label>Remote PwrGate (host:port)</label><input type=\"text\" name=\"pwrgate_remote\" placeholder=\"ham-pi:8081\" value=\"";
+    o += esc(g("pwrgate_remote", ""));
+    o += "\"></div><div class=\"section-title\">Database & polling</div><div class=\"row\"><label>Poll interval (seconds)</label><input type=\"number\" name=\"poll_interval\" min=\"1\" value=\"";
+    o += esc(g("poll_interval", "5"));
+    o += "\"></div><div class=\"row\"><label>DB path</label><input type=\"text\" name=\"db_path\" placeholder=\"default\" value=\"";
+    o += esc(g("db_path", ""));
+    o += "\"></div><div class=\"row\"><label>DB write interval (seconds)</label><input type=\"number\" name=\"db_interval\" min=\"0\" value=\"";
+    o += esc(g("db_interval", "60"));
+    o += "\"></div><div class=\"section-title\">Battery</div><div class=\"row\"><label>Purchase date (YYYY-MM-DD)</label><input type=\"text\" name=\"battery_purchased\" placeholder=\"2024-03-15\" value=\"";
+    o += esc(g("battery_purchased", ""));
+    o += "\"></div><div class=\"row\"><label>Rated capacity (Ah, 0=auto)</label><input type=\"number\" name=\"rated_capacity_ah\" min=\"0\" step=\"0.1\" value=\"";
+    o += esc(g("rated_capacity_ah", "0"));
+    o += "\"></div><div class=\"row\"><label>TX threshold (amps)</label><input type=\"number\" name=\"tx_threshold\" min=\"0\" step=\"0.1\" value=\"";
+    o += esc(g("tx_threshold", "1.0"));
+    o += "\"></div><div class=\"section-title\">Solar & weather</div><div class=\"row\"><label>Solar enabled</label><input type=\"checkbox\" name=\"solar_enabled\" ";
+    o += (g("solar_enabled", "0") == "1" || g("solar_enabled", "0") == "true") ? "checked" : "";
+    o += "></div><div class=\"row\"><label>Solar panel watts</label><input type=\"number\" name=\"solar_panel_watts\" min=\"0\" value=\"";
+    o += esc(g("solar_panel_watts", "400"));
+    o += "\"></div><div class=\"row\"><label>Solar system efficiency (0–1)</label><input type=\"number\" name=\"solar_system_efficiency\" min=\"0\" max=\"1\" step=\"0.01\" value=\"";
+    o += esc(g("solar_system_efficiency", "0.75"));
+    o += "\"></div><div class=\"row\"><label>Solar ZIP code</label><input type=\"text\" name=\"solar_zip_code\" value=\"";
+    o += esc(g("solar_zip_code", "80112"));
+    o += "\"></div><div class=\"row\"><label>Weather API key</label><input type=\"text\" name=\"weather_api_key\" placeholder=\"OpenWeather\" value=\"";
+    o += esc(g("weather_api_key", ""));
+    o += "\"></div><div class=\"row\"><label>Weather ZIP code</label><input type=\"text\" name=\"weather_zip_code\" value=\"";
+    o += esc(g("weather_zip_code", "80112"));
+    o += "\"></div><div class=\"row\"><label>Daemon mode</label><input type=\"checkbox\" name=\"daemon\" ";
+    o += (g("daemon", "0") == "1" || g("daemon", "0") == "true") ? "checked" : "";
+    o += "></div><button type=\"submit\" class=\"btn\">Save</button><div id=\"msg\" class=\"msg\"></div></form><script>\n"
+         "(function(){var n=document.querySelectorAll('nav a[href^=\"/\"]');for(var i=0;i<n.length;i++){n[i].addEventListener('click',function(e){if(e.ctrlKey||e.metaKey||e.shiftKey)return;var h=this.getAttribute('href');if(!h)return;e.preventDefault();location.href=h})}})();\n"
+         "document.getElementById('cfg-form').onsubmit=function(e){e.preventDefault();var f=e.target;var o={settings_initialized:'1'};\n"
+         "['device_name','device_address','adapter_path','http_port','http_bind','log_file','verbose','serial_device','serial_baud','pwrgate_remote','poll_interval','db_path','db_interval','battery_purchased','rated_capacity_ah','tx_threshold','solar_enabled','solar_panel_watts','solar_system_efficiency','solar_zip_code','weather_api_key','weather_zip_code','daemon'].forEach(function(k){\n"
+         "var el=f.elements[k];if(el)o[k]=el.type==='checkbox'?(el.checked?'1':'0'):el.value\n"
+         "});\nfetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(o)})\n"
+         ".then(function(r){if(r.ok){document.getElementById('msg').textContent='Saved. Restart limonitor to apply.';document.getElementById('msg').className='msg'}else{throw new Error()}})\n"
+         ".catch(function(){document.getElementById('msg').textContent='Save failed.';document.getElementById('msg').className='msg err'})\n"
+         "}\n"
+         "function toggleTheme(){var isLight=document.documentElement.classList.toggle('light');var t=isLight?'light':'dark';document.getElementById('thm-btn').textContent=isLight?'\u263d':'\u263c';fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme:t})}).catch(function(){})}\n"
          "</script></body></html>";
     return o;
 }
