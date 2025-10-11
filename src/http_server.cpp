@@ -107,7 +107,6 @@ void HttpServer::handle(int fd) {
     if (n <= 0) return;
     std::string req(buf, static_cast<size_t>(n));
 
-    // Parse first line: METHOD PATH HTTP/...
     auto lf = req.find('\n');
     if (lf == std::string::npos) { send_response(fd, 400, "text/plain", "Bad Request"); return; }
     std::string line = req.substr(0, lf);
@@ -122,7 +121,6 @@ void HttpServer::handle(int fd) {
     auto qpos = path.find('?');
     if (qpos != std::string::npos) { query = path.substr(qpos + 1); path = path.substr(0, qpos); }
 
-    // CORS preflight — browser sends OPTIONS before POST when cross-origin
     if (method == "OPTIONS") {
         std::string hdr = "HTTP/1.0 204 No Content\r\n"
             "Content-Length: 0\r\n"
@@ -135,7 +133,6 @@ void HttpServer::handle(int fd) {
         return;
     }
 
-    // POST /api/settings — persist JSON body {"theme":"dark","time":"24",...}
     if (method == "POST" && path == "/api/settings") {
         if (!db_) {
             send_response(fd, 503, "application/json", "{\"error\":\"Settings not available\"}\n");
@@ -183,7 +180,6 @@ void HttpServer::handle(int fd) {
     PwrGateSnapshot pg;
     if (pg_opt) pg = *pg_opt;
 
-    // Parse ?h= time-range param (hours). Default 1h, cap 6min–7days.
     double h = 1.0;
     {
         auto hi = query.find("h=");
@@ -296,9 +292,14 @@ void HttpServer::handle(int fd) {
             double max_a = ext->effective_max_charge_a();
             double v = snap.valid && snap.total_voltage_v > 1 ? snap.total_voltage_v : 51.2;
             double nom = snap.valid && snap.nominal_ah > 0 ? snap.nominal_ah : 100.0;
+            bool want_realistic = query.find("realistic=1") != std::string::npos;
+            std::vector<ChargeAcceptanceBucket> profile;
+            if (want_realistic && db_)
+                profile = db_->get_charge_acceptance_profile(14);
             auto r = ext->weather_forecast().get_forecast_week(
                 cfg.panel_watts, cfg.system_efficiency, max_a, v, nom,
-                snap.valid ? snap.soc_pct : 0);
+                snap.valid ? snap.soc_pct : 0,
+                want_realistic ? &profile : nullptr);
             if (!r.valid && !r.error.empty())
                 LOG_DEBUG("Solar /api/solar_forecast_week: %s", r.error.c_str());
             send_response(fd, 200, "application/json", solar_forecast_week_json(r));
@@ -324,6 +325,43 @@ void HttpServer::handle(int fd) {
             LOG_DEBUG("Solar /api/solar_forecast: extensions not available");
             send_response(fd, 200, "application/json",
                          "{\"tomorrow_generation_wh\":0,\"cloud_cover\":0,\"expected_battery_state\":\"—\"}\n");
+        }
+    } else if (path == "/api/weather_refresh") {
+        auto* ext = store_.extensions();
+        if (ext) {
+            ext->weather_forecast().invalidate_cache();
+            send_response(fd, 200, "application/json", "{\"ok\":true,\"message\":\"Cache invalidated. Next forecast request will fetch fresh data.\"}\n");
+        } else {
+            send_response(fd, 503, "application/json", "{\"ok\":false,\"message\":\"Extensions not available\"}\n");
+        }
+    } else if (path == "/api/solar_performance") {
+        if (!db_) {
+            send_response(fd, 200, "application/json",
+                         "{\"avg_coefficient\":0,\"samples\":0,\"history\":[]}\n");
+        } else {
+            int days = 30;
+            auto dpos = query.find("days=");
+            if (dpos != std::string::npos) {
+                int d = std::atoi(query.c_str() + dpos + 5);
+                if (d > 0 && d <= 365) days = d;
+            }
+            auto perf = db_->load_solar_performance(days);
+            double avg = db_->get_avg_solar_coefficient(days);
+            std::string o = "{\"avg_coefficient\":" + jdbl(avg, 4) +
+                ",\"samples\":" + std::to_string(perf.size()) + ",\"history\":[";
+            for (size_t i = 0; i < perf.size(); ++i) {
+                if (i) o += ",";
+                o += "{\"ts\":" + std::to_string(perf[i].ts) +
+                     ",\"cloud\":" + jdbl(perf[i].cloud_cover, 2) +
+                     ",\"actual_w\":" + jdbl(perf[i].actual_w, 1) +
+                     ",\"theoretical_w\":" + jdbl(perf[i].theoretical_w, 1) +
+                     ",\"coeff\":" + jdbl(perf[i].coefficient, 4) +
+                     ",\"sol_v\":" + jdbl(perf[i].sol_v, 1) +
+                     ",\"bat_a\":" + jdbl(perf[i].bat_a, 2) +
+                     ",\"soc\":" + jdbl(perf[i].soc, 1) + "}";
+            }
+            o += "]}\n";
+            send_response(fd, 200, "application/json", o);
         }
     } else if (path == "/api/settings") {
         if (!db_) {
@@ -585,7 +623,6 @@ std::string HttpServer::analytics_json(const AnalyticsSnapshot& a,
     o += "  \"avg_load_watts\": "             + jdbl(a.avg_load_watts, 1)            + ",\n";
     o += "  \"peak_load_watts\": "            + jdbl(a.peak_load_watts, 1)           + ",\n";
     o += "  \"idle_load_watts\": "            + jdbl(a.idle_load_watts, 1)           + ",\n";
-    // Extended analytics
     o += "  \"system_status\": "              + jstr(a.system_status)               + ",\n";
     o += "  \"battery_stress\": "             + jstr(a.battery_stress)             + ",\n";
     o += "  \"charger_runtime_today\": "      + jdbl(a.charger_runtime_today_sec, 0) + ",\n";
@@ -697,9 +734,20 @@ std::string HttpServer::solar_forecast_json(const WeatherForecastResult& r) {
     return o;
 }
 
-std::string HttpServer::solar_forecast_week_json(const SolarForecastWeekResult& r) {
+std::string HttpServer::solar_forecast_week_json(const SolarForecastWeekResult& r) const {
+    std::vector<UsageSlotProfile> usage;
+    if (db_) usage = db_->get_usage_profile(7);
+    double fallback_w = 0;
+    if (!usage.empty()) {
+        int total_n = 0;
+        double total_sum = 0;
+        for (const auto& u : usage) { total_sum += u.avg_w * u.sample_count; total_n += u.sample_count; }
+        fallback_w = total_n > 0 ? total_sum / total_n : 0;
+    }
+
     std::string o = "{\n";
     o += "  \"valid\": " + jbool(r.valid) + ",\n";
+    o += "  \"realistic\": " + jbool(r.realistic) + ",\n";
     o += "  \"week_total_kwh\": " + jdbl(r.week_total_kwh, 2) + ",\n";
     o += "  \"recovery_wh\": " + jdbl(r.recovery_wh, 0) + ",\n";
     o += "  \"days_to_full\": " + std::to_string(r.days_to_full) + ",\n";
@@ -710,6 +758,18 @@ std::string HttpServer::solar_forecast_week_json(const SolarForecastWeekResult& 
     for (size_t i = 0; i < r.daily.size(); ++i) {
         const auto& d = r.daily[i];
         if (i) o += ",";
+        double usage_kwh = 0, usage_kwh_lo = 0, usage_kwh_hi = 0;
+        for (int s = 0; s < 8; ++s) {
+            double avg = (s < (int)usage.size() && usage[s].sample_count >= 3) ? usage[s].avg_w : fallback_w;
+            double sd  = (s < (int)usage.size() && usage[s].sample_count >= 3) ? usage[s].stddev_w : avg * 0.2;
+            double slot_wh = avg * 3.0;
+            usage_kwh += slot_wh / 1000.0;
+            usage_kwh_lo += std::max(0.0, (avg - 1.96 * sd) * 3.0) / 1000.0;
+            usage_kwh_hi += (avg + 1.96 * sd) * 3.0 / 1000.0;
+        }
+        double surplus = d.kwh - usage_kwh;
+        double surplus_lo = d.max_recovery_wh_lo / 1000.0 - usage_kwh_hi;
+        double surplus_hi = d.max_recovery_wh_hi / 1000.0 - usage_kwh_lo;
         o += "\n    {\"date\":" + jstr(d.date) +
              ",\"kwh\":" + jdbl(d.kwh, 2) +
              ",\"cloud_cover\":" + jdbl(d.cloud_cover, 2) +
@@ -726,9 +786,79 @@ std::string HttpServer::solar_forecast_week_json(const SolarForecastWeekResult& 
              ",\"max_recovery_wh\":" + jdbl(d.max_recovery_wh, 0) +
              ",\"max_recovery_wh_lo\":" + jdbl(d.max_recovery_wh_lo, 0) +
              ",\"max_recovery_wh_hi\":" + jdbl(d.max_recovery_wh_hi, 0) +
+             ",\"usage_kwh\":" + jdbl(usage_kwh, 3) +
+             ",\"usage_kwh_lo\":" + jdbl(usage_kwh_lo, 3) +
+             ",\"usage_kwh_hi\":" + jdbl(usage_kwh_hi, 3) +
+             ",\"surplus_kwh\":" + jdbl(surplus, 3) +
+             ",\"surplus_kwh_lo\":" + jdbl(surplus_lo, 3) +
+             ",\"surplus_kwh_hi\":" + jdbl(surplus_hi, 3) +
              ",\"is_extended\":" + std::string(d.is_extended ? "true" : "false") + "}";
     }
-    o += "\n  ]\n}\n";
+    o += "\n  ],\n";
+    o += "  \"nominal_ah\": " + jdbl(r.nominal_ah, 1) + ",\n";
+    o += "  \"battery_voltage\": " + jdbl(r.battery_voltage, 2) + ",\n";
+    o += "  \"usage_profile\": [";
+    for (int s = 0; s < 8; ++s) {
+        double avg = (s < (int)usage.size() && usage[s].sample_count >= 3) ? usage[s].avg_w : fallback_w;
+        double sd  = (s < (int)usage.size() && usage[s].sample_count >= 3) ? usage[s].stddev_w : avg * 0.2;
+        int n      = (s < (int)usage.size()) ? usage[s].sample_count : 0;
+        if (s) o += ",";
+        o += "{\"slot\":" + std::to_string(s) +
+             ",\"avg_w\":" + jdbl(avg, 1) +
+             ",\"stddev_w\":" + jdbl(sd, 1) +
+             ",\"n\":" + std::to_string(n) + "}";
+    }
+    o += "],\n";
+    o += "  \"slots\": [";
+    for (size_t i = 0; i < r.slots.size(); ++i) {
+        const auto& s = r.slots[i];
+        if (i) o += ",";
+        int slot_idx = -1;
+        {
+            time_t tt = static_cast<time_t>(s.timestamp);
+            struct tm tm_buf{};
+            localtime_r(&tt, &tm_buf);
+            slot_idx = tm_buf.tm_hour / 3;
+        }
+        double use_avg = (slot_idx >= 0 && slot_idx < (int)usage.size() && usage[slot_idx].sample_count >= 3)
+                         ? usage[slot_idx].avg_w : fallback_w;
+        double use_sd  = (slot_idx >= 0 && slot_idx < (int)usage.size() && usage[slot_idx].sample_count >= 3)
+                         ? usage[slot_idx].stddev_w : use_avg * 0.2;
+        double use_kwh = use_avg * 3.0 / 1000.0;
+        double use_kwh_lo = std::max(0.0, (use_avg - 1.96 * use_sd) * 3.0 / 1000.0);
+        double use_kwh_hi = (use_avg + 1.96 * use_sd) * 3.0 / 1000.0;
+        o += "{\"ts\":" + std::to_string(s.timestamp) +
+             ",\"kwh\":" + jdbl(s.kwh, 4) +
+             ",\"kwh_lo\":" + jdbl(s.kwh_lo, 4) +
+             ",\"kwh_hi\":" + jdbl(s.kwh_hi, 4) +
+             ",\"cloud\":" + jdbl(s.cloud_cover, 2) +
+             ",\"day\":" + std::string(s.daytime ? "true" : "false") +
+             ",\"use_kwh\":" + jdbl(use_kwh, 4) +
+             ",\"use_lo\":" + jdbl(use_kwh_lo, 4) +
+             ",\"use_hi\":" + jdbl(use_kwh_hi, 4) + "}";
+    }
+    o += "],\n";
+    // Solar performance coefficient from historical data
+    double avg_coeff = 0;
+    int perf_count = 0;
+    if (db_) {
+        auto perf = db_->load_solar_performance(30);
+        perf_count = static_cast<int>(perf.size());
+        if (!perf.empty()) {
+            double sum = 0;
+            int valid_n = 0;
+            for (const auto& p : perf) {
+                if (p.coefficient > 0 && p.coefficient < 2) {
+                    sum += p.coefficient;
+                    ++valid_n;
+                }
+            }
+            if (valid_n > 0) avg_coeff = sum / valid_n;
+        }
+    }
+    o += "  \"solar_perf_coeff\": " + jdbl(avg_coeff, 3) + ",\n";
+    o += "  \"solar_perf_samples\": " + std::to_string(perf_count) + "\n";
+    o += "}\n";
     return o;
 }
 
@@ -744,7 +874,6 @@ std::string HttpServer::system_health_json(const HealthScoreResult& r) {
     return o;
 }
 
-// SVG time-axis helper
 static std::string svg_time_ticks(
         std::chrono::system_clock::time_point t_start,
         std::chrono::system_clock::time_point t_end,
@@ -1710,6 +1839,7 @@ html.light .flow-node-load{fill:#e2e8f0}
          "<a href=\"/api/solar_simulation\">/api/solar_simulation</a> &nbsp;"
          "<a href=\"/api/solar_forecast\">/api/solar_forecast</a> &nbsp;"
          "<a href=\"/api/solar_forecast_week\">/api/solar_forecast_week</a> &nbsp;"
+         "<a href=\"/api/solar_performance\">/api/solar_performance</a> &nbsp;"
          "<a href=\"/solar\">/solar</a> &nbsp;"
          "<a href=\"/api/battery/resistance\">/api/battery/resistance</a> &nbsp;"
          "<a href=\"/api/cells\">/api/cells</a> &nbsp;"
@@ -1733,6 +1863,10 @@ html.light .flow-node-load{fill:#e2e8f0}
     o += R"(
 function $(id){return document.getElementById(id)}
 function fmt(v,d){return(v==null||isNaN(+v))? '\u2014':(+v).toFixed(d)}
+
+var userTZ;try{userTZ=Intl.DateTimeFormat().resolvedOptions().timeZone}catch(e){userTZ=undefined}
+function localDateStr(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')}
+function tsToLocal(ts){return new Date(ts*1000)}
 
 function getSetting(k,d){return(lmSettings&&lmSettings[k]!==undefined)?lmSettings[k]:d}
 function setSetting(k,v){if(!lmSettings)lmSettings={};lmSettings[k]=v;fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(lmSettings)}).catch(function(){})}
@@ -1909,18 +2043,18 @@ function upAnalytics(){fetch('/api/analytics').then(function(r){return r.json()}
   var dmTip=dm>=50?'Imbalance: '+dm.toFixed(1)+' mV (≥50)':dm>=25?'Warning: '+dm.toFixed(1)+' mV (25–50)':dm>=10?'Good: '+dm.toFixed(1)+' mV (10–25)':'Excellent: '+dm.toFixed(1)+' mV (<10)'
   sct('an-cell-delta', dm>=50?'err':dm>=25?'warn':'ok', dm.toFixed(1), dmTip)
   var bs=d.cell_balance_status||'—'
-  var bsTip=bs==='Excellent'?'Δ '+dm.toFixed(1)+' mV (<10 mV)':
-    bs==='Good'?'Δ '+dm.toFixed(1)+' mV (10–25 mV)':
-    bs==='Warning'?'Δ '+dm.toFixed(1)+' mV (25–50 mV)':
-    bs==='Imbalance'?'Δ '+dm.toFixed(1)+' mV (≥50 mV)':''
+  var bsTip=bs==='Excellent'?'Δ '+dm.toFixed(1)+' mV (<10)':
+    bs==='Good'?'Δ '+dm.toFixed(1)+' mV (10–25)':
+    bs==='Warning'?'Δ '+dm.toFixed(1)+' mV (25–50)':
+    bs==='Imbalance'?'Δ '+dm.toFixed(1)+' mV (≥50)':''
   sct('an-cell-bal', bs==='Excellent'||bs==='Good'?'ok':bs==='Warning'?'warn':bs==='Imbalance'?'err':'dim', bs, bsTip)
   if(d.temp_valid){
     sv('an-t1', d.temp1_c.toFixed(1)+'\xb0C')
     sv('an-t2', d.temp2_c.toFixed(1)+'\xb0C')
     var ts=d.temp_status||'—'
-    var tsTip=ts==='Normal'?'T1 '+d.temp1_c.toFixed(1)+'°C, T2 '+d.temp2_c.toFixed(1)+'°C (<40°C)':
-      ts==='Warm'?'T1 '+d.temp1_c.toFixed(1)+'°C, T2 '+d.temp2_c.toFixed(1)+'°C (40–50°C)':
-      ts==='Warning'?'T1 '+d.temp1_c.toFixed(1)+'°C, T2 '+d.temp2_c.toFixed(1)+'°C (≥50°C)':''
+    var tsTip=ts==='Normal'?'T1 '+d.temp1_c.toFixed(1)+'°C, T2 '+d.temp2_c.toFixed(1)+'°C':
+      ts==='Warm'?'T1 '+d.temp1_c.toFixed(1)+'°C, T2 '+d.temp2_c.toFixed(1)+'°C (40–50)':
+      ts==='Warning'?'T1 '+d.temp1_c.toFixed(1)+'°C, T2 '+d.temp2_c.toFixed(1)+'°C (≥50)':''
     sct('an-temp-status', ts==='Normal'?'ok':ts==='Warm'?'warn':'err', ts, tsTip)
   }
   if(d.efficiency_valid&&d.charger_efficiency>=0){
@@ -1943,11 +2077,10 @@ function upAnalytics(){fetch('/api/analytics').then(function(r){return r.json()}
   sv('an-avg-load',  fmt(d.avg_load_watts,1))
   sv('an-peak-load', fmt(d.peak_load_watts,1))
   sv('an-idle-load', fmt(d.idle_load_watts,1))
-  // Extended analytics
   var trend=d.voltage_trend||''
   var te=$('sv-trend');if(te){
     te.textContent=trend==='up'?'\u2191':trend==='down'?'\u2193':''
-    te.title=trend==='up'?'Voltage rising':trend==='down'?'Voltage falling':trend==='stable'?'Stable':''
+    te.title=trend==='up'?'Voltage rising':trend==='down'?'Voltage falling':trend==='stable'?'Voltage steady':''
   }
   var socTrend=d.soc_trend||''
   var socRate=d.soc_rate_pct_per_h||0
@@ -2424,6 +2557,26 @@ th{color:var(--muted);font-weight:500}
 .set-row{margin-bottom:.6rem;display:flex;align-items:center;gap:.6rem}
 .set-row label{min-width:90px;font-size:.8rem;color:var(--muted)}
 .set-row select{flex:1;padding:.35rem .5rem;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-family:inherit;font-size:.8rem}
+.chart-tabs{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:.5rem}
+.chart-tab{padding:.3rem .7rem;font-size:.72rem;color:var(--muted);background:none;border:none;border-bottom:2px solid transparent;cursor:pointer;font-family:inherit}
+.chart-tab:hover{color:var(--text)}
+.chart-tab.active{color:var(--green);border-bottom-color:var(--green);font-weight:600}
+.chart-svg{width:100%;display:block;background:var(--bg);border-radius:4px;overflow:visible}
+.recovery-ci{font-size:.75rem;color:var(--muted)}
+td .rc-main{font-weight:600}
+.chart-tooltip{position:absolute;pointer-events:none;background:var(--card);border:1px solid var(--border);border-radius:6px;padding:.4rem .6rem;font-size:.72rem;line-height:1.4;z-index:100;white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,.3)}
+.chart-tooltip .tt-date{font-weight:600;color:var(--text);margin-bottom:2px}
+.chart-tooltip .tt-row{color:var(--muted)}
+.chart-tooltip .tt-val{color:var(--green);font-weight:600}
+.chart-wrap{position:relative}
+.chart-legend{display:flex;flex-wrap:wrap;gap:.3rem .9rem;padding:.5rem .2rem 0;font-size:.72rem;font-family:inherit}
+.chart-legend .lg{display:inline-flex;align-items:center;gap:.35rem;cursor:help;position:relative;color:var(--muted)}
+.chart-legend .lg:hover{color:var(--text)}
+.chart-legend .lg .swatch{width:18px;height:2px;flex-shrink:0}
+.chart-legend .lg .swatch-band{width:14px;height:8px;border-radius:2px;flex-shrink:0}
+.chart-legend .lg .dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;margin-left:-10px}
+.chart-legend .lg .tip{display:none;position:absolute;bottom:calc(100% + 6px);left:0;background:var(--card);border:1px solid var(--border);border-radius:6px;padding:.4rem .6rem;font-size:.68rem;line-height:1.35;white-space:normal;width:260px;z-index:200;box-shadow:0 4px 12px rgba(0,0,0,.3);color:var(--text);pointer-events:none}
+.chart-legend .lg:hover .tip{display:block}
 </style>
 <link rel="prefetch" href="/"><link rel="prefetch" href="/settings">
 </head><body>
@@ -2444,50 +2597,420 @@ th{color:var(--muted);font-weight:500}
     o += "<p class=\"sub\">";
     o += "<a href=\"/api/solar_forecast_week\">/api/solar_forecast_week</a> &nbsp;"
          "<a href=\"/api/solar_simulation\">/api/solar_simulation</a> &nbsp;"
-         "<a href=\"/api/solar_forecast\">/api/solar_forecast</a></p>";
+         "<a href=\"/api/solar_forecast\">/api/solar_forecast</a> &nbsp;"
+         "<a href=\"/api/solar_performance\">/api/solar_performance</a></p>";
 
     o += "<div class=\"stats\" id=\"solar-stats\">";
     o += "<div class=\"stat\"><div class=\"stat-lbl\">Week total</div><div class=\"stat-val\" id=\"week-kwh\">—</div><div class=\"stat-lbl\">kilowatt-hours</div></div>";
     o += "<div class=\"stat\"><div class=\"stat-lbl\">Days to full</div><div class=\"stat-val\" id=\"days-full\">—</div><div class=\"stat-lbl\">solar only</div></div>";
     o += "<div class=\"stat stat-best\"><div class=\"stat-lbl\">Best day</div><div class=\"stat-val\" id=\"best-day\">—</div><div class=\"stat-lbl\">highest yield</div></div>";
+    o += "<div class=\"stat\"><div class=\"stat-lbl\">Panel efficiency</div><div class=\"stat-val\" id=\"solar-coeff\">—</div><div class=\"stat-lbl\" id=\"solar-coeff-detail\">coefficient</div></div>";
     o += "</div>";
 
     o += "<div class=\"card\"><div class=\"card-title\">Daily Forecast</div>";
-    o += "<div style=\"margin-bottom:.5rem\"><label style=\"font-size:.8rem;color:var(--muted)\"><input type=\"checkbox\" id=\"show-extended\" onchange=\"applySetting('show-extended',this.checked?'1':'0');renderDaily()\"> Show extended (6–16 days, from 16-day API if available)</label></div>";
-    o += "<div style=\"overflow-x:auto\"><table><thead><tr><th></th><th>Date</th><th>Energy (kilowatt-hours)</th><th>Cloud</th><th>Sun hours</th><th>Optimal window</th></tr></thead>";
-    o += "<tbody id=\"daily-table\"><tr><td colspan=\"6\" class=\"dim\">Loading…</td></tr></tbody></table></div></div>";
+    o += "<div style=\"margin-bottom:.5rem\"><label style=\"font-size:.8rem;color:var(--muted)\"><input type=\"checkbox\" id=\"show-extended\" onchange=\"applySetting('show-extended',this.checked?'1':'0');renderDaily();renderActiveChart()\"> Show extended (6–16 days, from 16-day API if available)</label></div>";
+    o += "<div style=\"overflow-x:auto\"><table><thead><tr><th></th><th>Date</th><th>Energy</th><th>Cloud</th><th>Sun hrs</th><th>Recovery (95% CI)</th><th>Optimal window</th></tr></thead>";
+    o += "<tbody id=\"daily-table\"><tr><td colspan=\"7\" class=\"dim\">Loading…</td></tr></tbody></table></div></div>";
+
+    o += "<div class=\"card\"><div class=\"card-title\">Solar Energy Forecast</div>";
+    o += "<div style=\"display:flex;align-items:center;gap:.5rem;flex-wrap:wrap\">"
+         "<div class=\"chart-tabs\" id=\"solar-view-tabs\" style=\"margin-bottom:0\">"
+         "<button class=\"chart-tab active\" data-view=\"solar\" onclick=\"switchChartView('solar')\">Solar Forecast</button>"
+         "<button class=\"chart-tab\" data-view=\"balance\" onclick=\"switchChartView('balance')\">Daily Balance</button></div>"
+         "<span style=\"width:1px;height:16px;background:var(--border);margin:0 .1rem\"></span>"
+         "<div class=\"chart-tabs\" id=\"solar-unit-tabs\" style=\"margin-bottom:0\">"
+         "<button class=\"chart-tab active\" data-unit=\"kwh\" onclick=\"switchChartUnit('kwh')\">kWh</button>"
+         "<button class=\"chart-tab\" data-unit=\"ah\" onclick=\"switchChartUnit('ah')\">Ah</button>"
+         "<button class=\"chart-tab\" data-unit=\"pct\" onclick=\"switchChartUnit('pct')\">Battery %</button></div>"
+         "<span style=\"flex:1\"></span>"
+         "<label style=\"font-size:.72rem;color:var(--muted);cursor:pointer\" title=\"Use historical charge controller data to model absorption/float taper. When off, assumes nominal (constant max current) charging.\"><input type=\"checkbox\" id=\"show-realistic\" onchange=\"toggleRealistic()\"> Realistic</label>"
+         "<label style=\"font-size:.72rem;color:var(--muted);cursor:pointer\"><input type=\"checkbox\" id=\"show-cumul\" onchange=\"renderActiveChart()\" checked> Cumulative</label>"
+         "<label style=\"font-size:.72rem;color:var(--muted);cursor:pointer\"><input type=\"checkbox\" id=\"show-usage\" onchange=\"renderActiveChart()\" checked> Est. usage</label></div>"
+         "<div class=\"chart-wrap\" id=\"solar-chart-wrap\">"
+         "<svg id=\"solar-chart\" class=\"chart-svg\" viewBox=\"0 0 900 340\">"
+         "<text x=\"50%\" y=\"50%\" fill=\"var(--muted)\" font-size=\"12\" font-family=\"monospace\""
+         " text-anchor=\"middle\" dominant-baseline=\"middle\">Loading…</text>"
+         "</svg><div id=\"solar-tt\" class=\"chart-tooltip\" style=\"display:none\"></div></div>"
+         "<div id=\"chart-legend\" class=\"chart-legend\"></div></div>\n";
 
     o += "<div class=\"card\"><div class=\"card-title\">Today & Tomorrow (from /api/solar_simulation & /api/solar_forecast)</div>";
     o += "<table><tr><td>Expected today</td><td id=\"today-wh\">—</td></tr>";
     o += "<tr><td>Tomorrow</td><td id=\"tomorrow-wh\">—</td></tr>";
     o += "<tr><td>Battery projection</td><td id=\"bat-proj\">—</td></tr></table></div>";
 
-    o += "<div class=\"footer\">Data from OpenWeather 5-day forecast. Cached 30 min. Optimal window = clearest daytime hours.</div>";
+    o += "<div class=\"footer\">Data from OpenWeather 5-day forecast. Cached 30 min. Optimal window = clearest daytime hours. "
+         "<button onclick=\"refreshWeather()\" style=\"background:var(--green);color:#fff;border:none;padding:.25rem .7rem;border-radius:4px;cursor:pointer;font-size:.75rem;font-weight:600;vertical-align:middle\">&#8635; Refresh weather</button>"
+         " <span id=\"refresh-msg\" style=\"font-size:.75rem\"></span></div>";
 
     o += "<script>\n";
     if (!init_settings.empty())
         o += "var lmSettings=" + init_settings + ";\n";
     else
-        o += "var lmSettings={theme:\"\",time:\"24\",\"show-extended\":\"0\",locale:\"\"};\n";
+        o += "var lmSettings={theme:\"\",time:\"24\",\"show-extended\":\"0\",\"show-realistic\":\"0\",locale:\"\"};\n";
     o += "function $(id){return document.getElementById(id)}\n"
          "function fmt(v,d){return(v==null||isNaN(+v))?'—':(+v).toFixed(d)}\n"
          "function getSetting(k,d){return(lmSettings&&lmSettings[k]!==undefined)?lmSettings[k]:d}\n"
          "function setSetting(k,v){if(!lmSettings)lmSettings={};lmSettings[k]=v;fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(lmSettings)}).catch(function(){})}\n"
          "function getLocale(){var loc=getSetting('locale','');return loc===''||loc==='auto'?(navigator.language||'en-US'):loc}\n"
-         "function fmtDate(iso){try{var d=new Date(iso+'T12:00:00');return d.toLocaleDateString(getLocale(),{weekday:'short',month:'short',day:'numeric'})}catch(e){return iso}}\n"
+         "var userTZ;try{userTZ=Intl.DateTimeFormat().resolvedOptions().timeZone}catch(e){userTZ=undefined}\n"
+         "function localDateStr(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')}\n"
+         "function tsToLocal(ts){return new Date(ts*1000)}\n"
+         "function fmtDate(iso){try{var d=new Date(iso+'T12:00:00');return d.toLocaleDateString(getLocale(),{weekday:'short',month:'short',day:'numeric',timeZone:userTZ})}catch(e){return iso}}\n"
          "var lastDailyData=null;\n"
+         "var lastSlots=null;\n"
+         "var solarChartUnit='kwh';\n"
+         "var solarChartView='solar';\n"
          "function dayEmoji(cloud){var c=(cloud||0)*100;return c<=25?'☀️':c<=50?'⛅':c<=75?'☁️':'🌧️'}\n"
-         "function renderDaily(){if(!lastDailyData)return;var showExt=!!($('show-extended')&&$('show-extended').checked);var list=lastDailyData.daily.filter(function(x){return !x.is_extended||showExt});var tbody=$('daily-table');if(!tbody)return;tbody.innerHTML=list.map(function(x){var opt=x.optimal_start==='\u2014'?(x.optimal_reason||'No clear window'):fmtOptTime(x.optimal_start)+'\u2013'+fmtOptTime(x.optimal_end);return '<tr'+(x.is_extended?' class=dim':'')+'><td>'+dayEmoji(x.cloud_cover)+'</td><td>'+fmtDate(x.date)+'</td><td class=ok>'+fmt(x.kwh,2)+'</td><td>'+Math.round((x.cloud_cover||0)*100)+'%</td><td>'+fmt(x.sun_hours_effective,1)+'</td><td>'+opt+'</td></tr>'}).join('')}\n"
+         "function fmtCI(v,lo,hi,d){return fmt(v,d)+' ('+fmt(lo,d)+'\\u2013'+fmt(hi,d)+')'}\n"
+         "function renderDaily(){if(!lastDailyData)return;var showExt=!!($('show-extended')&&$('show-extended').checked);var list=lastDailyData.daily.filter(function(x){return !x.is_extended||showExt});var tbody=$('daily-table');if(!tbody)return;tbody.innerHTML=list.map(function(x){\n"
+         "var opt=x.optimal_start==='\\u2014'?(x.optimal_reason||'No clear window'):fmtOptTime(x.optimal_start)+'\\u2013'+fmtOptTime(x.optimal_end);\n"
+         "var rcTip='Recovery: '+fmt(x.max_recovery_ah,1)+' Ah ('+fmt(x.max_recovery_ah_lo,1)+'\\u2013'+fmt(x.max_recovery_ah_hi,1)+')\\n= '+fmt(x.max_recovery_wh,0)+' Wh ('+fmt(x.max_recovery_wh_lo,0)+'\\u2013'+fmt(x.max_recovery_wh_hi,0)+')\\n= '+fmt(x.max_recovery_pct,1)+'% SoC ('+fmt(x.max_recovery_pct_lo,1)+'\\u2013'+fmt(x.max_recovery_pct_hi,1)+'%)';\n"
+         "var rcHtml='<span class=\"rc-main ok\">'+fmt(x.max_recovery_ah,1)+' Ah</span><br><span class=\"recovery-ci\">'+fmt(x.max_recovery_ah_lo,1)+'\\u2013'+fmt(x.max_recovery_ah_hi,1)+' Ah</span>';\n"
+         "return '<tr'+(x.is_extended?' class=dim':'')+'><td>'+dayEmoji(x.cloud_cover)+'</td><td>'+fmtDate(x.date)+'</td><td class=ok>'+fmt(x.kwh,2)+' kWh</td><td>'+Math.round((x.cloud_cover||0)*100)+'%</td><td>'+fmt(x.sun_hours_effective,1)+'</td><td title=\"'+rcTip+'\">'+rcHtml+'</td><td>'+opt+'</td></tr>';\n"
+         "}).join('');}\n"
+         "function switchChartUnit(u){solarChartUnit=u;document.querySelectorAll('#solar-unit-tabs .chart-tab').forEach(function(b){b.classList.toggle('active',b.dataset.unit===u)});renderActiveChart();}\n"
+         "function switchChartView(v){solarChartView=v;document.querySelectorAll('#solar-view-tabs .chart-tab').forEach(function(b){b.classList.toggle('active',b.dataset.view===v)});renderActiveChart();}\n"
+         "function renderActiveChart(){if(solarChartView==='balance')renderBalanceChart();else renderSolarChart();}\n"
+         "function fmtTime(h,m){var pad=function(n){return n.toString().padStart(2,'0')};if(getSetting('time','24')==='12'){var h12=h%12;if(h12===0)h12=12;return h12+(m>0?':'+pad(m):'')+(h<12?' AM':' PM');}return pad(h)+':'+pad(m);}\n"
+         "function niceAxis(maxV){if(maxV<=0)return{max:1,step:0.25,dec:2};var mag=Math.pow(10,Math.floor(Math.log10(maxV)));var r=maxV/mag;var step;if(r<=1.5)step=0.25*mag;else if(r<=3)step=0.5*mag;else if(r<=7)step=mag;else step=2*mag;var nmax=Math.ceil(maxV/step)*step;var dec=step>=10?0:step>=1?0:step>=0.1?1:2;return{max:nmax,step:step,dec:dec};}\n"
+         "function synthExtSlots(daily,apiSlots,usageProfile){\n"
+         "var extDays=daily.filter(function(d){return d.is_extended;});\n"
+         "if(!extDays.length)return [];\n"
+         "var existDates={};apiSlots.forEach(function(s){var dd=new Date(s.ts*1000);existDates[dd.getFullYear()+'-'+String(dd.getMonth()+1).padStart(2,'0')+'-'+String(dd.getDate()).padStart(2,'0')]=true;});\n"
+         "var fallbackW=0;\n"
+         "if(usageProfile){var tw=0,tn=0;usageProfile.forEach(function(u){if(u&&u.n>0){tw+=u.avg_w*u.n;tn+=u.n;}});if(tn>0)fallbackW=tw/tn;}\n"
+         "var synth=[];\n"
+         "extDays.forEach(function(day){\n"
+         "if(existDates[day.date])return;\n"
+         "var base=new Date(day.date+'T12:00:00');var midnight=new Date(base.getFullYear(),base.getMonth(),base.getDate());var bt=Math.floor(midnight.getTime()/1000);\n"
+         "for(var h=0;h<24;h+=3){\n"
+         "var ts=bt+h*3600;var isDaytime=(h>=6&&h<18);\n"
+         "var slotKwh=0,slotLo=0,slotHi=0;\n"
+         "if(isDaytime){slotKwh=day.kwh/4;var cv=0.10+0.10*day.cloud_cover;var m=1.96*cv;slotLo=slotKwh*Math.max(0,1-m);slotHi=slotKwh*(1+m);}\n"
+         "var useKwh=0,useLo=0,useHi=0;\n"
+         "if(usageProfile){var si=Math.floor(h/3);var u=usageProfile[si];if(u&&u.n>=3){useKwh=u.avg_w*3/1000;var sd=u.stddev_w;useLo=Math.max(0,(u.avg_w-1.96*sd)*3/1000);useHi=(u.avg_w+1.96*sd)*3/1000;}else{useKwh=fallbackW*3/1000;useLo=Math.max(0,fallbackW*0.8*3/1000);useHi=fallbackW*1.2*3/1000;}}\n"
+         "synth.push({ts:ts,kwh:slotKwh,kwh_lo:slotLo,kwh_hi:slotHi,cloud:day.cloud_cover,day:isDaytime,use_kwh:useKwh,use_lo:useLo,use_hi:useHi,ext:true});\n"
+         "}});\n"
+         "return synth;}\n"
+         "function renderSolarChart(){\n"
+         "var el=$('solar-chart');var tt=$('solar-tt');\n"
+         "if(!el||!lastSlots||!lastSlots.length){if(el)el.innerHTML=\"<text x='50%' y='50%' font-size='11' font-family='monospace' text-anchor='middle' dominant-baseline='middle' fill='var(--muted)'>No slot data</text>\";return;}\n"
+         "var ah=lastDailyData?lastDailyData.nominal_ah:100;\n"
+         "var bv=lastDailyData?lastDailyData.battery_voltage:13;\n"
+         "var capWh=ah*bv;\n"
+         "var showCumul=$('show-cumul')&&$('show-cumul').checked;\n"
+         "var showExt=!!($('show-extended')&&$('show-extended').checked);\n"
+         "var isLight=document.documentElement.classList.contains('light');\n"
+         "var W=900,H=340,PL=64,PR=showCumul?64:20,PT=16,PB=52;\n"
+         "var CW=W-PL-PR,CH=H-PT-PB;\n"
+         "var baseSlots=lastSlots.map(function(s){var o={};for(var k in s)o[k]=s[k];o.ext=false;return o;});\n"
+         "var slots=baseSlots;\n"
+         "var extBoundaryTs=0;\n"
+         "if(showExt&&lastDailyData&&lastDailyData.daily){\n"
+         "extBoundaryTs=baseSlots[baseSlots.length-1].ts+10800;\n"
+         "var extSlots=synthExtSlots(lastDailyData.daily,lastSlots,lastDailyData.usage_profile);\n"
+         "if(extSlots.length)slots=baseSlots.concat(extSlots);}\n"
+         "var t0=slots[0].ts*1000,t1=(slots[slots.length-1].ts+10800)*1000;\n"
+         "var tspan=Math.max(1,t1-t0);\n"
+         "function conv(kwh){\n"
+         "if(solarChartUnit==='ah')return kwh*1000/bv;\n"
+         "if(solarChartUnit==='pct')return capWh>0?(kwh*1000/capWh)*100:0;\n"
+         "return kwh;}\n"
+         "var unitLbl=solarChartUnit==='ah'?'Ah':solarChartUnit==='pct'?'% of battery':'kWh';\n"
+         "var unitShort=solarChartUnit==='ah'?'Ah':solarChartUnit==='pct'?'%':'kWh';\n"
+         "var cumulLbl=solarChartUnit==='ah'?'Cumul. Ah':solarChartUnit==='pct'?'Cumul. %':'Cumul. kWh';\n"
+         "var ymax=0;var r99=2.576/1.96;\n"
+         "slots.forEach(function(s){var hi99=s.kwh+(s.kwh_hi-s.kwh)*r99;var v=conv(hi99);if(v>ymax)ymax=v;var u=conv(s.use_hi||0);if(u>ymax)ymax=u;});\n"
+         "if(ymax<0.01)ymax=1;\n"
+         "var ya=niceAxis(ymax);\n"
+         "var cumArr=[];var cumSum=0;\n"
+         "slots.forEach(function(s){cumSum+=conv(s.kwh);cumArr.push(cumSum);});\n"
+         "var cumMax=cumArr.length?cumArr[cumArr.length-1]*1.1:1;\n"
+         "var ca=niceAxis(cumMax);\n"
+         "function xp(ts){return PL+((ts*1000-t0)/tspan)*CW;}\n"
+         "function xpM(ts){return xp(ts+5400);}\n"
+         "function yp(v){return PT+CH-Math.min(1,v/ya.max)*CH;}\n"
+         "function yp2(v){return PT+CH-Math.min(1,v/ca.max)*CH;}\n"
+         "var s='<defs>';\n"
+         "s+=\"<linearGradient id='ci95g' x1='0' y1='0' x2='0' y2='1'><stop offset='0%' stop-color='var(--green)' stop-opacity='.12'/><stop offset='100%' stop-color='var(--green)' stop-opacity='.04'/></linearGradient>\";\n"
+         "s+=\"<linearGradient id='ci99g' x1='0' y1='0' x2='0' y2='1'><stop offset='0%' stop-color='var(--green)' stop-opacity='.07'/><stop offset='100%' stop-color='var(--green)' stop-opacity='.02'/></linearGradient>\";\n"
+         "s+=\"<linearGradient id='cumg' x1='0' y1='0' x2='0' y2='1'><stop offset='0%' stop-color='var(--cyan)' stop-opacity='.15'/><stop offset='100%' stop-color='var(--cyan)' stop-opacity='.02'/></linearGradient>\";\n"
+         "s+='</defs>';\n"
+         "s+=\"<rect width='\"+W+\"' height='\"+H+\"' fill='var(--bg)' rx='6'/>\";\n"
+         "var nightFill=isLight?'rgba(100,110,140,0.06)':'rgba(140,160,220,0.04)';\n"
+         "var sunFill=isLight?'rgba(255,220,50,0.04)':'rgba(255,220,50,0.02)';\n"
+         "var inNight=false,nightStart=0;\n"
+         "slots.forEach(function(sl){\n"
+         "if(!sl.day&&!inNight){inNight=true;nightStart=sl.ts;}\n"
+         "if(sl.day&&inNight){inNight=false;var x1=xp(nightStart),x2=xp(sl.ts);x1=Math.max(x1,PL);x2=Math.min(x2,PL+CW);\n"
+         "s+=\"<rect x='\"+x1.toFixed(1)+\"' y='\"+PT+\"' width='\"+(x2-x1).toFixed(1)+\"' height='\"+CH+\"' fill='\"+nightFill+\"'/>\";\n"
+         "var mx=(x1+x2)/2;if(x2-x1>30)s+=\"<text x='\"+mx.toFixed(1)+\"' y='\"+(PT+14)+\"' text-anchor='middle' font-size='8' fill='\"+(isLight?'rgba(0,0,0,.15)':'rgba(255,255,255,.08)')+\"' font-family='monospace'>NIGHT</text>\";}\n"
+         "});\n"
+         "if(inNight){var x1=Math.max(xp(nightStart),PL),x2=PL+CW;s+=\"<rect x='\"+x1.toFixed(1)+\"' y='\"+PT+\"' width='\"+(x2-x1).toFixed(1)+\"' height='\"+CH+\"' fill='\"+nightFill+\"'/>\";}\n"
+         "s+=\"<g stroke='\"+(isLight?'rgba(0,0,0,.08)':'rgba(255,255,255,.06)')+\"' stroke-width='0.5'>\";\n"
+         "for(var yv=ya.step;yv<ya.max;yv+=ya.step){var gy=yp(yv);s+=\"<line x1='\"+PL+\"' y1='\"+gy.toFixed(1)+\"' x2='\"+(PL+CW)+\"' y2='\"+gy.toFixed(1)+\"'/>\";}\n"
+         "s+=\"</g>\";\n"
+         "var prevDay='',dayStarts=[];\n"
+         "slots.forEach(function(sl){\n"
+         "var d=tsToLocal(sl.ts);var ds=localDateStr(d);\n"
+         "if(ds!==prevDay){dayStarts.push({ts:sl.ts,d:d});prevDay=ds;}});\n"
+         "s+=\"<g stroke='\"+(isLight?'rgba(0,0,0,.12)':'rgba(255,255,255,.08)')+\"' stroke-width='0.5' stroke-dasharray='4,3'>\";\n"
+         "dayStarts.forEach(function(ds,i){if(i===0)return;var x=xp(ds.ts);if(x>PL+5&&x<PL+CW-5)s+=\"<line x1='\"+x.toFixed(1)+\"' y1='\"+PT+\"' x2='\"+x.toFixed(1)+\"' y2='\"+(PT+CH)+\"'/>\";});\n"
+         "s+=\"</g>\";\n"
+         "if(showExt&&extBoundaryTs>0){\n"
+         "var bx=xp(extBoundaryTs);if(bx>PL&&bx<PL+CW){\n"
+         "s+=\"<rect x='\"+bx.toFixed(1)+\"' y='\"+PT+\"' width='\"+(PL+CW-bx).toFixed(1)+\"' height='\"+CH+\"' fill='\"+(isLight?'rgba(0,0,0,0.025)':'rgba(255,255,255,0.015)')+\"'/>\";\n"
+         "s+=\"<line x1='\"+bx.toFixed(1)+\"' y1='\"+PT+\"' x2='\"+bx.toFixed(1)+\"' y2='\"+(PT+CH)+\"' stroke='var(--muted)' stroke-width='1' stroke-dasharray='6,4'/>\";\n"
+         "s+=\"<text x='\"+(bx+6).toFixed(1)+\"' y='\"+(PT+12)+\"' font-size='7.5' font-family='monospace' fill='var(--muted)' opacity='.7'>EXTENDED (est.)</text>\";}}\n"
+         "var ci95f='',ci95b='',ci99f='',ci99b='';\n"
+         "var ratio99=2.576/1.96;\n"
+         "slots.forEach(function(sl){var x=xpM(sl.ts);\n"
+         "ci95f+=x.toFixed(1)+','+yp(conv(sl.kwh_hi)).toFixed(1)+' ';\n"
+         "var w99lo=sl.kwh-(sl.kwh-sl.kwh_lo)*ratio99;\n"
+         "var w99hi=sl.kwh+(sl.kwh_hi-sl.kwh)*ratio99;\n"
+         "ci99f+=x.toFixed(1)+','+yp(conv(Math.max(0,w99hi))).toFixed(1)+' ';\n"
+         "});\n"
+         "for(var i=slots.length-1;i>=0;i--){var sl=slots[i];var x=xpM(sl.ts);\n"
+         "ci95b+=x.toFixed(1)+','+yp(conv(sl.kwh_lo)).toFixed(1)+' ';\n"
+         "var w99lo=sl.kwh-(sl.kwh-sl.kwh_lo)*ratio99;\n"
+         "ci99b+=x.toFixed(1)+','+yp(conv(Math.max(0,w99lo))).toFixed(1)+' ';\n"
+         "}\n"
+         "s+=\"<polygon points='\"+ci99f+ci99b+\"' fill='url(#ci99g)'/>\";\n"
+         "s+=\"<polygon points='\"+ci95f+ci95b+\"' fill='url(#ci95g)'/>\";\n"
+         "if(showCumul){\n"
+         "var cumPts=PL.toFixed(1)+','+(PT+CH).toFixed(1)+' ';\n"
+         "slots.forEach(function(sl,i){cumPts+=xpM(sl.ts).toFixed(1)+','+yp2(cumArr[i]).toFixed(1)+' ';});\n"
+         "cumPts+=(PL+CW).toFixed(1)+','+(PT+CH).toFixed(1);\n"
+         "s+=\"<polygon points='\"+cumPts+\"' fill='url(#cumg)'/>\";\n"
+         "var cumLine='';slots.forEach(function(sl,i){cumLine+=xpM(sl.ts).toFixed(1)+','+yp2(cumArr[i]).toFixed(1)+' ';});\n"
+         "s+=\"<polyline fill='none' stroke='var(--cyan)' stroke-width='1.5' stroke-dasharray='6,3' stroke-linecap='round' points='\"+cumLine+\"'/>\";}\n"
+         "var linePts='';slots.forEach(function(sl){linePts+=xpM(sl.ts).toFixed(1)+','+yp(conv(sl.kwh)).toFixed(1)+' ';});\n"
+         "s+=\"<polyline fill='none' stroke='var(--green)' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' points='\"+linePts+\"'/>\";\n"
+         "slots.forEach(function(sl,i){\n"
+         "if(sl.kwh>0){var cx=xpM(sl.ts),cy=yp(conv(sl.kwh));\n"
+         "if(sl.ext)s+=\"<circle cx='\"+cx.toFixed(1)+\"' cy='\"+cy.toFixed(1)+\"' r='3' fill='var(--bg)' stroke='var(--green)' stroke-width='1' opacity='.5'/>\";\n"
+         "else s+=\"<circle cx='\"+cx.toFixed(1)+\"' cy='\"+cy.toFixed(1)+\"' r='3' fill='var(--green)' stroke='var(--bg)' stroke-width='1.5'/>\";}\n"
+         "});\n"
+         "var showUse=$('show-usage')&&$('show-usage').checked;\n"
+         "if(showUse){\n"
+         "var useCi='',useCiB='';\n"
+         "slots.forEach(function(sl){var x=xpM(sl.ts);useCi+=x.toFixed(1)+','+yp(conv(sl.use_hi||0)).toFixed(1)+' ';});\n"
+         "for(var i=slots.length-1;i>=0;i--){var sl=slots[i];useCiB+=xpM(sl.ts).toFixed(1)+','+yp(conv(sl.use_lo||0)).toFixed(1)+' ';}\n"
+         "s+=\"<polygon points='\"+useCi+useCiB+\"' fill='var(--orange)' opacity='.10'/>\";\n"
+         "var useLine='';slots.forEach(function(sl){useLine+=xpM(sl.ts).toFixed(1)+','+yp(conv(sl.use_kwh||0)).toFixed(1)+' ';});\n"
+         "s+=\"<polyline fill='none' stroke='var(--orange)' stroke-width='1.5' stroke-dasharray='6,4' stroke-linecap='round' points='\"+useLine+\"'/>\";\n"
+         "slots.forEach(function(sl){\n"
+         "if((sl.use_kwh||0)>0){var cx=xpM(sl.ts),cy=yp(conv(sl.use_kwh));\n"
+         "s+=\"<circle cx='\"+cx.toFixed(1)+\"' cy='\"+cy.toFixed(1)+\"' r='2' fill='var(--orange)' stroke='var(--bg)' stroke-width='1'/>\";}\n"
+         "});}\n"
+         "s+=\"<line x1='\"+PL+\"' y1='\"+PT+\"' x2='\"+PL+\"' y2='\"+(PT+CH)+\"' stroke='var(--muted)' stroke-width='1'/>\";\n"
+         "s+=\"<line x1='\"+PL+\"' y1='\"+(PT+CH)+\"' x2='\"+(PL+CW)+\"' y2='\"+(PT+CH)+\"' stroke='var(--muted)' stroke-width='1'/>\";\n"
+         "if(showCumul)s+=\"<line x1='\"+(PL+CW)+\"' y1='\"+PT+\"' x2='\"+(PL+CW)+\"' y2='\"+(PT+CH)+\"' stroke='var(--cyan)' stroke-width='0.5' opacity='.4'/>\";\n"
+         "s+=\"<g font-size='9' font-family='monospace' fill='var(--muted)'>\";\n"
+         "for(var yv=0;yv<=ya.max;yv+=ya.step){var gy=yp(yv);\n"
+         "s+=\"<line x1='\"+(PL-3)+\"' y1='\"+gy.toFixed(1)+\"' x2='\"+PL+\"' y2='\"+gy.toFixed(1)+\"' stroke='var(--muted)' stroke-width='0.5'/>\";\n"
+         "s+=\"<text x='\"+(PL-5)+\"' y='\"+(gy+3).toFixed(1)+\"' text-anchor='end'>\"+fmt(yv,ya.dec)+\"</text>\";}\n"
+         "s+=\"</g>\";\n"
+         "if(showCumul){s+=\"<g font-size='9' font-family='monospace' fill='var(--cyan)'>\";\n"
+         "for(var yv=0;yv<=ca.max;yv+=ca.step){var gy=yp2(yv);\n"
+         "s+=\"<line x1='\"+(PL+CW)+\"' y1='\"+gy.toFixed(1)+\"' x2='\"+(PL+CW+3)+\"' y2='\"+gy.toFixed(1)+\"' stroke='var(--cyan)' stroke-width='0.5'/>\";\n"
+         "s+=\"<text x='\"+(PL+CW+5)+\"' y='\"+(gy+3).toFixed(1)+\"' text-anchor='start'>\"+fmt(yv,ca.dec)+\"</text>\";}\n"
+         "s+=\"</g>\";}\n"
+         "var nDays=dayStarts.length;\n"
+         "var hStep=nDays<=5?6:nDays<=8?12:24;\n"
+         "var showHourTicks=nDays<=8;\n"
+         "var dateFmt=nDays<=7?{weekday:'short',month:'short',day:'numeric'}:nDays<=14?{month:'short',day:'numeric'}:{month:'numeric',day:'numeric'};\n"
+         "var dateLabelEvery=nDays<=10?1:nDays<=16?2:3;\n"
+         "s+=\"<g font-size='8.5' font-family='monospace' fill='var(--muted)'>\";\n"
+         "if(showHourTicks){var lastTx=-999;\n"
+         "slots.forEach(function(sl){\n"
+         "var d=tsToLocal(sl.ts);var h=d.getHours();\n"
+         "if(h%hStep!==0)return;\n"
+         "var x=xp(sl.ts);if(x<PL+8||x>PL+CW-8)return;\n"
+         "if(x-lastTx<28)return;lastTx=x;\n"
+         "s+=\"<line x1='\"+x.toFixed(1)+\"' y1='\"+(PT+CH)+\"' x2='\"+x.toFixed(1)+\"' y2='\"+(PT+CH+4)+\"' stroke='var(--muted)' stroke-width='0.5'/>\";\n"
+         "s+=\"<text x='\"+x.toFixed(1)+\"' y='\"+(PT+CH+14)+\"' text-anchor='middle'>\"+fmtTime(h,0)+\"</text>\";});}\n"
+         "var lastDx=-999;\n"
+         "dayStarts.forEach(function(ds,i){\n"
+         "if(i%dateLabelEvery!==0&&i!==0)return;\n"
+         "var d=ds.d;var dayEnd=i+1<dayStarts.length?dayStarts[i+1].ts:slots[slots.length-1].ts+10800;\n"
+         "var mid=ds.ts+(dayEnd-ds.ts)/2;var x=xp(mid);\n"
+         "if(x<PL+10||x>PL+CW-10)return;\n"
+         "if(x-lastDx<45)return;lastDx=x;\n"
+         "var dfOpts=Object.assign({},dateFmt);if(userTZ)dfOpts.timeZone=userTZ;\n"
+         "s+=\"<text x='\"+x.toFixed(1)+\"' y='\"+(H-4)+\"' text-anchor='middle' font-size='\"+(nDays>10?'7.5':'9')+\"' font-weight='600'>\"+d.toLocaleDateString(getLocale(),dfOpts)+\"</text>\";});\n"
+         "s+=\"</g>\";\n"
+         "s+=\"<text x='\"+(PL/2)+\"' y='\"+(PT+CH/2)+\"' text-anchor='middle' font-size='9' font-family='monospace' fill='var(--muted)' transform='rotate(-90 \"+(PL/2)+\" \"+(PT+CH/2)+\")'>\"+unitLbl+\" per 3h slot</text>\";\n"
+         "if(showCumul)s+=\"<text x='\"+(W-PR/2)+\"' y='\"+(PT+CH/2)+\"' text-anchor='middle' font-size='9' font-family='monospace' fill='var(--cyan)' transform='rotate(90 \"+(W-PR/2)+\" \"+(PT+CH/2)+\")'>\"+cumulLbl+\"</text>\";\n"
+         "var isReal=lastDailyData&&lastDailyData.realistic;\n"
+         "var lg=$('chart-legend');if(lg){var lh='';\n"
+         "lh+='<span class=lg><span class=swatch style=\"background:var(--green)\"></span><span class=dot style=\"background:var(--green)\"></span>Solar generation'+(isReal?' (realistic)':' (nominal)')+'<span class=tip>'+(isReal?'Solar energy adjusted for charge controller absorption/float taper derived from the last 14 days of historical charge data. At higher SoC, the charger reduces current, so less solar energy is actually accepted by the battery.':'Expected solar energy per 3-hour slot based on panel capacity, system efficiency, and cloud cover from OpenWeather forecast. Assumes constant max charge current (nominal).')+'</span></span>';\n"
+         "lh+='<span class=lg><span class=\"swatch-band\" style=\"background:linear-gradient(var(--green),transparent);opacity:.2\"></span>95% CI<span class=tip>Inner band: 95% confidence interval (\\u00b11.96\\u03c3). Based on cloud forecast uncertainty (CV\\u00a0=\\u00a010\\u201320%). The actual yield should fall within this band ~95% of the time.</span></span>';\n"
+         "lh+='<span class=lg><span class=\"swatch-band\" style=\"background:linear-gradient(var(--green),transparent);opacity:.08\"></span>99% CI<span class=tip>Outer band: 99% confidence interval (\\u00b12.576\\u03c3). Very unlikely the actual yield falls outside this range\\u2014only ~1% of the time if the cloud model is well-calibrated.</span></span>';\n"
+         "if(showUse)lh+='<span class=lg><span class=swatch style=\"background:var(--orange);border-top:1.5px dashed var(--orange)\"></span><span class=dot style=\"background:var(--orange)\"></span>Est. usage (7d)<span class=tip>Average power consumption per 3-hour time-of-day slot, computed from the last 7 days of battery discharge history. Shaded band shows the 95% CI from observed variability across days.</span></span>';\n"
+         "if(showCumul)lh+='<span class=lg><span class=swatch style=\"border-top:1.5px dashed var(--cyan)\"></span>Cumulative<span class=tip>Running total of solar energy generated over the forecast period. Useful for projecting total harvest and comparing against battery capacity or load.</span></span>';\n"
+         "lg.innerHTML=lh;}\n"
+         "s+=\"<rect id='solar-overlay' x='\"+PL+\"' y='\"+PT+\"' width='\"+CW+\"' height='\"+CH+\"' fill='transparent' style='cursor:crosshair'/>\";\n"
+         "el.setAttribute('viewBox','0 0 '+W+' '+H);el.innerHTML=s;\n"
+         "var overlay=document.getElementById('solar-overlay');\n"
+         "if(overlay&&tt){\n"
+         "var wrap=$('solar-chart-wrap');\n"
+         "overlay.addEventListener('mousemove',function(e){\n"
+         "var rect=el.getBoundingClientRect();\n"
+         "var scaleX=W/rect.width;\n"
+         "var svgX=(e.clientX-rect.left)*scaleX;\n"
+         "var frac=(svgX-PL)/CW;frac=Math.max(0,Math.min(1,frac));\n"
+         "var hoverTs=t0/1000+frac*(tspan/1000);\n"
+         "var best=-1,bestD=1e15;\n"
+         "slots.forEach(function(sl,i){var d=Math.abs(sl.ts+5400-hoverTs);if(d<bestD){bestD=d;best=i;}});\n"
+         "if(best<0){tt.style.display='none';return;}\n"
+         "var sl=slots[best];\n"
+         "var d=tsToLocal(sl.ts);\n"
+         "var w99lo=Math.max(0,sl.kwh-(sl.kwh-sl.kwh_lo)*ratio99);\n"
+         "var w99hi=sl.kwh+(sl.kwh_hi-sl.kwh)*ratio99;\n"
+         "var ttDateOpts={weekday:'short',month:'short',day:'numeric'};if(userTZ)ttDateOpts.timeZone=userTZ;\n"
+         "var htm='<div class=tt-date>'+d.toLocaleDateString(getLocale(),ttDateOpts)+' '+fmtTime(d.getHours(),d.getMinutes())+' \\u2013 '+fmtTime((d.getHours()+3)%24,d.getMinutes())+'</div>';\n"
+         "htm+='<div class=tt-row>'+(sl.day?'\\u2600\\ufe0f Daytime':'\\u263d Night')+(sl.ext?' (extended est.)':'')+'</div>';\n"
+         "htm+='<div class=tt-row>Estimate: <span class=tt-val>'+fmt(conv(sl.kwh),2)+' '+unitShort+'</span></div>';\n"
+         "htm+='<div class=tt-row>95% CI: '+fmt(conv(sl.kwh_lo),2)+' \\u2013 '+fmt(conv(sl.kwh_hi),2)+' '+unitShort+'</div>';\n"
+         "htm+='<div class=tt-row>99% CI: '+fmt(conv(w99lo),2)+' \\u2013 '+fmt(conv(w99hi),2)+' '+unitShort+'</div>';\n"
+         "htm+='<div class=tt-row>Cloud: '+Math.round(sl.cloud*100)+'%</div>';\n"
+         "if(showUse&&(sl.use_kwh||0)>0)htm+='<div class=tt-row style=\"color:var(--orange)\">Usage: '+fmt(conv(sl.use_kwh),2)+' '+unitShort+' ('+fmt(conv(sl.use_lo),2)+'\\u2013'+fmt(conv(sl.use_hi),2)+')</div>';\n"
+         "if(showCumul)htm+='<div class=tt-row style=\"color:var(--cyan)\">Cumul: '+fmt(cumArr[best],2)+' '+unitShort+'</div>';\n"
+         "tt.innerHTML=htm;\n"
+         "var px=e.clientX-wrap.getBoundingClientRect().left;\n"
+         "var py=e.clientY-wrap.getBoundingClientRect().top;\n"
+         "tt.style.left=(px+12)+'px';tt.style.top=(py-10)+'px';tt.style.display='block';\n"
+         "if(px+tt.offsetWidth+12>wrap.offsetWidth)tt.style.left=(px-tt.offsetWidth-8)+'px';\n"
+         "});\n"
+         "overlay.addEventListener('mouseleave',function(){tt.style.display='none';});\n"
+         "}}\n"
+         "function renderBalanceChart(){\n"
+         "var el=$('solar-chart');var tt=$('solar-tt');\n"
+         "if(!el||!lastDailyData||!lastDailyData.daily||!lastDailyData.daily.length){if(el)el.innerHTML=\"<text x='50%' y='50%' font-size='11' font-family='monospace' text-anchor='middle' dominant-baseline='middle' fill='var(--muted)'>No data</text>\";return;}\n"
+         "var showExt=!!($('show-extended')&&$('show-extended').checked);\n"
+         "var days=lastDailyData.daily.filter(function(x){return !x.is_extended||showExt;});\n"
+         "if(!days.length)return;\n"
+         "var showCumul=$('show-cumul')&&$('show-cumul').checked;\n"
+         "var isLight=document.documentElement.classList.contains('light');\n"
+         "var bv=lastDailyData.battery_voltage||12.8;\n"
+         "var capWh=(lastDailyData.nominal_ah||100)*bv;\n"
+         "function bc(kwh){if(solarChartUnit==='ah')return kwh*1000/bv;if(solarChartUnit==='pct')return capWh>0?(kwh*1000/capWh)*100:0;return kwh;}\n"
+         "var bUnit=solarChartUnit==='ah'?'Ah':solarChartUnit==='pct'?'%':'kWh';\n"
+         "var bCumLbl=solarChartUnit==='ah'?'Cumul. Ah':solarChartUnit==='pct'?'Cumul. %':'Cumul. kWh';\n"
+         "var W=900,H=340,PL=64,PR=showCumul?64:20,PT=16,PB=56;\n"
+         "var CW=W-PL-PR,CH=H-PT-PB;\n"
+         "var ymin=0,ymax=0;\n"
+         "days.forEach(function(d){var v=bc(d.surplus_kwh||0);var lo=bc(d.surplus_kwh_lo||0);var hi=bc(d.surplus_kwh_hi||0);if(hi>ymax)ymax=hi;if(lo<ymin)ymin=lo;if(v>ymax)ymax=v;if(v<ymin)ymin=v;});\n"
+         "var pad=Math.max(Math.abs(ymax),Math.abs(ymin))*0.15;if(pad<0.1)pad=0.1;\n"
+         "ymax+=pad;ymin-=pad;\n"
+         "var ya=niceAxis(Math.max(Math.abs(ymin),ymax));\n"
+         "ya.max=ya.max;ya.min=-ya.max;\n"
+         "var cumArr=[];var cumSum=0;\n"
+         "days.forEach(function(d){cumSum+=bc(d.surplus_kwh||0);cumArr.push(cumSum);});\n"
+         "var cumAbs=0;cumArr.forEach(function(v){if(Math.abs(v)>cumAbs)cumAbs=Math.abs(v);});\n"
+         "var ca=niceAxis(cumAbs||1);\n"
+         "function yp(v){return PT+CH/2-((v/ya.max)*(CH/2));}\n"
+         "function yp2(v){return PT+CH/2-((v/ca.max)*(CH/2));}\n"
+         "var bw=Math.min(CW/days.length*0.6,60);\n"
+         "var gap=(CW-bw*days.length)/(days.length+1);\n"
+         "function bx(i){return PL+gap+(gap+bw)*i;}\n"
+         "var s='<defs>';\n"
+         "s+=\"<linearGradient id='surpG' x1='0' y1='0' x2='0' y2='1'><stop offset='0%' stop-color='var(--green)' stop-opacity='.8'/><stop offset='100%' stop-color='var(--green)' stop-opacity='.4'/></linearGradient>\";\n"
+         "s+=\"<linearGradient id='defG' x1='0' y1='0' x2='0' y2='1'><stop offset='0%' stop-color='var(--orange)' stop-opacity='.4'/><stop offset='100%' stop-color='var(--orange)' stop-opacity='.8'/></linearGradient>\";\n"
+         "s+='</defs>';\n"
+         "s+=\"<rect width='\"+W+\"' height='\"+H+\"' fill='var(--bg)' rx='6'/>\";\n"
+         "s+=\"<g stroke='\"+(isLight?'rgba(0,0,0,.06)':'rgba(255,255,255,.05)')+\"' stroke-width='0.5'>\";\n"
+         "for(var yv=ya.step;yv<=ya.max;yv+=ya.step){s+=\"<line x1='\"+PL+\"' y1='\"+yp(yv).toFixed(1)+\"' x2='\"+(PL+CW)+\"' y2='\"+yp(yv).toFixed(1)+\"'/>\";s+=\"<line x1='\"+PL+\"' y1='\"+yp(-yv).toFixed(1)+\"' x2='\"+(PL+CW)+\"' y2='\"+yp(-yv).toFixed(1)+\"'/>\";}\n"
+         "s+=\"</g>\";\n"
+         "var zero_y=yp(0);\n"
+         "s+=\"<line x1='\"+PL+\"' y1='\"+zero_y.toFixed(1)+\"' x2='\"+(PL+CW)+\"' y2='\"+zero_y.toFixed(1)+\"' stroke='var(--muted)' stroke-width='1' stroke-dasharray='4,2'/>\";\n"
+         "s+=\"<text x='\"+(PL+CW+4)+\"' y='\"+(zero_y+3).toFixed(1)+\"' font-size='8' font-family='monospace' fill='var(--muted)'>0</text>\";\n"
+         "days.forEach(function(d,i){\n"
+         "var x=bx(i),val=bc(d.surplus_kwh||0),lo=bc(d.surplus_kwh_lo||0),hi=bc(d.surplus_kwh_hi||0);\n"
+         "var y0=zero_y,yVal=yp(val),yLo=yp(lo),yHi=yp(hi);\n"
+         "s+=\"<rect x='\"+x.toFixed(1)+\"' y='\"+Math.min(yHi,yp(0)).toFixed(1)+\"' width='\"+bw.toFixed(1)+\"' height='\"+Math.abs(yHi-yp(0)).toFixed(1)+\"' fill='\"+(hi>=0?'var(--green)':'var(--orange)')+\"' opacity='.06' rx='2'/>\";\n"
+         "s+=\"<rect x='\"+x.toFixed(1)+\"' y='\"+Math.min(yp(0),yLo).toFixed(1)+\"' width='\"+bw.toFixed(1)+\"' height='\"+Math.abs(yLo-yp(0)).toFixed(1)+\"' fill='\"+(lo>=0?'var(--green)':'var(--orange)')+\"' opacity='.06' rx='2'/>\";\n"
+         "var barTop=Math.min(y0,yVal),barH=Math.abs(yVal-y0);\n"
+         "var fill=val>=0?'url(#surpG)':'url(#defG)';\n"
+         "s+=\"<rect x='\"+x.toFixed(1)+\"' y='\"+barTop.toFixed(1)+\"' width='\"+bw.toFixed(1)+\"' height='\"+Math.max(1,barH).toFixed(1)+\"' fill='\"+fill+\"' rx='2'/>\";\n"
+         "var cx=(x+bw/2).toFixed(1);\n"
+         "s+=\"<line x1='\"+cx+\"' y1='\"+yHi.toFixed(1)+\"' x2='\"+cx+\"' y2='\"+yLo.toFixed(1)+\"' stroke='\"+(val>=0?'var(--green)':'var(--orange)')+\"' stroke-width='1.5'/>\";\n"
+         "s+=\"<line x1='\"+(x+bw*0.25).toFixed(1)+\"' y1='\"+yHi.toFixed(1)+\"' x2='\"+(x+bw*0.75).toFixed(1)+\"' y2='\"+yHi.toFixed(1)+\"' stroke='\"+(val>=0?'var(--green)':'var(--orange)')+\"' stroke-width='1.5'/>\";\n"
+         "s+=\"<line x1='\"+(x+bw*0.25).toFixed(1)+\"' y1='\"+yLo.toFixed(1)+\"' x2='\"+(x+bw*0.75).toFixed(1)+\"' y2='\"+yLo.toFixed(1)+\"' stroke='\"+(val>=0?'var(--green)':'var(--orange)')+\"' stroke-width='1.5'/>\";\n"
+         "s+=\"<text x='\"+cx+\"' y='\"+(Math.min(yVal,y0)-5).toFixed(1)+\"' text-anchor='middle' font-size='8.5' font-weight='600' font-family='monospace' fill='\"+(val>=0?'var(--green)':'var(--orange)')+\"'>\"+fmt(val,solarChartUnit==='pct'?1:2)+'</text>';\n"
+         "var dt=new Date(d.date+'T12:00:00');\n"
+         "var wdOpts={weekday:'short'};var mdOpts={month:'short',day:'numeric'};if(userTZ){wdOpts.timeZone=userTZ;mdOpts.timeZone=userTZ;}\n"
+         "s+=\"<text x='\"+cx+\"' y='\"+(PT+CH+14)+\"' text-anchor='middle' font-size='8.5' font-family='monospace' fill='var(--muted)'>\"+dt.toLocaleDateString(getLocale(),wdOpts)+\"</text>\";\n"
+         "s+=\"<text x='\"+cx+\"' y='\"+(PT+CH+24)+\"' text-anchor='middle' font-size='7.5' font-family='monospace' fill='var(--muted)'>\"+dt.toLocaleDateString(getLocale(),mdOpts)+\"</text>\";\n"
+         "});\n"
+         "if(showCumul&&days.length>1){\n"
+         "var cumLine='';days.forEach(function(d,i){cumLine+=(bx(i)+bw/2).toFixed(1)+','+yp2(cumArr[i]).toFixed(1)+' ';});\n"
+         "s+=\"<polyline fill='none' stroke='var(--cyan)' stroke-width='1.5' stroke-dasharray='6,3' stroke-linecap='round' points='\"+cumLine+\"'/>\";\n"
+         "days.forEach(function(d,i){var cx=bx(i)+bw/2,cy=yp2(cumArr[i]);s+=\"<circle cx='\"+cx.toFixed(1)+\"' cy='\"+cy.toFixed(1)+\"' r='2.5' fill='var(--cyan)' stroke='var(--bg)' stroke-width='1'/>\";});}\n"
+         "s+=\"<line x1='\"+PL+\"' y1='\"+PT+\"' x2='\"+PL+\"' y2='\"+(PT+CH)+\"' stroke='var(--muted)' stroke-width='1'/>\";\n"
+         "s+=\"<line x1='\"+PL+\"' y1='\"+(PT+CH)+\"' x2='\"+(PL+CW)+\"' y2='\"+(PT+CH)+\"' stroke='var(--muted)' stroke-width='1'/>\";\n"
+         "s+=\"<g font-size='9' font-family='monospace' fill='var(--muted)'>\";\n"
+         "for(var yv=-ya.max;yv<=ya.max;yv+=ya.step){if(Math.abs(yv)<ya.step*0.01)continue;var gy=yp(yv);\n"
+         "s+=\"<line x1='\"+(PL-3)+\"' y1='\"+gy.toFixed(1)+\"' x2='\"+PL+\"' y2='\"+gy.toFixed(1)+\"' stroke='var(--muted)' stroke-width='0.5'/>\";\n"
+         "s+=\"<text x='\"+(PL-5)+\"' y='\"+(gy+3).toFixed(1)+\"' text-anchor='end'>\"+fmt(yv,ya.dec)+\"</text>\";}\n"
+         "s+=\"</g>\";\n"
+         "if(showCumul){s+=\"<line x1='\"+(PL+CW)+\"' y1='\"+PT+\"' x2='\"+(PL+CW)+\"' y2='\"+(PT+CH)+\"' stroke='var(--cyan)' stroke-width='0.5' opacity='.4'/>\";\n"
+         "s+=\"<g font-size='9' font-family='monospace' fill='var(--cyan)'>\";\n"
+         "for(var yv=-ca.max;yv<=ca.max;yv+=ca.step){if(Math.abs(yv)<ca.step*0.01)continue;var gy=yp2(yv);\n"
+         "s+=\"<line x1='\"+(PL+CW)+\"' y1='\"+gy.toFixed(1)+\"' x2='\"+(PL+CW+3)+\"' y2='\"+gy.toFixed(1)+\"' stroke='var(--cyan)' stroke-width='0.5'/>\";\n"
+         "s+=\"<text x='\"+(PL+CW+5)+\"' y='\"+(gy+3).toFixed(1)+\"' text-anchor='start'>\"+fmt(yv,ca.dec)+\"</text>\";}\n"
+         "s+=\"</g>\";}\n"
+         "s+=\"<text x='\"+(PL/2)+\"' y='\"+(PT+CH/2)+\"' text-anchor='middle' font-size='9' font-family='monospace' fill='var(--muted)' transform='rotate(-90 \"+(PL/2)+\" \"+(PT+CH/2)+\")'>\"+('Surplus / Deficit ('+bUnit+')')+\"</text>\";\n"
+         "if(showCumul)s+=\"<text x='\"+(W-PR/2)+\"' y='\"+(PT+CH/2)+\"' text-anchor='middle' font-size='9' font-family='monospace' fill='var(--cyan)' transform='rotate(90 \"+(W-PR/2)+\" \"+(PT+CH/2)+\")'>\"+bCumLbl+\"</text>\";\n"
+         "var lg=$('chart-legend');if(lg){var lh='';\n"
+         "lh+='<span class=lg><span class=\"swatch-band\" style=\"background:linear-gradient(var(--green),transparent);opacity:.6\"></span>Surplus<span class=tip>Daily net energy surplus: solar generation exceeds estimated consumption. Whisker lines show the 95% CI combining both forecast uncertainty and usage variability. Bar height is the point estimate.</span></span>';\n"
+         "lh+='<span class=lg><span class=\"swatch-band\" style=\"background:linear-gradient(transparent,var(--orange));opacity:.6\"></span>Deficit<span class=tip>Daily net energy deficit: estimated consumption exceeds solar generation. The battery must cover this shortfall. Whiskers show 95% CI.</span></span>';\n"
+         "if(showCumul)lh+='<span class=lg><span class=swatch style=\"border-top:1.5px dashed var(--cyan)\"></span>Cumul. net<span class=tip>Running total of daily surplus/deficit over the forecast period. A falling line means cumulative energy loss; rising means net gain. Useful for seeing if the battery is trending toward full or empty.</span></span>';\n"
+         "lg.innerHTML=lh;}\n"
+         "s+=\"<rect id='balance-overlay' x='\"+PL+\"' y='\"+PT+\"' width='\"+CW+\"' height='\"+CH+\"' fill='transparent' style='cursor:crosshair'/>\";\n"
+         "el.setAttribute('viewBox','0 0 '+W+' '+H);el.innerHTML=s;\n"
+         "var overlay=document.getElementById('balance-overlay');\n"
+         "if(overlay&&tt){\n"
+         "var wrap=$('solar-chart-wrap');\n"
+         "overlay.addEventListener('mousemove',function(e){\n"
+         "var rect=el.getBoundingClientRect();\n"
+         "var scaleX=W/rect.width;\n"
+         "var svgX=(e.clientX-rect.left)*scaleX;\n"
+         "var best=-1;\n"
+         "days.forEach(function(d,i){var x=bx(i);if(svgX>=x&&svgX<=x+bw)best=i;});\n"
+         "if(best<0){tt.style.display='none';return;}\n"
+         "var d=days[best];\n"
+         "var dec=solarChartUnit==='pct'?1:2;\n"
+         "var htm='<div class=tt-date>'+fmtDate(d.date)+'</div>';\n"
+         "htm+='<div class=tt-row>Solar: <span class=tt-val>'+fmt(bc(d.kwh),dec)+' '+bUnit+'</span></div>';\n"
+         "htm+='<div class=tt-row style=\"color:var(--orange)\">Usage: '+fmt(bc(d.usage_kwh),dec)+' '+bUnit+' ('+fmt(bc(d.usage_kwh_lo),dec)+'\\u2013'+fmt(bc(d.usage_kwh_hi),dec)+')</div>';\n"
+         "var color=(d.surplus_kwh||0)>=0?'var(--green)':'var(--orange)';\n"
+         "htm+='<div class=tt-row style=\"color:'+color+'\">Net: '+fmt(bc(d.surplus_kwh),dec)+' '+bUnit+'</div>';\n"
+         "htm+='<div class=tt-row>95% CI: '+fmt(bc(d.surplus_kwh_lo),dec)+' to '+fmt(bc(d.surplus_kwh_hi),dec)+' '+bUnit+'</div>';\n"
+         "if(showCumul)htm+='<div class=tt-row style=\"color:var(--cyan)\">Cumul: '+fmt(cumArr[best],dec)+' '+bUnit+'</div>';\n"
+         "tt.innerHTML=htm;\n"
+         "var px=e.clientX-wrap.getBoundingClientRect().left;\n"
+         "var py=e.clientY-wrap.getBoundingClientRect().top;\n"
+         "tt.style.left=(px+12)+'px';tt.style.top=(py-10)+'px';tt.style.display='block';\n"
+         "if(px+tt.offsetWidth+12>wrap.offsetWidth)tt.style.left=(px-tt.offsetWidth-8)+'px';\n"
+         "});\n"
+         "overlay.addEventListener('mouseleave',function(){tt.style.display='none';});\n"
+         "}}\n"
+         "function toggleRealistic(){var cb=$('show-realistic');if(cb)applySetting('show-realistic',cb.checked?'1':'0');loadAll();}\n"
+         "function refreshWeather(){var m=$('refresh-msg');if(m)m.textContent='Refreshing…';fetch('/api/weather_refresh').then(function(r){return r.json()}).then(function(d){if(m)m.textContent=d.ok?'Done! Reloading…':'Error: '+d.message;if(d.ok)setTimeout(loadAll,500)}).catch(function(e){if(m)m.textContent='Error: '+e.message});}\n"
          "function loadAll(){var t=15000;var base=window.location.origin||(window.location.protocol+'//'+window.location.host);function to(url){return Promise.race([fetch(url),new Promise(function(_,rej){setTimeout(function(){rej(new Error('timeout'))},t)})]).then(function(r){return r.ok?r.json():Promise.reject(new Error(r.status))})}\n"
-         "Promise.all([to(base+'/api/solar_forecast_week'),to(base+'/api/solar_simulation'),to(base+'/api/solar_forecast')]).then(function(arr){\n"
+         "var rlCb=$('show-realistic');var rlQ=(rlCb&&rlCb.checked)?'?realistic=1':'';\n"
+         "Promise.all([to(base+'/api/solar_forecast_week'+rlQ),to(base+'/api/solar_simulation'),to(base+'/api/solar_forecast')]).then(function(arr){\n"
          "var d=arr[0],sim=arr[1],fore=arr[2];\n"
-         "if(!d.valid){$('week-kwh').textContent='—';$('days-full').textContent='—';$('best-day').textContent=d.error||'—';$('daily-table').innerHTML='<tr><td colspan=6 class=warn>'+d.error+'</td></tr>'}else{\n"
-         "$('week-kwh').textContent=fmt(d.week_total_kwh,2);$('days-full').textContent=d.days_to_full>0?d.days_to_full:'—';$('best-day').textContent=d.best_day?fmtDate(d.best_day):'—';\n"
-         "var tbody=$('daily-table');if(!d.daily||!d.daily.length){tbody.innerHTML='<tr><td colspan=6 class=dim>No data</td></tr>'}else{lastDailyData=d;var cb=$('show-extended');if(cb)cb.checked=getSetting('show-extended','0')==='1';renderDaily()}}\n"
+         "if(!d.valid){$('week-kwh').textContent='—';$('days-full').textContent='—';$('best-day').textContent=d.error||'—';$('daily-table').innerHTML='<tr><td colspan=7 class=warn>'+d.error+'</td></tr>'}else{\n"
+         "$('week-kwh').textContent=fmt(d.week_total_kwh,2)+(d.realistic?' (realistic)':'');$('days-full').textContent=d.days_to_full>0?d.days_to_full:'—';$('best-day').textContent=d.best_day?fmtDate(d.best_day):'—';\n"
+         "if(d.solar_perf_coeff>0){var pct=Math.round(d.solar_perf_coeff*100);$('solar-coeff').textContent=pct+'%';$('solar-coeff-detail').textContent=d.solar_perf_samples+' samples (30d)'}else{$('solar-coeff').textContent='—';$('solar-coeff-detail').textContent='collecting data'}\n"
+         "var tbody=$('daily-table');if(!d.daily||!d.daily.length){tbody.innerHTML='<tr><td colspan=7 class=dim>No data</td></tr>'}else{lastDailyData=d;if(d.slots)lastSlots=d.slots;var cb=$('show-extended');if(cb)cb.checked=getSetting('show-extended','0')==='1';renderDaily();renderActiveChart();}}\n"
          "$('today-wh').textContent=sim.expected_today_wh>0?fmt(sim.expected_today_wh/1000,2)+' kilowatt-hours':'—';$('tomorrow-wh').textContent=fore.valid?fmt(fore.tomorrow_generation_wh/1000,1)+' kilowatt-hours':'—';$('bat-proj').textContent=sim.battery_projection||fore.expected_battery_state||'—';\n"
-         "}).catch(function(err){try{console.error('Solar loadAll failed:',err);}catch(e){}var t=$('daily-table');if(t)t.innerHTML='<tr><td colspan=6 class=warn>Error loading data. Check solar_enabled and weather_api_key in Settings.</td></tr>';$('week-kwh').textContent='—';$('days-full').textContent='—';$('best-day').textContent='—';$('today-wh').textContent='—';$('tomorrow-wh').textContent='—';$('bat-proj').textContent='—'})}\n"
+         "}).catch(function(err){try{console.error('Solar loadAll failed:',err);}catch(e){}var t=$('daily-table');if(t)t.innerHTML='<tr><td colspan=7 class=warn>Error loading data. Check solar_enabled and weather_api_key in Settings.</td></tr>';$('week-kwh').textContent='—';$('days-full').textContent='—';$('best-day').textContent='—';$('today-wh').textContent='—';$('tomorrow-wh').textContent='—';$('bat-proj').textContent='—'})}\n"
          "function fmtOptTime(s){if(!s||s==='\u2014')return s;var m=s.match(/^(\\d{1,2}):(\\d{2})$/);if(!m)return s;var h=parseInt(m[1],10),mn=parseInt(m[2],10);var loc=getLocale();if(getSetting('time','24')==='12'){var h12=h%12;if(h12===0)h12=12;return h12+':'+(mn<10?'0':'')+mn+(h<12?' AM':' PM')}try{var d=new Date(2000,0,1,h,mn);return d.toLocaleTimeString(loc,{hour:'2-digit',minute:'2-digit',hour12:getSetting('time','24')==='12'})}catch(e){return h+':'+(mn<10?'0':'')+mn}}\n"
-         "function initSettings(){if(!lmSettings)lmSettings={theme:'',time:'24','show-extended':'0',locale:''};var t=getSetting('theme','');if(!t)t=window.matchMedia('(prefers-color-scheme:light)').matches?'light':'dark';lmSettings.theme=t;document.documentElement.classList.toggle('light',t==='light');var b=$('thm-btn');if(b)b.textContent=t==='light'?'\u263d':'\u2600';var st=$('set-theme');if(st)st.value=t;var se=$('set-time');if(se)se.value=getSetting('time','24');var sl=$('set-locale');if(sl)sl.value=getSetting('locale','auto')}\n"
+         "function initSettings(){if(!lmSettings)lmSettings={theme:'',time:'24','show-extended':'0','show-realistic':'0',locale:''};var t=getSetting('theme','');if(!t)t=window.matchMedia('(prefers-color-scheme:light)').matches?'light':'dark';lmSettings.theme=t;document.documentElement.classList.toggle('light',t==='light');var b=$('thm-btn');if(b)b.textContent=t==='light'?'\u263d':'\u2600';var st=$('set-theme');if(st)st.value=t;var se=$('set-time');if(se)se.value=getSetting('time','24');var sl=$('set-locale');if(sl)sl.value=getSetting('locale','auto');var sr=$('show-realistic');if(sr)sr.checked=getSetting('show-realistic','0')==='1'}\n"
          "function applyTheme(t){document.documentElement.classList.toggle('light',t==='light');var b=$('thm-btn');if(b)b.textContent=t==='light'?'\u263d':'\u2600';if(!lmSettings)lmSettings={};lmSettings.theme=t;fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(lmSettings)}).catch(function(){});var st=$('set-theme');if(st)st.value=t}\n"
          "function toggleTheme(){applyTheme(document.documentElement.classList.contains('light')?'dark':'light')}\n"
          "function toggleSettings(){var m=$('settings-modal');if(!m)return;m.style.display=m.style.display==='none'?'flex':'none';if(m.style.display==='flex'){var st=$('set-theme');if(st)st.value=getSetting('theme','dark');var se=$('set-time');if(se)se.value=getSetting('time','24');var sl=$('set-locale');if(sl)sl.value=getSetting('locale','auto')}}\n"
@@ -2602,7 +3125,10 @@ h1{font-size:1.35rem;font-weight:600;color:var(--green);margin-bottom:.25rem}
     o += esc(g("weather_api_key", ""));
     o += "\"></div><div class=\"row\"><label>Weather ZIP code</label><input type=\"text\" name=\"weather_zip_code\" value=\"";
     o += esc(g("weather_zip_code", "80112"));
-    o += "\"></div><div class=\"row\"><label>Daemon mode</label><input type=\"checkbox\" name=\"daemon\" ";
+    o += "\"></div><div class=\"row\"><label>Refresh weather cache</label>"
+         "<button type=\"button\" class=\"btn\" style=\"padding:.35rem .8rem;font-size:.8rem\" onclick=\"refreshWx()\">&#8635; Fetch fresh data</button>"
+         " <span id=\"wx-msg\" style=\"font-size:.8rem;color:var(--muted)\"></span></div>"
+         "<div class=\"row\"><label>Daemon mode</label><input type=\"checkbox\" name=\"daemon\" ";
     o += (g("daemon", "0") == "1" || g("daemon", "0") == "true") ? "checked" : "";
     o += "></div><button type=\"submit\" class=\"btn\">Save</button><div id=\"msg\" class=\"msg\"></div></form><script>\n"
          "(function(){var n=document.querySelectorAll('nav a[href^=\"/\"]');for(var i=0;i<n.length;i++){n[i].addEventListener('click',function(e){if(e.ctrlKey||e.metaKey||e.shiftKey)return;var h=this.getAttribute('href');if(!h)return;e.preventDefault();location.href=h})}})();\n"
@@ -2614,6 +3140,7 @@ h1{font-size:1.35rem;font-weight:600;color:var(--green);margin-bottom:.25rem}
          ".catch(function(){document.getElementById('msg').textContent='Save failed.';document.getElementById('msg').className='msg err'})\n"
          "}\n"
          "function toggleTheme(){var isLight=document.documentElement.classList.toggle('light');var t=isLight?'light':'dark';document.getElementById('thm-btn').textContent=isLight?'\u263d':'\u263c';fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme:t})}).catch(function(){})}\n"
+         "function refreshWx(){var m=document.getElementById('wx-msg');if(m)m.textContent='Refreshing…';fetch('/api/weather_refresh').then(function(r){return r.json()}).then(function(d){if(m)m.textContent=d.ok?'Done! Cache cleared. Visit Solar page to see fresh data.':'Error: '+d.message;if(m)m.style.color=d.ok?'var(--green)':'#dc2626'}).catch(function(e){if(m){m.textContent='Error: '+e.message;m.style.color='#dc2626'}})}\n"
          "</script></body></html>";
     return o;
 }
