@@ -125,7 +125,6 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Wait until we have a snapshot or time out
     {
         std::unique_lock<std::mutex> lk(mu);
         bool ok = cv.wait_for(lk, std::chrono::seconds(timeout_s),
@@ -140,7 +139,6 @@ int main(int argc, char** argv) {
 
     ble.stop();
 
-    // ---------- Print snapshot ----------
     printf("\n=== Battery Snapshot ===\n");
     printf("  Device:      %s  (%s)\n", snap.device_name.c_str(), snap.ble_address.c_str());
     printf("  Voltage:     %.3f V\n",   snap.total_voltage_v);
@@ -158,7 +156,6 @@ int main(int argc, char** argv) {
     if (snap.time_remaining_h > 0.0)
         printf("  Time left:   %.2f h\n", snap.time_remaining_h);
 
-    // ---------- Run checks ----------
     printf("\n=== Checks ===\n");
     std::vector<Check> checks;
     bool all_pass = run_checks(snap, checks);
