@@ -7,3 +7,12 @@ limonitor
 limonitor_integration_test
 *.o
 *.a
+
+# JavaScript / Node
+node_modules/
+package-lock.json
+yarn.lock
+*.js.map
+dist/
+.npm
+.eslintcache
