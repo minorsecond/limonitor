@@ -97,6 +97,7 @@ static void load_config_file(const std::string& path, Config& cfg) {
             else if (key == "db_interval")    cfg.db_write_interval_s= std::stoi(val);
             else if (key == "daemon")              cfg.daemon_mode        = strtobool(val);
             else if (key == "battery_purchased")   cfg.battery_purchased  = val;
+            else if (key == "tx_threshold")        cfg.tx_threshold_a     = std::stod(val);
             else std::fprintf(stderr, "[config] line %d: unknown key '%s'\n", lineno, key.c_str());
         } catch (...) {
             std::fprintf(stderr, "[config] line %d: bad value for '%s'\n", lineno, key.c_str());
@@ -138,6 +139,9 @@ static void print_usage(const char* prog) {
         "  --db-interval N  DB write throttle seconds      [60]\n"
         "  --daemon       Run headless (no TUI) — for background/service use\n"
         "  --purchase-date DATE  Record battery purchase date (e.g. 2024-03-15)\n"
+        "  --tx-threshold A  TX detection threshold in amps [1.0]\n"
+        "                    Net positive battery current that starts a TX event.\n"
+        "                    1.0 works for 25-50W VHF/UHF. Raise to 4-6 for 100W HF.\n"
         "  -h             Show this help\n"
         "\n"
         "API endpoints (served on http://HOST:PORT/):\n"
@@ -180,6 +184,7 @@ static Config parse_args(int argc, char** argv, Config cfg = {}) {
         else if (arg == "--db-interval") cfg.db_write_interval_s = std::stoi(next());
         else if (arg == "--daemon")         cfg.daemon_mode       = true;
         else if (arg == "--purchase-date")  cfg.battery_purchased = next();
+        else if (arg == "--tx-threshold")   cfg.tx_threshold_a = std::stod(next());
         else if (arg == "-h" || arg == "--help") { print_usage(argv[0]); std::exit(0); }
         else { std::cerr << "Unknown option: " << arg << "\n"; print_usage(argv[0]); std::exit(1); }
     }
@@ -268,6 +273,8 @@ int main(int argc, char** argv) {
 
     // Data store
     DataStore store(cfg.history_size);
+    store.set_tx_threshold(cfg.tx_threshold_a);
+    LOG_INFO("TX detection threshold: %.2f A (net positive battery discharge)", cfg.tx_threshold_a);
     if (!cfg.battery_purchased.empty())
         store.set_purchase_date(cfg.battery_purchased);
 

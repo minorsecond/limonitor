@@ -1,4 +1,5 @@
 #pragma once
+#include "tx_events.hpp"
 #include <cstdint>
 #include <string>
 
@@ -45,6 +46,10 @@ struct Config {
 
     // Daemon mode: skip TUI, log to stderr/file only
     bool daemon_mode = false;
+
+    // TX detection threshold — net positive battery current in amps that starts a TX event.
+    // Default 1.0 A works for most VHF/UHF radios. Raise to 4–6 for 100 W HF rigs.
+    double tx_threshold_a = TX_THRESHOLD_A;
 
     // Battery metadata
     std::string battery_purchased;  // e.g. "2024-03-15" — stored as-is

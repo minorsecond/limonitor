@@ -2,9 +2,11 @@
 #include <chrono>
 #include <cstddef>
 
-static constexpr double TX_THRESHOLD_A = 6.0;
-// TX when battery discharge > 6A OR charger output (bat_a) > 6A
-// Covers both: battery-only (discharge spike) and PSU charging (charger ramp-up)
+// Default TX detection threshold in amps (net positive battery current = discharging).
+// Override at runtime via config key tx_threshold or CLI flag --tx-threshold.
+// A value of 1.0 works well for 25–50 W VHF/UHF radios drawing 1.5–3 A net.
+// Raise to 4–6 A for high-power HF rigs (100 W+).
+static constexpr double TX_THRESHOLD_A = 1.0;
 
 struct TxEvent {
     double start_time;   // Unix timestamp

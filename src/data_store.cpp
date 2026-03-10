@@ -6,17 +6,34 @@ static constexpr int DISCOVERY_UPDATE_INTERVAL_S = 7;
 
 DataStore::DataStore(size_t max_history) : max_history_(max_history) {}
 
-// Combined TX detection: battery discharge > 6A OR charger bat_a > 6A
-// Covers PSU charging case where load spike shows in charger current, not battery
+// Combined TX detection.
+//
+// Three trigger paths, any one is enough:
+//   1. BMS:     net positive battery discharge  (bat_cur > threshold_a)
+//   2. Charger: bat_a spikes high               (chg_a > 5 A, for high-power-charger ramp-up)
+//   3. Charger: bat_a goes negative             (chg_a < -threshold_a)
+//      EPG2 reports negative bat_a when the battery is sourcing current to the load,
+//      so this catches TX events at 1-second charger resolution even when the BMS
+//      notification rate is slow (60 s).
+//
+// Peak current/power is measured from whichever path fired.
 static void run_tx_detection(bool& tx_active, double& tx_start_time,
                              double& tx_peak_current, double& tx_peak_power,
                              std::deque<TxEvent>& tx_events,
                              double now, double bat_cur, double bat_v,
-                             double chg_a, double chg_v) {
+                             double chg_a, double chg_v,
+                             double threshold_a) {
     double discharge = (bat_cur > 0) ? bat_cur : 0;
-    bool above = (discharge > TX_THRESHOLD_A) || (chg_a > TX_THRESHOLD_A);
-    double effective_cur = std::max(discharge, chg_a);
-    double effective_v = (chg_a >= discharge && chg_a > 0) ? chg_v : bat_v;
+    // Path 3: EPG2 reports negative bat_a when battery is discharging into the load.
+    double chg_discharge = (chg_a < 0) ? -chg_a : 0;
+    static constexpr double CHG_HIGH_A = 5.0;  // charger ramp-up floor (path 2)
+    bool above = (discharge > threshold_a)
+              || (chg_a > CHG_HIGH_A)
+              || (chg_discharge > threshold_a);
+    // Use the strongest discharge signal to compute peak
+    double effective_cur = std::max({discharge, chg_discharge, chg_a > CHG_HIGH_A ? chg_a : 0.0});
+    double effective_v = bat_v;
+    if (chg_discharge > 0) effective_v = chg_v;
     double pwr = effective_cur * effective_v;
 
     if (above) {
@@ -49,7 +66,8 @@ void DataStore::process_tx_detection(const BatterySnapshot& snap) {
     double chg_a = pg ? pg->bat_a : 0;
     double chg_v = pg ? pg->bat_v : snap.total_voltage_v;
     run_tx_detection(tx_active_, tx_start_time_, tx_peak_current_, tx_peak_power_,
-                     tx_events_, now, snap.current_a, snap.total_voltage_v, chg_a, chg_v);
+                     tx_events_, now, snap.current_a, snap.total_voltage_v, chg_a, chg_v,
+                     tx_threshold_);
 }
 
 void DataStore::process_tx_detection(const PwrGateSnapshot& snap) {
@@ -59,7 +77,13 @@ void DataStore::process_tx_detection(const PwrGateSnapshot& snap) {
     double bat_cur = bat ? bat->current_a : 0;
     double bat_v = bat ? bat->total_voltage_v : snap.bat_v;
     run_tx_detection(tx_active_, tx_start_time_, tx_peak_current_, tx_peak_power_,
-                     tx_events_, now, bat_cur, bat_v, snap.bat_a, snap.bat_v);
+                     tx_events_, now, bat_cur, bat_v, snap.bat_a, snap.bat_v,
+                     tx_threshold_);
+}
+
+void DataStore::set_tx_threshold(double amps) {
+    std::lock_guard<std::mutex> lk(mu_);
+    tx_threshold_ = amps;
 }
 
 void DataStore::update(BatterySnapshot snap) {

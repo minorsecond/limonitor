@@ -35,6 +35,10 @@ public:
 
     std::vector<TxEvent> tx_events(size_t n = 100) const;
 
+    // Set the net-positive-battery-current threshold that starts a TX event.
+    // Default matches TX_THRESHOLD_A in tx_events.hpp.
+    void set_tx_threshold(double amps);
+
     void        set_purchase_date(const std::string& d);
     std::string purchase_date() const;
 
@@ -55,6 +59,9 @@ private:
     std::string ble_state_{"disconnected"};
     std::string purchase_date_;
     std::vector<DiscoveredDevice> discovered_;
+
+    // TX detection threshold (amps, net positive battery discharge)
+    double tx_threshold_{TX_THRESHOLD_A};
 
     // Active TX event state
     bool tx_active_{false};
