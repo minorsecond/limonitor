@@ -6,10 +6,69 @@ static constexpr int DISCOVERY_UPDATE_INTERVAL_S = 7;
 
 DataStore::DataStore(size_t max_history) : max_history_(max_history) {}
 
+// Combined TX detection: battery discharge > 6A OR charger bat_a > 6A
+// Covers PSU charging case where load spike shows in charger current, not battery
+static void run_tx_detection(bool& tx_active, double& tx_start_time,
+                             double& tx_peak_current, double& tx_peak_power,
+                             std::deque<TxEvent>& tx_events,
+                             double now, double bat_cur, double bat_v,
+                             double chg_a, double chg_v) {
+    double discharge = (bat_cur > 0) ? bat_cur : 0;
+    bool above = (discharge > TX_THRESHOLD_A) || (chg_a > TX_THRESHOLD_A);
+    double effective_cur = std::max(discharge, chg_a);
+    double effective_v = (chg_a >= discharge && chg_a > 0) ? chg_v : bat_v;
+    double pwr = effective_cur * effective_v;
+
+    if (above) {
+        if (!tx_active) {
+            tx_active = true;
+            tx_start_time = now;
+            tx_peak_current = effective_cur;
+            tx_peak_power = pwr;
+        } else if (effective_cur > tx_peak_current) {
+            tx_peak_current = effective_cur;
+            tx_peak_power = pwr;
+        }
+    } else if (tx_active) {
+        TxEvent ev;
+        ev.start_time = tx_start_time;
+        ev.end_time = now;
+        ev.duration = now - tx_start_time;
+        ev.peak_current = tx_peak_current;
+        ev.peak_power = tx_peak_power;
+        tx_events.push_back(ev);
+        while (tx_events.size() > 100) tx_events.pop_front();
+        tx_active = false;
+    }
+}
+
+void DataStore::process_tx_detection(const BatterySnapshot& snap) {
+    if (!snap.valid) return;
+    latest_battery_current_ = snap.current_a;
+    double now = static_cast<double>(std::chrono::system_clock::to_time_t(snap.timestamp));
+    auto pg = latest_pwrgate();
+    double chg_a = pg ? pg->bat_a : 0;
+    double chg_v = pg ? pg->bat_v : snap.total_voltage_v;
+    run_tx_detection(tx_active_, tx_start_time_, tx_peak_current_, tx_peak_power_,
+                     tx_events_, now, snap.current_a, snap.total_voltage_v, chg_a, chg_v);
+}
+
+void DataStore::process_tx_detection(const PwrGateSnapshot& snap) {
+    if (!snap.valid) return;
+    latest_charger_bat_a_ = snap.bat_a;
+    double now = static_cast<double>(std::chrono::system_clock::to_time_t(snap.timestamp));
+    auto bat = latest();
+    double bat_cur = bat ? bat->current_a : 0;
+    double bat_v = bat ? bat->total_voltage_v : snap.bat_v;
+    run_tx_detection(tx_active_, tx_start_time_, tx_peak_current_, tx_peak_power_,
+                     tx_events_, now, bat_cur, bat_v, snap.bat_a, snap.bat_v);
+}
+
 void DataStore::update(BatterySnapshot snap) {
     std::vector<Observer> observers_copy;
     {
         std::lock_guard<std::mutex> lk(mu_);
+        process_tx_detection(snap);
         ring_.push_back(snap);
         while (ring_.size() > max_history_) ring_.pop_front();
         observers_copy = observers_;
@@ -84,6 +143,7 @@ std::vector<DiscoveredDevice> DataStore::discovered_devices() const {
 
 void DataStore::update_pwrgate(PwrGateSnapshot snap) {
     std::lock_guard<std::mutex> lk(mu_);
+    process_tx_detection(snap);
     pwrgate_ring_.push_back(std::move(snap));
     while (pwrgate_ring_.size() > max_history_) pwrgate_ring_.pop_front();
 }
@@ -100,4 +160,12 @@ std::vector<PwrGateSnapshot> DataStore::pwrgate_history(size_t n) const {
         return std::vector<PwrGateSnapshot>(pwrgate_ring_.begin(), pwrgate_ring_.end());
     auto it = pwrgate_ring_.end() - static_cast<ptrdiff_t>(n);
     return std::vector<PwrGateSnapshot>(it, pwrgate_ring_.end());
+}
+
+std::vector<TxEvent> DataStore::tx_events(size_t n) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (n == 0 || n >= tx_events_.size())
+        return std::vector<TxEvent>(tx_events_.begin(), tx_events_.end());
+    auto it = tx_events_.end() - static_cast<ptrdiff_t>(n);
+    return std::vector<TxEvent>(it, tx_events_.end());
 }

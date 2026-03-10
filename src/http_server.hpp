@@ -1,5 +1,6 @@
 #pragma once
 #include "data_store.hpp"
+#include "tx_events.hpp"
 #include <atomic>
 #include <cstdint>
 #include <string>
@@ -38,6 +39,8 @@ private:
     static std::string svg_charger_chart(const std::vector<PwrGateSnapshot>& hist);
     static std::string charger_json(const PwrGateSnapshot& pg);
     static std::string charger_history_json(const std::vector<PwrGateSnapshot>& snaps);
+    static std::string flow_json(const BatterySnapshot& bat, const PwrGateSnapshot& chg);
+    static std::string tx_events_json(const std::vector<TxEvent>& events);
     static std::string html_dashboard(const BatterySnapshot& s, const std::string& ble_state,
                                       const PwrGateSnapshot& pg,
                                       const std::string& purchase_date,

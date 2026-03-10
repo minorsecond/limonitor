@@ -164,6 +164,13 @@ void HttpServer::handle(int fd) {
         if (ni != std::string::npos) { try { count = std::stoul(query.substr(ni + 2)); } catch (...) {} }
         send_response(fd, 200, "application/json",
                       charger_history_json(store_.pwrgate_history(count)));
+    } else if (path == "/api/flow") {
+        send_response(fd, 200, "application/json", flow_json(snap, pg));
+    } else if (path == "/api/tx_events") {
+        size_t count = 100;
+        auto ni = query.find("n=");
+        if (ni != std::string::npos) { try { count = std::stoul(query.substr(ni + 2)); } catch (...) {} }
+        send_response(fd, 200, "application/json", tx_events_json(store_.tx_events(count)));
     } else if (path == "/metrics") {
         send_response(fd, 200, "text/plain; version=0.0.4",
                       prometheus(snap) + prometheus_charger(pg));
@@ -615,6 +622,35 @@ std::string HttpServer::charger_history_json(const std::vector<PwrGateSnapshot>&
     return o;
 }
 
+std::string HttpServer::flow_json(const BatterySnapshot& bat, const PwrGateSnapshot& chg) {
+    std::string o = "{\n";
+    o += "  \"battery_voltage\": " + jdbl(bat.valid ? bat.total_voltage_v : 0) + ",\n";
+    o += "  \"battery_current\": " + jdbl(bat.valid ? bat.current_a : 0) + ",\n";
+    o += "  \"state_of_charge\": " + jdbl(bat.valid ? bat.soc_pct : 0, 1) + ",\n";
+    o += "  \"solar_voltage\": " + jdbl(chg.valid ? chg.sol_v : 0) + ",\n";
+    o += "  \"charger_voltage\": " + jdbl(chg.valid ? chg.ps_v : 0) + ",\n";
+    o += "  \"charger_state\": " + jstr(chg.valid ? chg.state : "") + ",\n";
+    double power_w = chg.valid ? (chg.bat_v * chg.bat_a) : (bat.valid ? bat.power_w : 0);
+    o += "  \"power_watts\": " + jdbl(std::abs(power_w)) + "\n";
+    o += "}\n";
+    return o;
+}
+
+std::string HttpServer::tx_events_json(const std::vector<TxEvent>& events) {
+    std::string o = "[";
+    bool first = true;
+    for (const auto& e : events) {
+        if (!first) o += ",";
+        first = false;
+        o += "\n  {\"start\":" + jdbl(e.start_time, 0) +
+             ",\"duration\":" + jdbl(e.duration) +
+             ",\"peak_current\":" + jdbl(e.peak_current) +
+             ",\"peak_power\":" + jdbl(e.peak_power) + "}";
+    }
+    o += "\n]\n";
+    return o;
+}
+
 std::string HttpServer::charger_json(const PwrGateSnapshot& pg) {
     if (!pg.valid) return "{\"valid\":false}\n";
     std::string o = "{\n";
@@ -767,6 +803,23 @@ details[open].card summary::before{content:'▾  '}
 .trng-btn.active{background:rgba(74,222,128,.15);border-color:var(--green);color:var(--green);font-weight:600}
 html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--green);color:var(--green)}
 .chart-svg{width:100%;display:block;background:var(--chart-bg);border-radius:4px}
+/* ── Energy Flow Diagram ── */
+.flow-wrap{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1.1rem;margin-bottom:.7rem}
+.flow-diagram{width:100%;max-width:700px;margin:0 auto;display:block}
+.flow-diagram svg{width:100%;height:auto}
+.flow-node{transition:fill .2s,filter .2s}
+.flow-node-solar{fill:#fbbf24}
+.flow-node-grid{fill:#3b82f6}
+.flow-node-charger{fill:#6b7280}
+.flow-node-battery{fill:#22c55e}
+.flow-node-system{fill:#f8fafc}
+html.light .flow-node-system{fill:#e2e8f0}
+.flow-arrow-chg{stroke:#22c55e}
+.flow-arrow-dchg{stroke:#f97316}
+.flow-arrow-idle{stroke:#64748b}
+.flow-arrow{stroke-width:2;fill:none;stroke-linecap:round;transition:stroke .2s,opacity .2s}
+@keyframes flowDash{to{stroke-dashoffset:-20}}
+@media(max-width:640px){.flow-wrap{padding:.8rem}.flow-diagram{max-width:100%}}
 )HTML";
     o += ".main{display:flex;flex-direction:column;gap:.7rem}"
          "#bat-chart{height:200px}#chg-chart{height:180px}"
@@ -843,6 +896,13 @@ html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--gre
 
     o += "</div>\n"; // .stats
 
+    o += "<div class=\"flow-wrap\"><div class=\"card-title\">Energy Flow</div>"
+         "<div id=\"flow-diagram\" class=\"flow-diagram\">"
+         "<svg id=\"flow-svg\" viewBox=\"0 0 520 180\" xmlns=\"http://www.w3.org/2000/svg\">"
+         "<text x=\"50%\" y=\"50%\" fill=\"var(--muted)\" font-size=\"12\" font-family=\"monospace\""
+         " text-anchor=\"middle\" dominant-baseline=\"middle\">Loading…</text>"
+         "</svg></div></div>\n";
+
     o += "<div class=\"card card-bat\"><div class=\"card-title\">Battery History</div>"
          "<svg id=\"bat-chart\" class=\"chart-svg\" viewBox=\"0 0 800 200\">"
          "<text x=\"50%\" y=\"50%\" fill=\"#444\" font-size=\"12\" font-family=\"monospace\""
@@ -915,6 +975,14 @@ html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--gre
     }
     o += "</table></div>\n";
 
+    o += "<div class=\"card\"><div class=\"card-title\">Radio Activity (24h)</div>"
+         "<table class=\"dt\">\n"
+         "<tr><td>TX events</td><td id=\"tx-count\">—</td></tr>"
+         "<tr><td>Total TX time</td><td id=\"tx-duration\">—</td></tr>"
+         "<tr><td>Peak TX power</td><td id=\"tx-peak-pwr\">—</td></tr>"
+         "<tr><td>Avg TX current</td><td id=\"tx-avg-cur\">—</td></tr>"
+         "</table></div>\n";
+
     o += "</div>\n"; // .col2
 
     o += "<div class=\"card card-chg\"><div class=\"card-title\">Charger History</div>"
@@ -983,6 +1051,8 @@ html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--gre
 
     o += "</main><div class=\"footer\">API: "
          "<a href=\"/api/status\">/api/status</a> &nbsp;"
+         "<a href=\"/api/flow\">/api/flow</a> &nbsp;"
+         "<a href=\"/api/tx_events\">/api/tx_events</a> &nbsp;"
          "<a href=\"/api/cells\">/api/cells</a> &nbsp;"
          "<a href=\"/api/history\">/api/history</a> &nbsp;"
          "<a href=\"/api/charger\">/api/charger</a> &nbsp;"
@@ -1067,6 +1137,68 @@ function upChg(){fetch('/api/charger').then(function(r){return r.json()}).then(f
 
 setInterval(upBat,5000); setInterval(upChg,5000)
 upBat(); upChg()
+
+function upFlow(){fetch('/api/flow').then(function(r){return r.json()}).then(function(d){
+  renderFlowDiagram(d)
+}).catch(function(){})}
+setInterval(upFlow,3000); upFlow()
+
+function upTx(){fetch('/api/tx_events').then(function(r){return r.json()}).then(function(evs){
+  var cutoff=Date.now()/1000-86400
+  var in24=evs.filter(function(e){return e.start>=cutoff})
+  var n=in24.length
+  var totalS=in24.reduce(function(a,e){return a+e.duration},0)
+  var peakPwr=0,sumCur=0
+  in24.forEach(function(e){if(e.peak_power>peakPwr)peakPwr=e.peak_power;sumCur+=e.peak_current})
+  var avgCur=n>0?sumCur/n:0
+  $('tx-count').textContent=n
+  $('tx-duration').textContent=totalS>=60?Math.floor(totalS/60)+'m '+Math.round(totalS%60)+'s':Math.round(totalS)+'s'
+  $('tx-peak-pwr').textContent=peakPwr>0?fmt(peakPwr,0)+' W':'—'
+  $('tx-avg-cur').textContent=avgCur>0?fmt(avgCur,1)+' A':'—'
+}).catch(function(){})}
+setInterval(upTx,5000); upTx()
+
+function renderFlowDiagram(d){
+  var el=document.getElementById('flow-svg');if(!el)return
+  var bv=d.battery_voltage||0,ba=d.battery_current||0,sol=d.solar_voltage||0,chv=d.charger_voltage||0
+  var pw=d.power_watts||0,state=d.charger_state||''
+  var batPwr=Math.abs(bv*ba)
+  var sysLoad=bv*Math.abs(ba)
+  var charging=ba<-0.1,discharging=ba>0.1,idle=Math.abs(ba)<=0.1
+  var solarActive=sol>1
+  var animSpeed=Math.max(0.4,Math.min(2,batPwr/40))
+  var dur=(1/animSpeed).toFixed(2)+'s'
+  var arrCls=charging?'flow-arrow-chg':discharging?'flow-arrow-dchg':'flow-arrow-idle'
+  var chgPwr=chv>0?pw:0
+  var vb='0 0 520 180'
+  var nodes=[
+    {id:'solar',x:260,y:25,w:70,h:36,cls:'flow-node flow-node-solar',lbl:'Solar',val:fmt(sol,1)+' V'},
+    {id:'grid',x:100,y:72,w:70,h:36,cls:'flow-node flow-node-grid',lbl:'Grid',val:fmt(chv,2)+' V'},
+    {id:'charger',x:255,y:72,w:90,h:36,cls:'flow-node flow-node-charger',lbl:'Charger',val:fmt(chgPwr,1)+' W'},
+    {id:'battery',x:360,y:72,w:70,h:36,cls:'flow-node flow-node-battery',lbl:'Battery',val:fmt(bv,2)+' V',val2:(ba>=0?'+':'')+fmt(ba,2)+' A'},
+    {id:'system',x:455,y:72,w:55,h:36,cls:'flow-node flow-node-system',lbl:'System',val:fmt(sysLoad,1)+' W'}
+  ]
+  var arrows=[]
+  if(solarActive)arrows.push({path:'M 260 43 L 260 54',cls:arrCls,anim:charging||(chv>1)})
+  if(chv>1)arrows.push({path:'M 135 90 L 210 90',cls:arrCls,anim:charging})
+  arrows.push({path:'M 300 90 L 325 90',cls:arrCls,anim:charging})
+  arrows.push({path:'M 395 90 L 427 90',cls:arrCls,anim:discharging})
+  var s='<rect width="520" height="180" fill="transparent"/>'
+  arrows.forEach(function(a){
+    var anim=a.anim?' style="animation:flowDash '+dur+' linear infinite"':''
+    s+='<path d="'+a.path+'" class="flow-arrow '+a.cls+'" stroke-dasharray="8 12"'+anim+'/>'
+  })
+  var flowRef='flowShadow',textEnd='<'+'/text>',fillTxt='var(--text)',fillMuted='var(--muted)'
+  nodes.forEach(function(n){
+    var rx=8,ry=6
+    s+='<rect x="'+(n.x-n.w/2)+'" y="'+(n.y-n.h/2)+'" width="'+n.w+'" height="'+n.h+'" rx="'+rx+'" ry="'+ry+'" class="'+n.cls+'" filter=\'url(#'+flowRef+')\'/>'
+    s+='<text x="'+n.x+'" y="'+(n.y-4)+'" text-anchor="middle" font-size="9" font-family="monospace" fill="'+fillTxt+'">'+n.lbl+textEnd
+    s+='<text x="'+n.x+'" y="'+(n.y+8)+'" text-anchor="middle" font-size="10" font-family="monospace" font-weight="700" fill="'+fillTxt+'">'+n.val+textEnd
+    if(n.val2)s+='<text x="'+n.x+'" y="'+(n.y+18)+'" text-anchor="middle" font-size="9" font-family="monospace" fill="'+fillMuted+'">'+n.val2+textEnd
+  })
+  s='<defs><filter id="flowShadow"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity=".15"/></filter></defs>'+s
+  el.outerHTML='<svg id="flow-svg" viewBox="'+vb+'" xmlns="http://www.w3.org/2000/svg">'+s+'</svg>'
+}
 setInterval(function(){
   var s=Math.round((Date.now()-lastUpd)/1000)
   var e=$('ts-disp'); if(!e)return
@@ -1087,10 +1219,14 @@ function loadCharts(){
   var cutoff=Date.now()-currentH*3600000
   var batN=Math.round(currentH*3600/pollIvl*1.15)+50
   var chgN=Math.round(currentH*7200)+100
-  fetch('/api/history?n='+batN)
-    .then(function(r){return r.json()})
-    .then(function(d){renderBatChart(d.filter(function(p){return new Date(p.ts).getTime()>=cutoff}))})
-    .catch(function(){})
+  Promise.all([
+    fetch('/api/history?n='+batN).then(function(r){return r.json()}),
+    fetch('/api/tx_events?n=200').then(function(r){return r.json()})
+  ]).then(function(res){
+    var hist=res[0].filter(function(p){return new Date(p.ts).getTime()>=cutoff})
+    var txEvs=res[1].filter(function(e){return e.start*1000>=cutoff})
+    renderBatChart(hist,txEvs)
+  }).catch(function(){})
   fetch('/api/charger/history?n='+chgN)
     .then(function(r){return r.json()})
     .then(function(d){renderChgChart(d.filter(function(p){return new Date(p.ts).getTime()>=cutoff}))})
@@ -1157,8 +1293,9 @@ function timeTicks(t0,t1,tspan,pl,cw,chartTop,chartH,labelY,fsTick){
 
 function sma(arr,w){return arr.map(function(_,i){var a=0,c=0;for(var j=Math.max(0,i-w+1);j<=i;j++){a+=arr[j];c++}return a/c})}
 
-function renderBatChart(data){
+function renderBatChart(data,txEvs){
   var el=$('bat-chart'); if(!el) return
+  txEvs=txEvs||[]
   if(!data||data.length<2){
     el.innerHTML="<text x='50%' y='50%' font-size='14' font-family='monospace' text-anchor='middle' dominant-baseline='middle' style='fill:var(--muted)'>Collecting data\u2026</text>"
     return
@@ -1192,6 +1329,14 @@ function renderBatChart(data){
   for(var i=0;i<=4;i++) s+="<text x='"+(W-PR+6)+"' y='"+(PT+CH*i/4+5).toFixed(1)+"'>"+(100-25*i)+"%</text>"
   s+="</g>"
   s+=timeTicks(t0,t1,tspan,PL,CW,PT,CH,H-8,fsTick)
+  txEvs.forEach(function(e){
+    var x=PL+(e.start*1000-t0)/tspan*CW
+    if(x>=PL&&x<=PL+CW){
+      s+="<g><line x1='"+x.toFixed(1)+"' y1='"+PT+"' x2='"+x.toFixed(1)+"' y2='"+(PT+CH)+"' stroke='var(--ca)' stroke-width='1' stroke-dasharray='2,3' opacity='0.7'/>"
+      s+="<text x='"+x.toFixed(1)+"' y='"+(PT-4)+"' text-anchor='middle' font-size='12' fill='var(--ca)'>\u26a1</text>"
+      s+="<title>TX Event\nDuration: "+e.duration.toFixed(1)+" s\nPeak Power: "+e.peak_power.toFixed(0)+" W</title></g>"
+    }
+  })
   var pts=data.map(function(d,i){return xp(i)+','+yv(d.v)}).join(' ')
   s+="<polyline fill='none' stroke='var(--cv)' stroke-width='"+sw+"' stroke-linecap='round' stroke-linejoin='round' points='"+pts+"'/>"
   pts=data.map(function(d,i){return xp(i)+','+ys(d.soc)}).join(' ')

@@ -2,6 +2,7 @@
 #include "battery_data.hpp"
 #include "ble_types.hpp"
 #include "pwrgate.hpp"
+#include "tx_events.hpp"
 #include <deque>
 #include <functional>
 #include <mutex>
@@ -32,16 +33,29 @@ public:
     std::optional<PwrGateSnapshot> latest_pwrgate() const;
     std::vector<PwrGateSnapshot>   pwrgate_history(size_t n = 0) const;
 
+    std::vector<TxEvent> tx_events(size_t n = 100) const;
+
     void        set_purchase_date(const std::string& d);
     std::string purchase_date() const;
 
 private:
+    void process_tx_detection(const BatterySnapshot& snap);
+    void process_tx_detection(const PwrGateSnapshot& snap);
+
     mutable std::mutex mu_;
     std::deque<BatterySnapshot> ring_;
     std::deque<PwrGateSnapshot> pwrgate_ring_;
+    std::deque<TxEvent> tx_events_;
+    static constexpr size_t TX_EVENTS_MAX = 100;
     size_t max_history_;
     std::vector<Observer> observers_;
     std::string ble_state_{"disconnected"};
     std::string purchase_date_;
     std::vector<DiscoveredDevice> discovered_;
+
+    // Active TX event state
+    bool tx_active_{false};
+    double tx_start_time_{0};
+    double tx_peak_current_{0};
+    double tx_peak_power_{0};
 };
