@@ -41,6 +41,9 @@ public:
 private:
     void process_tx_detection(const BatterySnapshot& snap);
     void process_tx_detection(const PwrGateSnapshot& snap);
+    // Call only while holding mu_
+    std::optional<PwrGateSnapshot> latest_pwrgate_locked() const;
+    std::optional<BatterySnapshot> latest_locked() const;
 
     mutable std::mutex mu_;
     std::deque<BatterySnapshot> ring_;

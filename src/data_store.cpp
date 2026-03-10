@@ -45,7 +45,7 @@ static void run_tx_detection(bool& tx_active, double& tx_start_time,
 void DataStore::process_tx_detection(const BatterySnapshot& snap) {
     if (!snap.valid) return;
     double now = static_cast<double>(std::chrono::system_clock::to_time_t(snap.timestamp));
-    auto pg = latest_pwrgate();
+    auto pg = latest_pwrgate_locked();
     double chg_a = pg ? pg->bat_a : 0;
     double chg_v = pg ? pg->bat_v : snap.total_voltage_v;
     run_tx_detection(tx_active_, tx_start_time_, tx_peak_current_, tx_peak_power_,
@@ -55,7 +55,7 @@ void DataStore::process_tx_detection(const BatterySnapshot& snap) {
 void DataStore::process_tx_detection(const PwrGateSnapshot& snap) {
     if (!snap.valid) return;
     double now = static_cast<double>(std::chrono::system_clock::to_time_t(snap.timestamp));
-    auto bat = latest();
+    auto bat = latest_locked();
     double bat_cur = bat ? bat->current_a : 0;
     double bat_v = bat ? bat->total_voltage_v : snap.bat_v;
     run_tx_detection(tx_active_, tx_start_time_, tx_peak_current_, tx_peak_power_,
@@ -74,10 +74,14 @@ void DataStore::update(BatterySnapshot snap) {
     for (const auto& obs : observers_copy) obs(snap);
 }
 
-std::optional<BatterySnapshot> DataStore::latest() const {
-    std::lock_guard<std::mutex> lk(mu_);
+std::optional<BatterySnapshot> DataStore::latest_locked() const {
     if (ring_.empty()) return std::nullopt;
     return ring_.back();
+}
+
+std::optional<BatterySnapshot> DataStore::latest() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return latest_locked();
 }
 
 std::vector<BatterySnapshot> DataStore::history(size_t n) const {
@@ -146,10 +150,14 @@ void DataStore::update_pwrgate(PwrGateSnapshot snap) {
     while (pwrgate_ring_.size() > max_history_) pwrgate_ring_.pop_front();
 }
 
-std::optional<PwrGateSnapshot> DataStore::latest_pwrgate() const {
-    std::lock_guard<std::mutex> lk(mu_);
+std::optional<PwrGateSnapshot> DataStore::latest_pwrgate_locked() const {
     if (pwrgate_ring_.empty()) return std::nullopt;
     return pwrgate_ring_.back();
+}
+
+std::optional<PwrGateSnapshot> DataStore::latest_pwrgate() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return latest_pwrgate_locked();
 }
 
 std::vector<PwrGateSnapshot> DataStore::pwrgate_history(size_t n) const {
