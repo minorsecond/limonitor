@@ -804,22 +804,25 @@ details[open].card summary::before{content:'▾  '}
 html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--green);color:var(--green)}
 .chart-svg{width:100%;display:block;background:var(--chart-bg);border-radius:4px}
 /* ── Energy Flow Diagram ── */
-.flow-wrap{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1.1rem;margin-bottom:.7rem}
-.flow-diagram{width:100%;max-width:700px;margin:0 auto;display:block}
-.flow-diagram svg{width:100%;height:auto}
-.flow-node{transition:fill .2s,filter .2s}
-.flow-node-solar{fill:#fbbf24}
-.flow-node-grid{fill:#3b82f6}
-.flow-node-charger{fill:#6b7280}
-.flow-node-battery{fill:#22c55e}
-.flow-node-system{fill:#f8fafc}
-html.light .flow-node-system{fill:#e2e8f0}
-.flow-arrow-chg{stroke:#22c55e}
-.flow-arrow-dchg{stroke:#f97316}
-.flow-arrow-idle{stroke:#64748b}
-.flow-arrow{stroke-width:2;fill:none;stroke-linecap:round;transition:stroke .2s,opacity .2s}
-@keyframes flowDash{to{stroke-dashoffset:-20}}
-@media(max-width:640px){.flow-wrap{padding:.8rem}.flow-diagram{max-width:100%}}
+.flow-wrap{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1.4rem;margin-bottom:.7rem;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.flow-diagram{width:100%;max-width:720px;margin:0 auto;display:block}
+.flow-diagram svg{width:100%;height:auto;display:block}
+.flow-node{transition:fill .2s,opacity .2s;stroke:rgba(0,0,0,.08);stroke-width:1}
+.flow-node-solar{fill:#f59e0b}
+.flow-node-grid{fill:#2563eb}
+.flow-node-charger{fill:#4b5563}
+.flow-node-battery{fill:#16a34a}
+.flow-node-load{fill:#f1f5f9}
+html.light .flow-node-load{fill:#e2e8f0}
+.flow-node-inactive{opacity:.4}
+.flow-arrow-chg{stroke:#16a34a}
+.flow-arrow-dchg{stroke:#ea580c}
+.flow-arrow-idle{stroke:#94a3b8;opacity:.5}
+.flow-arrow{stroke-width:3;fill:none;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:6 6;transition:stroke .2s,opacity .2s}
+.flow-arrow-label{font-size:9px;font-weight:600;font-family:system-ui,sans-serif;fill:var(--text);stroke:var(--card);stroke-width:2px;paint-order:stroke fill}
+@keyframes flow{from{stroke-dashoffset:24}to{stroke-dashoffset:0}}
+.flow-arrow-anim{animation:flow linear infinite}
+@media(max-width:640px){.flow-wrap{padding:1rem}.flow-diagram{max-width:100%}}
 )HTML";
     o += ".main{display:flex;flex-direction:column;gap:.7rem}"
          "#bat-chart{height:200px}#chg-chart{height:180px}"
@@ -898,7 +901,7 @@ html.light .flow-node-system{fill:#e2e8f0}
 
     o += "<div class=\"flow-wrap\"><div class=\"card-title\">Energy Flow</div>"
          "<div id=\"flow-diagram\" class=\"flow-diagram\">"
-         "<svg id=\"flow-svg\" viewBox=\"0 0 520 180\" xmlns=\"http://www.w3.org/2000/svg\">"
+         "<svg id=\"flow-svg\" viewBox=\"0 0 720 200\" xmlns=\"http://www.w3.org/2000/svg\">"
          "<text x=\"50%\" y=\"50%\" fill=\"var(--muted)\" font-size=\"12\" font-family=\"monospace\""
          " text-anchor=\"middle\" dominant-baseline=\"middle\">Loading…</text>"
          "</svg></div></div>\n";
@@ -1139,9 +1142,11 @@ setInterval(upBat,5000); setInterval(upChg,5000)
 upBat(); upChg()
 
 function upFlow(){fetch('/api/flow').then(function(r){return r.json()}).then(function(d){
-  renderFlowDiagram(d)
+  lastFlowData=d;renderFlowDiagram(d)
 }).catch(function(){})}
+var lastFlowData=null
 setInterval(upFlow,3000); upFlow()
+window.addEventListener('resize',function(){if(lastFlowData)renderFlowDiagram(lastFlowData)})
 
 function upTx(){fetch('/api/tx_events').then(function(r){return r.json()}).then(function(evs){
   var cutoff=Date.now()/1000-86400
@@ -1161,42 +1166,64 @@ setInterval(upTx,5000); upTx()
 function renderFlowDiagram(d){
   var el=document.getElementById('flow-svg');if(!el)return
   var bv=d.battery_voltage||0,ba=d.battery_current||0,sol=d.solar_voltage||0,chv=d.charger_voltage||0
-  var pw=d.power_watts||0,state=d.charger_state||''
-  var batPwr=Math.abs(bv*ba)
+  var pw=d.power_watts||0
+  var batPwr=bv*ba
   var sysLoad=bv*Math.abs(ba)
   var charging=ba<-0.1,discharging=ba>0.1,idle=Math.abs(ba)<=0.1
   var solarActive=sol>1
-  var animSpeed=Math.max(0.4,Math.min(2,batPwr/40))
+  var animSpeed=Math.max(0.5,Math.min(2,Math.abs(batPwr)/50))
   var dur=(1/animSpeed).toFixed(2)+'s'
-  var arrCls=charging?'flow-arrow-chg':discharging?'flow-arrow-dchg':'flow-arrow-idle'
-  var chgPwr=chv>0?pw:0
-  var vb='0 0 520 180'
-  var nodes=[
-    {id:'solar',x:260,y:25,w:70,h:36,cls:'flow-node flow-node-solar',lbl:'Solar',val:fmt(sol,1)+' V'},
-    {id:'grid',x:100,y:72,w:70,h:36,cls:'flow-node flow-node-grid',lbl:'Grid',val:fmt(chv,2)+' V'},
-    {id:'charger',x:255,y:72,w:90,h:36,cls:'flow-node flow-node-charger',lbl:'Charger',val:fmt(chgPwr,1)+' W'},
-    {id:'battery',x:360,y:72,w:70,h:36,cls:'flow-node flow-node-battery',lbl:'Battery',val:fmt(bv,2)+' V',val2:(ba>=0?'+':'')+fmt(ba,2)+' A'},
-    {id:'system',x:455,y:72,w:55,h:36,cls:'flow-node flow-node-system',lbl:'System',val:fmt(sysLoad,1)+' W'}
-  ]
-  var arrows=[]
-  if(solarActive)arrows.push({path:'M 260 43 L 260 54',cls:arrCls,anim:charging||(chv>1)})
-  if(chv>1)arrows.push({path:'M 135 90 L 210 90',cls:arrCls,anim:charging})
-  arrows.push({path:'M 300 90 L 325 90',cls:arrCls,anim:charging})
-  arrows.push({path:'M 395 90 L 427 90',cls:arrCls,anim:discharging})
-  var s='<rect width="520" height="180" fill="transparent"/>'
-  arrows.forEach(function(a){
-    var anim=a.anim?' style="animation:flowDash '+dur+' linear infinite"':''
-    s+='<path d="'+a.path+'" class="flow-arrow '+a.cls+'" stroke-dasharray="8 12"'+anim+'/>'
-  })
+  var chgCls='flow-arrow-chg',dchgCls='flow-arrow-dchg',idleCls='flow-arrow-idle'
+  var chgPwr=chv>0?(pw||0):0
+  var mobile=window.innerWidth<640
+  var vb=mobile?'0 0 200 420':'0 0 720 200'
+  var nodes,arrows
+  var loadAnim=discharging||(sysLoad>1)
+  var chgLbl=charging?(fmt(chgPwr,0)+' W in'):(fmt(chgPwr,0)+' W')
+  if(mobile){
+    nodes=[
+      {id:'solar',x:100,y:52,w:80,h:44,cls:'flow-node flow-node-solar',lbl:'Solar',val:fmt(sol,1)+' V',inactive:!solarActive},
+      {id:'grid',x:100,y:128,w:80,h:44,cls:'flow-node flow-node-grid',lbl:'Grid',val:fmt(chv,2)+' V',inactive:false},
+      {id:'charger',x:100,y:204,w:80,h:44,cls:'flow-node flow-node-charger',lbl:'Charger',val:chgLbl,inactive:false},
+      {id:'battery',x:100,y:280,w:92,h:58,cls:'flow-node flow-node-battery',lbl:'Battery',val:fmt(bv,2)+' V',val2:(ba>=0?'+':'')+fmt(ba,2)+' A',val2Cls:idle?'':charging?'flow-cur-chg':'flow-cur-dchg',inactive:false},
+      {id:'load',x:100,y:368,w:80,h:44,cls:'flow-node flow-node-load',lbl:'Load',val:fmt(sysLoad||0,1)+' W',inactive:false}
+    ]
+    arrows=[
+      {path:'M 100 74 L 100 102',cls:solarActive?chgCls:idleCls,anim:false,pwr:solarActive&&charging?fmt(chgPwr,0)+' W':'',mx:118,my:88},
+      {path:'M 100 150 L 100 182',cls:chgCls,anim:false,pwr:chgPwr>0?fmt(chgPwr,0)+' W':'',mx:118,my:166},
+      {path:'M 100 226 L 100 258',cls:chgCls,anim:false,pwr:charging?fmt(Math.abs(batPwr||0),0)+' W':'',mx:118,my:242},
+      {path:'M 100 302 L 100 346',cls:loadAnim?dchgCls:idleCls,anim:loadAnim,pwr:(sysLoad||0)>0?fmt(sysLoad||0,0)+' W':'',mx:118,my:324}
+    ]
+  }else{
+    nodes=[
+      {id:'solar',x:324,y:55,w:76,h:40,cls:'flow-node flow-node-solar',lbl:'Solar',val:fmt(sol,1)+' V',inactive:!solarActive},
+      {id:'grid',x:180,y:140,w:76,h:44,cls:'flow-node flow-node-grid',lbl:'Grid',val:fmt(chv,2)+' V',inactive:false},
+      {id:'charger',x:324,y:140,w:88,h:44,cls:'flow-node flow-node-charger',lbl:'Charger',val:chgLbl,inactive:false},
+      {id:'battery',x:468,y:140,w:92,h:58,cls:'flow-node flow-node-battery',lbl:'Battery',val:fmt(bv,2)+' V',val2:(ba>=0?'+':'')+fmt(ba,2)+' A',val2Cls:idle?'':charging?'flow-cur-chg':'flow-cur-dchg',inactive:false},
+      {id:'load',x:612,y:140,w:76,h:44,cls:'flow-node flow-node-load',lbl:'Load',val:fmt(sysLoad||0,1)+' W',inactive:false}
+    ]
+    arrows=[
+      {path:'M 324 75 L 324 118',cls:solarActive?chgCls:idleCls,anim:charging&&solarActive,pwr:solarActive&&charging?fmt(chgPwr,0)+' W':'',mx:324,my:96},
+      {path:'M 218 140 L 280 140',cls:chv>1?chgCls:idleCls,anim:charging&&chv>1,pwr:chv>1&&charging?fmt(chgPwr,0)+' W':'',mx:249,my:140},
+      {path:'M 368 140 L 422 140',cls:chgCls,anim:charging,pwr:charging?fmt(Math.abs(batPwr||0),0)+' W':'',mx:395,my:140},
+      {path:'M 514 140 L 574 140',cls:loadAnim?dchgCls:idleCls,anim:loadAnim,pwr:sysLoad>0?fmt(sysLoad||0,0)+' W':'',mx:544,my:140}
+    ]
+  }
   var flowRef='flowShadow',textEnd='<'+'/text>',fillTxt='var(--text)',fillMuted='var(--muted)'
-  nodes.forEach(function(n){
-    var rx=8,ry=6
-    s+='<rect x="'+(n.x-n.w/2)+'" y="'+(n.y-n.h/2)+'" width="'+n.w+'" height="'+n.h+'" rx="'+rx+'" ry="'+ry+'" class="'+n.cls+'" filter=\'url(#'+flowRef+')\'/>'
-    s+='<text x="'+n.x+'" y="'+(n.y-4)+'" text-anchor="middle" font-size="9" font-family="monospace" fill="'+fillTxt+'">'+n.lbl+textEnd
-    s+='<text x="'+n.x+'" y="'+(n.y+8)+'" text-anchor="middle" font-size="10" font-family="monospace" font-weight="700" fill="'+fillTxt+'">'+n.val+textEnd
-    if(n.val2)s+='<text x="'+n.x+'" y="'+(n.y+18)+'" text-anchor="middle" font-size="9" font-family="monospace" fill="'+fillMuted+'">'+n.val2+textEnd
+  var defs='<defs><filter id="flowShadow"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity=".1"/></filter></defs>'
+  var s=defs+'<rect width="'+(mobile?200:720)+'" height="'+(mobile?420:200)+'" fill="transparent"/>'
+  arrows.forEach(function(a){
+    var ac=a.anim?' flow-arrow-anim" style="animation-duration:'+dur+'"':''
+    s+='<path d="'+a.path+'" class="flow-arrow '+a.cls+ac+'"/>'
+    if(a.pwr)s+='<text x="'+a.mx+'" y="'+(a.my+4)+'" text-anchor="'+(mobile?'start':'middle')+'" class="flow-arrow-label">'+a.pwr+textEnd
   })
-  s='<defs><filter id="flowShadow"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity=".15"/></filter></defs>'+s
+  nodes.forEach(function(n){
+    var rx=12,cls=n.cls+(n.inactive?' flow-node-inactive':'')
+    s+='<rect x="'+(n.x-n.w/2)+'" y="'+(n.y-n.h/2)+'" width="'+n.w+'" height="'+n.h+'" rx="'+rx+'" class="'+cls+'" filter=\'url(#'+flowRef+')\'/>'
+    s+='<text x="'+n.x+'" y="'+(n.y-6)+'" text-anchor="middle" font-size="8" font-family="system-ui,sans-serif" font-weight="500" fill="'+fillMuted+'">'+n.lbl+textEnd
+    s+='<text x="'+n.x+'" y="'+(n.y+10)+'" text-anchor="middle" font-size="11" font-family="system-ui,sans-serif" font-weight="600" fill="'+fillTxt+'">'+n.val+textEnd
+    if(n.val2){var curFill=n.val2Cls==='flow-cur-chg'?'var(--green)':n.val2Cls==='flow-cur-dchg'?'var(--orange)':fillMuted;s+='<text x="'+n.x+'" y="'+(n.y+24)+'" text-anchor="middle" font-size="9" font-family="system-ui,sans-serif" fill="'+curFill+'">'+n.val2+textEnd}
+  })
   el.outerHTML='<svg id="flow-svg" viewBox="'+vb+'" xmlns="http://www.w3.org/2000/svg">'+s+'</svg>'
 }
 setInterval(function(){
