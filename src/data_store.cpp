@@ -44,7 +44,6 @@ static void run_tx_detection(bool& tx_active, double& tx_start_time,
 
 void DataStore::process_tx_detection(const BatterySnapshot& snap) {
     if (!snap.valid) return;
-    latest_battery_current_ = snap.current_a;
     double now = static_cast<double>(std::chrono::system_clock::to_time_t(snap.timestamp));
     auto pg = latest_pwrgate();
     double chg_a = pg ? pg->bat_a : 0;
@@ -55,7 +54,6 @@ void DataStore::process_tx_detection(const BatterySnapshot& snap) {
 
 void DataStore::process_tx_detection(const PwrGateSnapshot& snap) {
     if (!snap.valid) return;
-    latest_charger_bat_a_ = snap.bat_a;
     double now = static_cast<double>(std::chrono::system_clock::to_time_t(snap.timestamp));
     auto bat = latest();
     double bat_cur = bat ? bat->current_a : 0;
