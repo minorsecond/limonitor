@@ -812,14 +812,15 @@ html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--gre
 .flow-node-grid{fill:#2563eb}
 .flow-node-charger{fill:#4b5563}
 .flow-node-battery{fill:#16a34a}
-.flow-node-load{fill:#f1f5f9}
+.flow-node-load{fill:#252530}
 html.light .flow-node-load{fill:#e2e8f0}
-.flow-node-inactive{opacity:.4}
+.flow-node-inactive{opacity:.45}
 .flow-arrow-chg{stroke:#16a34a}
 .flow-arrow-dchg{stroke:#ea580c}
 .flow-arrow-idle{stroke:#94a3b8;opacity:.5}
 .flow-arrow{stroke-width:3;fill:none;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:6 6;transition:stroke .2s,opacity .2s}
-.flow-arrow-label{font-size:9px;font-weight:600;font-family:system-ui,sans-serif;fill:var(--text);stroke:var(--card);stroke-width:2px;paint-order:stroke fill}
+.flow-arrow-solar{stroke-width:2}
+.flow-arrow-label{font-size:9px;font-weight:600;font-family:system-ui,sans-serif}
 @keyframes flow{from{stroke-dashoffset:24}to{stroke-dashoffset:0}}
 .flow-arrow-anim{animation:flow linear infinite}
 @media(max-width:640px){.flow-wrap{padding:1rem}.flow-diagram{max-width:100%}}
@@ -982,6 +983,8 @@ html.light .flow-node-load{fill:#e2e8f0}
          "<table class=\"dt\">\n"
          "<tr><td>TX events</td><td id=\"tx-count\">—</td></tr>"
          "<tr><td>Total TX time</td><td id=\"tx-duration\">—</td></tr>"
+         "<tr><td>Duty cycle</td><td id=\"tx-duty\">—</td></tr>"
+         "<tr><td>Energy used</td><td id=\"tx-energy\">—</td></tr>"
          "<tr><td>Peak TX power</td><td id=\"tx-peak-pwr\">—</td></tr>"
          "<tr><td>Avg TX current</td><td id=\"tx-avg-cur\">—</td></tr>"
          "</table></div>\n";
@@ -1153,11 +1156,18 @@ function upTx(){fetch('/api/tx_events').then(function(r){return r.json()}).then(
   var in24=evs.filter(function(e){return e.start>=cutoff})
   var n=in24.length
   var totalS=in24.reduce(function(a,e){return a+e.duration},0)
-  var peakPwr=0,sumCur=0
-  in24.forEach(function(e){if(e.peak_power>peakPwr)peakPwr=e.peak_power;sumCur+=e.peak_current})
+  var peakPwr=0,sumCur=0,energyWh=0
+  in24.forEach(function(e){
+    if(e.peak_power>peakPwr)peakPwr=e.peak_power
+    sumCur+=e.peak_current
+    energyWh+=e.peak_power*e.duration/3600
+  })
   var avgCur=n>0?sumCur/n:0
-  $('tx-count').textContent=n
-  $('tx-duration').textContent=totalS>=60?Math.floor(totalS/60)+'m '+Math.round(totalS%60)+'s':Math.round(totalS)+'s'
+  var dutyCycle=totalS/864
+  $('tx-count').textContent=n>0?n:'—'
+  $('tx-duration').textContent=totalS>0?(totalS>=60?Math.floor(totalS/60)+'m '+Math.round(totalS%60)+'s':Math.round(totalS)+'s'):'—'
+  $('tx-duty').textContent=dutyCycle>0?dutyCycle.toFixed(2)+' %':'—'
+  $('tx-energy').textContent=energyWh>0?energyWh.toFixed(2)+' Wh':'—'
   $('tx-peak-pwr').textContent=peakPwr>0?fmt(peakPwr,0)+' W':'—'
   $('tx-avg-cur').textContent=avgCur>0?fmt(avgCur,1)+' A':'—'
 }).catch(function(){})}
@@ -1179,50 +1189,64 @@ function renderFlowDiagram(d){
   var vb=mobile?'0 0 200 420':'0 0 720 200'
   var nodes,arrows
   var loadAnim=discharging||(sysLoad>1)
-  var chgLbl=charging?(fmt(chgPwr,0)+' W in'):(fmt(chgPwr,0)+' W')
+  var chgNodeLbl=charging?'Charging':'Charger'
+  var chgNodeVal=fmt(chgPwr||0,0)+' W'
+  var isDark=!document.documentElement.classList.contains('light')
+  var pillBg=isDark?'rgba(0,0,0,0.55)':'rgba(255,255,255,0.82)'
+  var chgColor=isDark?'#4ade80':'#16a34a'
+  var dchgColor=isDark?'#fb923c':'#ea580c'
+  var wFill='#fff',wMuted='rgba(255,255,255,0.7)'
+  var flowRef='flowShadow',textEnd='<'+'/text>',fillTxt='var(--text)',fillMuted='var(--muted)'
   if(mobile){
     nodes=[
-      {id:'solar',x:100,y:52,w:80,h:44,cls:'flow-node flow-node-solar',lbl:'Solar',val:fmt(sol,1)+' V',inactive:!solarActive},
-      {id:'grid',x:100,y:128,w:80,h:44,cls:'flow-node flow-node-grid',lbl:'Grid',val:fmt(chv,2)+' V',inactive:false},
-      {id:'charger',x:100,y:204,w:80,h:44,cls:'flow-node flow-node-charger',lbl:'Charger',val:chgLbl,inactive:false},
-      {id:'battery',x:100,y:280,w:92,h:58,cls:'flow-node flow-node-battery',lbl:'Battery',val:fmt(bv,2)+' V',val2:(ba>=0?'+':'')+fmt(ba,2)+' A',val2Cls:idle?'':charging?'flow-cur-chg':'flow-cur-dchg',inactive:false},
-      {id:'load',x:100,y:368,w:80,h:44,cls:'flow-node flow-node-load',lbl:'Load',val:fmt(sysLoad||0,1)+' W',inactive:false}
+      {id:'solar',x:100,y:52,w:80,h:44,cls:'flow-node flow-node-solar',lbl:'Solar',val:fmt(sol,1)+' V',inactive:!solarActive,tf:wFill,lf:wMuted},
+      {id:'grid',x:100,y:128,w:80,h:44,cls:'flow-node flow-node-grid',lbl:'Grid',val:fmt(chv,2)+' V',inactive:false,tf:wFill,lf:wMuted},
+      {id:'charger',x:100,y:204,w:80,h:44,cls:'flow-node flow-node-charger',lbl:chgNodeLbl,val:chgNodeVal,inactive:false,tf:wFill,lf:wMuted},
+      {id:'battery',x:100,y:280,w:92,h:58,cls:'flow-node flow-node-battery',lbl:'Battery',val:fmt(bv,2)+' V',val2:(ba>=0?'+':'')+fmt(ba,2)+' A',val2Cls:idle?'':charging?'flow-cur-chg':'flow-cur-dchg',inactive:false,tf:wFill,lf:wMuted},
+      {id:'load',x:100,y:368,w:80,h:44,cls:'flow-node flow-node-load',lbl:'Load',val:fmt(sysLoad||0,1)+' W',inactive:false,tf:fillTxt,lf:fillMuted}
     ]
     arrows=[
-      {path:'M 100 74 L 100 102',cls:solarActive?chgCls:idleCls,anim:false,pwr:solarActive&&charging?fmt(chgPwr,0)+' W':'',mx:118,my:88},
-      {path:'M 100 150 L 100 182',cls:chgCls,anim:false,pwr:chgPwr>0?fmt(chgPwr,0)+' W':'',mx:118,my:166},
-      {path:'M 100 226 L 100 258',cls:chgCls,anim:false,pwr:charging?fmt(Math.abs(batPwr||0),0)+' W':'',mx:118,my:242},
+      {path:'M 100 74 L 100 102',cls:(solarActive?chgCls:idleCls)+' flow-arrow-solar',anim:charging&&solarActive,pwr:solarActive&&charging?fmt(chgPwr,0)+' W':'',mx:118,my:88},
+      {path:'M 100 150 L 100 182',cls:chv>1?chgCls:idleCls,anim:charging&&chv>1,pwr:chv>1&&charging?fmt(chgPwr,0)+' W':'',mx:118,my:166},
+      {path:'M 100 226 L 100 258',cls:chgCls,anim:charging,pwr:charging?fmt(Math.abs(batPwr||0),0)+' W':'',mx:118,my:242},
       {path:'M 100 302 L 100 346',cls:loadAnim?dchgCls:idleCls,anim:loadAnim,pwr:(sysLoad||0)>0?fmt(sysLoad||0,0)+' W':'',mx:118,my:324}
     ]
   }else{
     nodes=[
-      {id:'solar',x:324,y:55,w:76,h:40,cls:'flow-node flow-node-solar',lbl:'Solar',val:fmt(sol,1)+' V',inactive:!solarActive},
-      {id:'grid',x:180,y:140,w:76,h:44,cls:'flow-node flow-node-grid',lbl:'Grid',val:fmt(chv,2)+' V',inactive:false},
-      {id:'charger',x:324,y:140,w:88,h:44,cls:'flow-node flow-node-charger',lbl:'Charger',val:chgLbl,inactive:false},
-      {id:'battery',x:468,y:140,w:92,h:58,cls:'flow-node flow-node-battery',lbl:'Battery',val:fmt(bv,2)+' V',val2:(ba>=0?'+':'')+fmt(ba,2)+' A',val2Cls:idle?'':charging?'flow-cur-chg':'flow-cur-dchg',inactive:false},
-      {id:'load',x:612,y:140,w:76,h:44,cls:'flow-node flow-node-load',lbl:'Load',val:fmt(sysLoad||0,1)+' W',inactive:false}
+      {id:'solar',x:324,y:55,w:76,h:40,cls:'flow-node flow-node-solar',lbl:'Solar',val:fmt(sol,1)+' V',inactive:!solarActive,tf:wFill,lf:wMuted},
+      {id:'grid',x:180,y:140,w:76,h:44,cls:'flow-node flow-node-grid',lbl:'Grid',val:fmt(chv,2)+' V',inactive:false,tf:wFill,lf:wMuted},
+      {id:'charger',x:324,y:140,w:88,h:44,cls:'flow-node flow-node-charger',lbl:chgNodeLbl,val:chgNodeVal,inactive:false,tf:wFill,lf:wMuted},
+      {id:'battery',x:468,y:140,w:92,h:58,cls:'flow-node flow-node-battery',lbl:'Battery',val:fmt(bv,2)+' V',val2:(ba>=0?'+':'')+fmt(ba,2)+' A',val2Cls:idle?'':charging?'flow-cur-chg':'flow-cur-dchg',inactive:false,tf:wFill,lf:wMuted},
+      {id:'load',x:612,y:140,w:76,h:44,cls:'flow-node flow-node-load',lbl:'Load',val:fmt(sysLoad||0,1)+' W',inactive:false,tf:fillTxt,lf:fillMuted}
     ]
     arrows=[
-      {path:'M 324 75 L 324 118',cls:solarActive?chgCls:idleCls,anim:charging&&solarActive,pwr:solarActive&&charging?fmt(chgPwr,0)+' W':'',mx:324,my:96},
-      {path:'M 218 140 L 280 140',cls:chv>1?chgCls:idleCls,anim:charging&&chv>1,pwr:chv>1&&charging?fmt(chgPwr,0)+' W':'',mx:249,my:140},
-      {path:'M 368 140 L 422 140',cls:chgCls,anim:charging,pwr:charging?fmt(Math.abs(batPwr||0),0)+' W':'',mx:395,my:140},
-      {path:'M 514 140 L 574 140',cls:loadAnim?dchgCls:idleCls,anim:loadAnim,pwr:sysLoad>0?fmt(sysLoad||0,0)+' W':'',mx:544,my:140}
+      {path:'M 324 75 L 324 118',cls:(solarActive?chgCls:idleCls)+' flow-arrow-solar',anim:charging&&solarActive,pwr:solarActive&&charging?fmt(chgPwr,0)+' W':'',mx:336,my:96},
+      {path:'M 218 140 L 280 140',cls:chv>1?chgCls:idleCls,anim:charging&&chv>1,pwr:chv>1&&charging?fmt(chgPwr,0)+' W':'',mx:249,my:133},
+      {path:'M 368 140 L 422 140',cls:chgCls,anim:charging,pwr:charging?fmt(Math.abs(batPwr||0),0)+' W':'',mx:395,my:133},
+      {path:'M 514 140 L 574 140',cls:loadAnim?dchgCls:idleCls,anim:loadAnim,pwr:sysLoad>0?fmt(sysLoad||0,0)+' W':'',mx:544,my:133}
     ]
   }
-  var flowRef='flowShadow',textEnd='<'+'/text>',fillTxt='var(--text)',fillMuted='var(--muted)'
-  var defs='<defs><filter id="flowShadow"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity=".1"/></filter></defs>'
+  var defs='<defs><filter id="flowShadow"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity=".12"/></filter></defs>'
   var s=defs+'<rect width="'+(mobile?200:720)+'" height="'+(mobile?420:200)+'" fill="transparent"/>'
   arrows.forEach(function(a){
     var ac=a.anim?' flow-arrow-anim" style="animation-duration:'+dur+'"':''
     s+='<path d="'+a.path+'" class="flow-arrow '+a.cls+ac+'"/>'
-    if(a.pwr)s+='<text x="'+a.mx+'" y="'+(a.my+4)+'" text-anchor="'+(mobile?'start':'middle')+'" class="flow-arrow-label">'+a.pwr+textEnd
+    if(a.pwr){
+      var lc=a.cls.indexOf(chgCls)>=0?chgColor:a.cls.indexOf(dchgCls)>=0?dchgColor:'#94a3b8'
+      var tw=a.pwr.length*5.5+10
+      s+='<rect x="'+(a.mx-tw/2).toFixed(1)+'" y="'+(a.my-2)+'" width="'+tw.toFixed(1)+'" height="13" rx="4" fill="'+pillBg+'"/>'
+      s+='<text x="'+a.mx+'" y="'+(a.my+9)+'" text-anchor="middle" font-size="9" font-weight="600" font-family="system-ui,sans-serif" fill="'+lc+'">'+a.pwr+textEnd
+    }
   })
   nodes.forEach(function(n){
     var rx=12,cls=n.cls+(n.inactive?' flow-node-inactive':'')
     s+='<rect x="'+(n.x-n.w/2)+'" y="'+(n.y-n.h/2)+'" width="'+n.w+'" height="'+n.h+'" rx="'+rx+'" class="'+cls+'" filter=\'url(#'+flowRef+')\'/>'
-    s+='<text x="'+n.x+'" y="'+(n.y-6)+'" text-anchor="middle" font-size="8" font-family="system-ui,sans-serif" font-weight="500" fill="'+fillMuted+'">'+n.lbl+textEnd
-    s+='<text x="'+n.x+'" y="'+(n.y+10)+'" text-anchor="middle" font-size="11" font-family="system-ui,sans-serif" font-weight="600" fill="'+fillTxt+'">'+n.val+textEnd
-    if(n.val2){var curFill=n.val2Cls==='flow-cur-chg'?'var(--green)':n.val2Cls==='flow-cur-dchg'?'var(--orange)':fillMuted;s+='<text x="'+n.x+'" y="'+(n.y+24)+'" text-anchor="middle" font-size="9" font-family="system-ui,sans-serif" fill="'+curFill+'">'+n.val2+textEnd}
+    s+='<text x="'+n.x+'" y="'+(n.y-6)+'" text-anchor="middle" font-size="8" font-family="system-ui,sans-serif" font-weight="500" fill="'+(n.lf||fillMuted)+'">'+n.lbl+textEnd
+    s+='<text x="'+n.x+'" y="'+(n.y+10)+'" text-anchor="middle" font-size="11" font-family="system-ui,sans-serif" font-weight="600" fill="'+(n.tf||fillTxt)+'">'+n.val+textEnd
+    if(n.val2){
+      var curFill=n.val2Cls==='flow-cur-chg'?'var(--green)':n.val2Cls==='flow-cur-dchg'?'var(--orange)':fillMuted
+      s+='<text x="'+n.x+'" y="'+(n.y+24)+'" text-anchor="middle" font-size="9" font-family="system-ui,sans-serif" fill="'+curFill+'">'+n.val2+textEnd
+    }
   })
   el.outerHTML='<svg id="flow-svg" viewBox="'+vb+'" xmlns="http://www.w3.org/2000/svg">'+s+'</svg>'
 }
