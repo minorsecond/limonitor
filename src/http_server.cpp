@@ -688,7 +688,9 @@ html{transition:background-color .2s;-webkit-tap-highlight-color:transparent}
 body{font-family:'SF Mono',Menlo,Consolas,monospace;background:var(--bg);color:var(--text);font-size:13px;
   transition:background-color .2s,color .15s}
 a{color:var(--green);text-decoration:none}a:hover{text-decoration:underline}
-.wrap{max-width:1100px;margin:0 auto;padding:1.4rem;padding-bottom:max(1.4rem,env(safe-area-inset-bottom))}
+.wrap{max-width:1100px;margin:0 auto;padding:1.4rem;
+  padding-top:max(1.4rem,env(safe-area-inset-top));
+  padding-bottom:max(2.5rem,env(safe-area-inset-bottom))}
 /* ── Header ── */
 header{display:flex;align-items:center;justify-content:space-between;margin-bottom:1.2rem;flex-wrap:wrap;gap:.6rem}
 @media(max-width:640px){header{flex-direction:column;align-items:flex-start;gap:.8rem}}
@@ -700,7 +702,8 @@ h1{color:var(--green);font-size:1.7rem;letter-spacing:.2em;font-weight:700}
 /* ── Stat cards ── */
 .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:.7rem;margin-bottom:.7rem}
 @media(max-width:560px){.stats{grid-template-columns:repeat(2,1fr)}.stat{padding:1rem}}
-@media(max-width:640px){body{font-size:14px}.wrap{padding:1rem}.card{padding:1rem}}
+@media(max-width:640px){body{font-size:14px}.wrap{padding:1rem;padding-top:max(1rem,env(safe-area-inset-top))}.card{padding:1rem}
+.stat-lbl{font-size:.7rem}.stat-sub{font-size:.78rem}.sv{font-size:2.2rem}}}
 .stat{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.9rem 1rem;
   transition:background-color .2s,border-color .2s}
 .stat-lbl{font-size:.6rem;text-transform:uppercase;letter-spacing:.14em;color:var(--muted)}
@@ -765,8 +768,11 @@ details[open].card summary::before{content:'▾  '}
 html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--green);color:var(--green)}
 .chart-svg{width:100%;display:block;background:var(--chart-bg);border-radius:4px}
 )HTML";
-    o += "#bat-chart{height:200px}#chg-chart{height:180px}"
-         "@media(max-width:640px){#bat-chart{height:260px}#chg-chart{height:220px}"
+    o += ".main{display:flex;flex-direction:column;gap:.7rem}"
+         "#bat-chart{height:200px}#chg-chart{height:180px}"
+         "@media(max-width:640px){.main{display:flex;flex-direction:column}"
+         ".stats{order:-2;margin-bottom:.5rem}.card-bat{order:-1}.card-chg{order:0}.col2{order:1}"
+         "#bat-chart{height:280px}#chg-chart{height:260px}.card.card-bat,.card.card-chg{padding-bottom:1.5rem}"
          ".chart-svg{preserve-aspect-ratio:none}}";
     o += R"HTML(
 </style></head><body><div class="wrap">
@@ -796,7 +802,7 @@ html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--gre
     o += "<button id=\"thm-btn\" class=\"btn\" onclick=\"toggleTheme()\" title=\"Toggle theme\">&#9788;</button>";
     o += "</div></header>\n";
 
-    o += "<div class=\"stats\">\n";
+    o += "<main class=\"main\"><div class=\"stats\">\n";
 
     // Voltage
     snprintf(buf, sizeof(buf),
@@ -837,7 +843,7 @@ html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--gre
 
     o += "</div>\n"; // .stats
 
-    o += "<div class=\"card\"><div class=\"card-title\">Battery History</div>"
+    o += "<div class=\"card card-bat\"><div class=\"card-title\">Battery History</div>"
          "<svg id=\"bat-chart\" class=\"chart-svg\" viewBox=\"0 0 800 200\">"
          "<text x=\"50%\" y=\"50%\" fill=\"#444\" font-size=\"12\" font-family=\"monospace\""
          " text-anchor=\"middle\" dominant-baseline=\"middle\">Loading\xe2\x80\xa6</text>"
@@ -911,7 +917,7 @@ html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--gre
 
     o += "</div>\n"; // .col2
 
-    o += "<div class=\"card\"><div class=\"card-title\">Charger History</div>"
+    o += "<div class=\"card card-chg\"><div class=\"card-title\">Charger History</div>"
          "<svg id=\"chg-chart\" class=\"chart-svg\" viewBox=\"0 0 800 180\">"
          "<text x=\"50%\" y=\"50%\" fill=\"#444\" font-size=\"12\" font-family=\"monospace\""
          " text-anchor=\"middle\" dominant-baseline=\"middle\">Loading\xe2\x80\xa6</text>"
@@ -975,7 +981,7 @@ html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--gre
 </table></details>
 )";
 
-    o += "<div class=\"footer\">API: "
+    o += "</main><div class=\"footer\">API: "
          "<a href=\"/api/status\">/api/status</a> &nbsp;"
          "<a href=\"/api/cells\">/api/cells</a> &nbsp;"
          "<a href=\"/api/history\">/api/history</a> &nbsp;"
@@ -1091,35 +1097,61 @@ function loadCharts(){
     .catch(function(){})
 }
 
-function timeTicks(t0,t1,tspan,pl,cw,chartTop,chartH,labelY){
+function isMobile(){return window.innerWidth<640}
+function chartDims(el,hBat,hChg){
+  if(!isMobile())return null
+  var w=el?el.clientWidth:0
+  if(!w)w=Math.max(340,window.innerWidth-32)
+  return{w:Math.min(500,w),hBat:hBat||280,hChg:hChg||260}
+}
+
+function timeTicks(t0,t1,tspan,pl,cw,chartTop,chartH,labelY,fsTick){
   if(tspan<1000) return ''
+  var fs=fsTick||10
   var ss=tspan/1000
   var ts=ss<=600?120:ss<=1800?300:ss<=5400?900:ss<=21600?3600:ss<=86400?14400:43200
   var tms=ts*1000,firstTk=Math.ceil(t0/tms)*tms
   var multi=new Date(t0).toDateString()!==new Date(t1).toDateString()
   function pad(n){return n.toString().padStart(2,'0')}
-  function fmtT(t){
+  function fmtT(t,prevDay){
     var d=new Date(t),h=pad(d.getHours()),m=pad(d.getMinutes())
-    return (multi&&h==='00'&&m==='00') ? pad(d.getMonth()+1)+'/'+pad(d.getDate()) : h+':'+m
+    var ds=(d.getMonth()+1)+'/'+d.getDate()
+    if(multi&&h==='00'&&m==='00') return ds
+    if(multi&&prevDay!==d.toDateString()) return ds+' '+h+':'+m
+    return h+':'+m
   }
-  function fmtEdge(t){
-    var d=new Date(t),h=pad(d.getHours()),m=pad(d.getMinutes())
-    return multi ? pad(d.getMonth()+1)+'/'+pad(d.getDate())+' '+h+':'+m : h+':'+m
+  function fmtStart(t,short){
+    var d=new Date(t)
+    if(short) return multi ? (d.getMonth()+1)+'/'+d.getDate() : pad(d.getHours())+':'+pad(d.getMinutes())
+    return multi ? (d.getMonth()+1)+'/'+d.getDate()+' '+pad(d.getHours())+':'+pad(d.getMinutes()) : pad(d.getHours())+':'+pad(d.getMinutes())
   }
+  var minGap=Math.max(36,fs*2.8)
+  var firstTkX=firstTk<t1?pl+(firstTk-t0)/tspan*cw:pl+cw
+  var firstTkClose=firstTkX<pl+minGap*2
+  var startLbl=fmtStart(t0,firstTkClose)
+  var startW=Math.max(minGap,startLbl.length*fs*0.7)
   var s="<g stroke='var(--chart-grid)' stroke-width='1' stroke-dasharray='2,4'>"
   for(var tk=firstTk;tk<t1;tk+=tms){
-    var f=(tk-t0)/tspan; if(f<0.02||f>0.98) continue
-    var x=(pl+f*cw).toFixed(1)
-    s+="<line x1='"+x+"' y1='"+chartTop+"' x2='"+x+"' y2='"+(chartTop+chartH)+"'/>"
+    var f=(tk-t0)/tspan; if(f<0.01||f>0.99) continue
+    s+="<line x1='"+(pl+f*cw).toFixed(1)+"' y1='"+chartTop+"' x2='"+(pl+f*cw).toFixed(1)+"' y2='"+(chartTop+chartH)+"'/>"
   }
-  s+="</g><g font-size='10' font-family='monospace' text-anchor='middle' style='fill:var(--chart-tick)'>"
+  s+="</g><g font-size='"+fs+"' font-family='monospace' style='fill:var(--chart-tick)'>"
+  s+="<text x='"+pl+"' y='"+labelY+"' text-anchor='start'>"+startLbl+"</text>"
+  var lastX=pl+startW,prevDay=new Date(t0).toDateString()
   for(var tk=firstTk;tk<t1;tk+=tms){
-    var f=(tk-t0)/tspan; if(f<0.02||f>0.98) continue
-    s+="<text x='"+(pl+f*cw).toFixed(1)+"' y='"+labelY+"'>"+fmtT(tk)+"</text>"
+    var f=(tk-t0)/tspan; if(f<0.01||f>0.99) continue
+    var x=pl+f*cw
+    if(x<lastX||x>pl+cw-minGap) continue
+    var d=new Date(tk)
+    var lbl=fmtT(tk,prevDay)
+    var gap=minGap
+    if(lbl.length>6) gap=Math.max(gap,fs*lbl.length*0.6)
+    lastX=x+gap
+    prevDay=d.toDateString()
+    s+="<text x='"+x.toFixed(1)+"' y='"+labelY+"' text-anchor='middle'>"+lbl+"</text>"
   }
+  s+="<text x='"+(pl+cw)+"' y='"+labelY+"' text-anchor='end'>now</text>"
   s+="</g>"
-  s+="<text x='"+pl+"' y='"+labelY+"' font-size='10' font-family='monospace' style='fill:var(--chart-tick)'>"+fmtEdge(t0)+"</text>"
-  s+="<text x='"+(pl+cw)+"' y='"+labelY+"' font-size='10' font-family='monospace' text-anchor='end' style='fill:var(--chart-tick)'>now</text>"
   return s
 }
 
@@ -1128,10 +1160,19 @@ function sma(arr,w){return arr.map(function(_,i){var a=0,c=0;for(var j=Math.max(
 function renderBatChart(data){
   var el=$('bat-chart'); if(!el) return
   if(!data||data.length<2){
-    el.innerHTML="<text x='50%' y='50%' font-size='12' font-family='monospace' text-anchor='middle' dominant-baseline='middle' style='fill:var(--muted)'>Collecting data\u2026</text>"
+    el.innerHTML="<text x='50%' y='50%' font-size='14' font-family='monospace' text-anchor='middle' dominant-baseline='middle' style='fill:var(--muted)'>Collecting data\u2026</text>"
     return
   }
-  var W=800,H=200,PL=52,PR=48,PT=16,PB=24,CW=W-PL-PR,CH=H-PT-PB
+  var md=chartDims(el,280,260)
+  var W,H,PL,PR,PT,PB,fs,fsTick,sw,sw2,legY
+  if(md){
+    W=md.w;H=md.hBat;PL=78;PR=72;PT=32;PB=42
+    fs=16;fsTick=14;sw=4;sw2=3;legY=22
+  }else{
+    W=800;H=200;PL=62;PR=52;PT=16;PB=24
+    fs=11;fsTick=10;sw=2;sw2=1.5;legY=13
+  }
+  var CW=W-PL-PR,CH=H-PT-PB
   var vlo=Infinity,vhi=-Infinity
   data.forEach(function(d){if(d.v<vlo)vlo=d.v;if(d.v>vhi)vhi=d.v})
   var vrng=Math.max(0.1,vhi-vlo);vlo-=vrng*.08;vhi+=vrng*.08;vrng=vhi-vlo
@@ -1140,37 +1181,47 @@ function renderBatChart(data){
   function xp(i){return (PL+(ts[i]-t0)/tspan*CW).toFixed(1)}
   function yv(v){return (PT+CH-(v-vlo)/vrng*CH).toFixed(1)}
   function ys(s){return (PT+CH-(s/100)*CH).toFixed(1)}
-  var s="<rect width='"+W+"' height='"+H+"' style='fill:var(--chart-bg)' rx='4'/>"
+  var s="<rect width='"+W+"' height='"+H+"' style='fill:var(--chart-bg)' rx='6'/>"
   s+="<g stroke='var(--chart-grid)' stroke-width='1'>"
   for(var i=0;i<=4;i++){var gy=(PT+CH*i/4).toFixed(1);s+="<line x1='"+PL+"' y1='"+gy+"' x2='"+(W-PR)+"' y2='"+gy+"'/>"}
   s+="</g>"
-  s+="<g font-size='11' font-family='monospace' text-anchor='end' style='fill:var(--cv)'>"
-  for(var i=0;i<=4;i++) s+="<text x='"+(PL-4)+"' y='"+(PT+CH*i/4+4).toFixed(1)+"'>"+(vhi-vrng*i/4).toFixed(2)+"V</text>"
+  s+="<g font-size='"+fs+"' font-family='monospace' text-anchor='end' style='fill:var(--cv)'>"
+  for(var i=0;i<=4;i++) s+="<text x='"+(PL-6)+"' y='"+(PT+CH*i/4+5).toFixed(1)+"'>"+(vhi-vrng*i/4).toFixed(2)+"V</text>"
   s+="</g>"
-  s+="<g font-size='11' font-family='monospace' text-anchor='start' style='fill:var(--csoc)'>"
-  for(var i=0;i<=4;i++) s+="<text x='"+(W-PR+4)+"' y='"+(PT+CH*i/4+4).toFixed(1)+"'>"+(100-25*i)+"%</text>"
+  s+="<g font-size='"+fs+"' font-family='monospace' text-anchor='start' style='fill:var(--csoc)'>"
+  for(var i=0;i<=4;i++) s+="<text x='"+(W-PR+6)+"' y='"+(PT+CH*i/4+5).toFixed(1)+"'>"+(100-25*i)+"%</text>"
   s+="</g>"
-  s+=timeTicks(t0,t1,tspan,PL,CW,PT,CH,H-5)
+  s+=timeTicks(t0,t1,tspan,PL,CW,PT,CH,H-8,fsTick)
   var pts=data.map(function(d,i){return xp(i)+','+yv(d.v)}).join(' ')
-  s+="<polyline fill='none' stroke='var(--cv)' stroke-width='2' points='"+pts+"'/>"
+  s+="<polyline fill='none' stroke='var(--cv)' stroke-width='"+sw+"' stroke-linecap='round' stroke-linejoin='round' points='"+pts+"'/>"
   pts=data.map(function(d,i){return xp(i)+','+ys(d.soc)}).join(' ')
-  s+="<polyline fill='none' stroke='var(--csoc)' stroke-width='1.5' stroke-dasharray='5,3' points='"+pts+"'/>"
-  s+="<g font-size='11' font-family='monospace'>"
-  s+="<line x1='60' y1='9' x2='74' y2='9' stroke='var(--cv)' stroke-width='2'/>"
-  s+="<text x='78' y='13' style='fill:var(--cv)'>Voltage</text>"
-  s+="<line x1='142' y1='9' x2='156' y2='9' stroke='var(--csoc)' stroke-width='1.5' stroke-dasharray='5,3'/>"
-  s+="<text x='160' y='13' style='fill:var(--csoc)'>SoC</text>"
+  s+="<polyline fill='none' stroke='var(--csoc)' stroke-width='"+sw2+"' stroke-dasharray='6,4' stroke-linecap='round' stroke-linejoin='round' points='"+pts+"'/>"
+  s+="<g font-size='"+fs+"' font-family='monospace'>"
+  s+="<line x1='"+(PL+8)+"' y1='"+legY+"' x2='"+(PL+28)+"' y2='"+legY+"' stroke='var(--cv)' stroke-width='"+sw+"' stroke-linecap='round'/>"
+  s+="<text x='"+(PL+34)+"' y='"+(legY+4)+"' style='fill:var(--cv)'>Voltage</text>"
+  s+="<line x1='"+(PL+110)+"' y1='"+legY+"' x2='"+(PL+130)+"' y2='"+legY+"' stroke='var(--csoc)' stroke-width='"+sw2+"' stroke-dasharray='6,4' stroke-linecap='round'/>"
+  s+="<text x='"+(PL+136)+"' y='"+(legY+4)+"' style='fill:var(--csoc)'>SoC</text>"
   s+="</g>"
+  el.setAttribute('viewBox','0 0 '+W+' '+H)
   el.innerHTML=s
 }
 
 function renderChgChart(data){
   var el=$('chg-chart'); if(!el) return
   if(!data||data.length<2){
-    el.innerHTML="<text x='50%' y='50%' font-size='12' font-family='monospace' text-anchor='middle' dominant-baseline='middle' style='fill:var(--muted)'>Collecting data\u2026</text>"
+    el.innerHTML="<text x='50%' y='50%' font-size='14' font-family='monospace' text-anchor='middle' dominant-baseline='middle' style='fill:var(--muted)'>Collecting data\u2026</text>"
     return
   }
-  var W=800,H=180,PL=52,PR=48,PT=16,PB=24,CW=W-PL-PR,CH=H-PT-PB
+  var md=chartDims(el,280,260)
+  var W,H,PL,PR,PT,PB,fs,fsTick,sw,sw2,legY
+  if(md){
+    W=md.w;H=md.hChg;PL=78;PR=72;PT=32;PB=42
+    fs=16;fsTick=14;sw=4;sw2=3;legY=22
+  }else{
+    W=800;H=180;PL=62;PR=52;PT=16;PB=24
+    fs=11;fsTick=10;sw=2;sw2=1.5;legY=13
+  }
+  var CW=W-PL-PR,CH=H-PT-PB
   var win=Math.max(3,Math.floor(data.length/60))
   var rawV=data.map(function(d){return d.bat_v})
   var rawA=data.map(function(d){return d.bat_a})
@@ -1189,38 +1240,40 @@ function renderChgChart(data){
   function xp(i){return (PL+(ts[i]-t0)/tspan*CW).toFixed(1)}
   function yv(v){return (PT+CH-(v-vlo)/vrng*CH).toFixed(1)}
   function ya(a){return (PT+CH-(a-alo)/arng*CH).toFixed(1)}
-  var s="<rect width='"+W+"' height='"+H+"' style='fill:var(--chart-bg)' rx='4'/>"
+  var s="<rect width='"+W+"' height='"+H+"' style='fill:var(--chart-bg)' rx='6'/>"
   s+="<g stroke='var(--chart-grid)' stroke-width='1'>"
   for(var i=0;i<=4;i++){var gy=(PT+CH*i/4).toFixed(1);s+="<line x1='"+PL+"' y1='"+gy+"' x2='"+(W-PR)+"' y2='"+gy+"'/>"}
   s+="</g>"
-  s+="<g font-size='11' font-family='monospace' text-anchor='end' style='fill:var(--cv)'>"
-  for(var i=0;i<=4;i++) s+="<text x='"+(PL-4)+"' y='"+(PT+CH*i/4+4).toFixed(1)+"'>"+(vhi-vrng*i/4).toFixed(2)+"V</text>"
+  s+="<g font-size='"+fs+"' font-family='monospace' text-anchor='end' style='fill:var(--cv)'>"
+  for(var i=0;i<=4;i++) s+="<text x='"+(PL-6)+"' y='"+(PT+CH*i/4+5).toFixed(1)+"'>"+(vhi-vrng*i/4).toFixed(2)+"V</text>"
   s+="</g>"
-  s+="<g font-size='11' font-family='monospace' text-anchor='start' style='fill:var(--ca)'>"
-  for(var i=0;i<=4;i++) s+="<text x='"+(W-PR+4)+"' y='"+(PT+CH*i/4+4).toFixed(1)+"'>"+(ahi-arng*i/4).toFixed(1)+"A</text>"
+  s+="<g font-size='"+fs+"' font-family='monospace' text-anchor='start' style='fill:var(--ca)'>"
+  for(var i=0;i<=4;i++) s+="<text x='"+(W-PR+6)+"' y='"+(PT+CH*i/4+5).toFixed(1)+"'>"+(ahi-arng*i/4).toFixed(1)+"A</text>"
   s+="</g>"
-  s+=timeTicks(t0,t1,tspan,PL,CW,PT,CH,H-5)
+  s+=timeTicks(t0,t1,tspan,PL,CW,PT,CH,H-8,fsTick)
   var pts=smoothV.map(function(v,i){return xp(i)+','+yv(v)}).join(' ')
-  s+="<polyline fill='none' stroke='var(--cv)' stroke-width='2' points='"+pts+"'/>"
+  s+="<polyline fill='none' stroke='var(--cv)' stroke-width='"+sw+"' stroke-linecap='round' stroke-linejoin='round' points='"+pts+"'/>"
   pts=smoothA.map(function(a,i){return xp(i)+','+ya(a)}).join(' ')
-  s+="<polyline fill='none' stroke='var(--ca)' stroke-width='1.5' stroke-dasharray='5,3' points='"+pts+"'/>"
+  s+="<polyline fill='none' stroke='var(--ca)' stroke-width='"+sw2+"' stroke-dasharray='6,4' stroke-linecap='round' stroke-linejoin='round' points='"+pts+"'/>"
   if(hasSol){
     pts=data.map(function(d,i){return xp(i)+','+yv(d.sol_v)}).join(' ')
-    s+="<polyline fill='none' stroke='var(--csol)' stroke-width='1.5' stroke-dasharray='3,4' points='"+pts+"'/>"
-    s+="<line x1='222' y1='9' x2='236' y2='9' stroke='var(--csol)' stroke-width='1.5' stroke-dasharray='3,4'/>"
-    s+="<text x='240' y='13' style='fill:var(--csol)'>Solar V</text>"
+    s+="<polyline fill='none' stroke='var(--csol)' stroke-width='"+sw2+"' stroke-dasharray='4,5' stroke-linecap='round' stroke-linejoin='round' points='"+pts+"'/>"
+    s+="<line x1='"+(PL+180)+"' y1='"+legY+"' x2='"+(PL+200)+"' y2='"+legY+"' stroke='var(--csol)' stroke-width='"+sw2+"' stroke-dasharray='4,5' stroke-linecap='round'/>"
+    s+="<text x='"+(PL+206)+"' y='"+(legY+4)+"' font-size='"+fs+"' style='fill:var(--csol)'>Solar</text>"
   }
-  s+="<g font-size='11' font-family='monospace'>"
-  s+="<line x1='60' y1='9' x2='74' y2='9' stroke='var(--cv)' stroke-width='2'/>"
-  s+="<text x='78' y='13' style='fill:var(--cv)'>Bat V</text>"
-  s+="<line x1='130' y1='9' x2='144' y2='9' stroke='var(--ca)' stroke-width='1.5' stroke-dasharray='5,3'/>"
-  s+="<text x='148' y='13' style='fill:var(--ca)'>Charge A</text>"
+  s+="<g font-size='"+fs+"' font-family='monospace'>"
+  s+="<line x1='"+(PL+8)+"' y1='"+legY+"' x2='"+(PL+28)+"' y2='"+legY+"' stroke='var(--cv)' stroke-width='"+sw+"' stroke-linecap='round'/>"
+  s+="<text x='"+(PL+34)+"' y='"+(legY+4)+"' style='fill:var(--cv)'>Bat V</text>"
+  s+="<line x1='"+(PL+100)+"' y1='"+legY+"' x2='"+(PL+120)+"' y2='"+legY+"' stroke='var(--ca)' stroke-width='"+sw2+"' stroke-dasharray='6,4' stroke-linecap='round'/>"
+  s+="<text x='"+(PL+126)+"' y='"+(legY+4)+"' style='fill:var(--ca)'>Charge A</text>"
   s+="</g>"
+  el.setAttribute('viewBox','0 0 '+W+' '+H)
   el.innerHTML=s
 }
 
 loadCharts()
 setInterval(loadCharts,Math.max(pollIvl*1000,10000))
+(function(){var rt;window.addEventListener('resize',function(){clearTimeout(rt);rt=setTimeout(loadCharts,150)})})()
 </script></div></body></html>)";
 
     return o;
