@@ -3524,7 +3524,15 @@ upHealth(); upSolarWeek(); upSolarSim(); upSolarForecast(); upResistance(); upAn
 function upEvents(){fetch('/api/events?n=30').then(function(r){return r.json()}).then(function(evs){
   var el=$('sys-events');if(!el)return
   if(!evs||!evs.length){el.textContent='—';return}
-  el.innerHTML=evs.map(function(e){return '<div>'+e.time+' '+e.message+'</div>'}).join('')
+  var grouped=[],last=null;
+  evs.forEach(function(e){
+    if(last&&last.message===e.message){last.count=(last.count||1)+1}
+    else{last=e;grouped.push(e)}
+  });
+  el.innerHTML=grouped.map(function(e){
+    var c=e.count>1?' <span class=\"dim\">(\u00d7'+e.count+')</span>':'';
+    return '<div>'+e.time+' '+e.message+c+'</div>'
+  }).join('')
 }).catch(function(){})}
 setInterval(upEvents,5000); upEvents()
 

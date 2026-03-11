@@ -117,7 +117,20 @@ void DataStore::set_loading_history(bool loading) {
 }
 
 void DataStore::push_system_event(const std::string& msg) {
-    if (loading_history_) return;  // don't push or persist during startup load
+    if (loading_history_ || msg.empty()) return;
+
+    // Deduplication: don't push the exact same message twice in a row if it happened recently
+    double now = static_cast<double>(std::chrono::system_clock::to_time_t(
+        std::chrono::system_clock::now()));
+
+    if (!system_events_.empty()) {
+        const auto& last = system_events_.back();
+        double last_ts = static_cast<double>(std::chrono::system_clock::to_time_t(last.timestamp));
+        if (last.message == msg && (now - last_ts < 3600.0)) {
+            return;
+        }
+    }
+
     SystemEvent ev;
     ev.timestamp = std::chrono::system_clock::now();
     ev.message = msg;
@@ -205,17 +218,19 @@ void DataStore::process_system_events(const BatterySnapshot& snap,
     }
     prev_solar_active_ = solar_active;
 
-    // Cell imbalance detected
+    // Cell imbalance detected — debounce to once per hour if condition persists
     bool cell_imbalance = (an.cell_balance_status == "Imbalance" || an.cell_balance_status == "Warning");
-    if (cell_imbalance && !prev_cell_imbalance_) {
+    if (cell_imbalance && (!prev_cell_imbalance_ || (now - last_imbalance_event_time_ >= 3600.0))) {
         push_system_event("Cell imbalance detected");
+        last_imbalance_event_time_ = now;
     }
     prev_cell_imbalance_ = cell_imbalance;
 
-    // High temperature warning
+    // High temperature warning — debounce to once per hour if condition persists
     bool high_temp = (an.temp_status == "Warning" || an.temp_status == "Warm");
-    if (high_temp && !prev_high_temp_) {
+    if (high_temp && (!prev_high_temp_ || (now - last_temp_event_time_ >= 3600.0))) {
         push_system_event("High temperature warning");
+        last_temp_event_time_ = now;
     }
     prev_high_temp_ = high_temp;
 

@@ -1548,6 +1548,41 @@ static void test_http_tests_telemetry_and_notes() {
     std::remove(db_path.c_str());
 }
 
+void test_system_event_deduplication() {
+    LOG_INFO("Testing system event deduplication and debouncing...");
+    DataStore ds(100);
+    
+    // Test 1: Immediate duplicate prevention
+    ds.push_system_event("Test Event");
+    ds.push_system_event("Test Event");
+    auto events = ds.system_events(10);
+    ASSERT(events.size() == 1, "Duplicate events should be prevented in backend");
+    ASSERT(events[0].message == "Test Event", "Message mismatch");
+
+    // Test 2: Different message should work
+    ds.push_system_event("Other Event");
+    events = ds.system_events(10);
+    ASSERT(events.size() == 2, "Different message should not be prevented");
+
+    // Test 3: Charging stage deduplication (simulated via update)
+    BatterySnapshot snap;
+    snap.current_a = 0.0;
+    snap.soc_pct = 50.0;
+    
+    AnalyticsSnapshot an;
+    an.charging_stage = "Bulk";
+    
+    // First push
+    ds.update(snap); // This will trigger process_system_events with Bulk
+    events = ds.system_events(10);
+    size_t count_after_bulk = events.size();
+    
+    // Repeat with same stage
+    ds.update(snap);
+    events = ds.system_events(10);
+    ASSERT(events.size() == count_after_bulk, "Duplicate stage event should be prevented");
+}
+
 int main() {
     std::fprintf(stderr, "\n=== limonitor unit tests ===\n\n");
 
@@ -1616,6 +1651,7 @@ int main() {
     test_http_tests_api();
     test_http_tests_start_stop_with_battery();
     test_http_tests_telemetry_and_notes();
+    test_system_event_deduplication();
 
     std::fprintf(stderr, "\n=== %d failure(s) ===\n", g_failures);
     return g_failures > 0 ? 1 : 0;

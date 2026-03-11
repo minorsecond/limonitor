@@ -67,6 +67,7 @@ public:
     void set_rated_capacity(double ah);
     void update_self_monitor();
     AnalyticsSnapshot analytics() const;
+    void push_system_event(const std::string& msg); // Also used for testing
 
     // Analytics extensions (anomaly, resistance, solar, weather, health)
     void init_extensions(const Config& cfg, Database* db = nullptr);
@@ -110,6 +111,8 @@ private:
     std::string prev_charging_stage_;
     bool prev_charging_{false};
     double last_charging_event_time_{0};  // debounce charging started/stopped
+    double last_imbalance_event_time_{0}; // debounce cell imbalance
+    double last_temp_event_time_{0};      // debounce high temp
     bool soc_90_reported_{false};
     bool prev_cell_imbalance_{false};
     bool prev_high_temp_{false};
@@ -117,7 +120,6 @@ private:
     Database* db_{nullptr};
     bool loading_history_{false};
 
-    void push_system_event(const std::string& msg);
     void process_system_events(const BatterySnapshot& snap,
                               const std::optional<PwrGateSnapshot>& pg,
                               const AnalyticsSnapshot& an);
