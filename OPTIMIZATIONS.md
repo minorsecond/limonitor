@@ -12,7 +12,7 @@ The build system (`CMakeLists.txt`) now automatically detects the target archite
 
 - **All Platforms (Release mode):**
   - `-O3`: Aggressive optimizations for speed.
-  - `-flto`: Link-time optimization to enable cross-file optimizations.
+  - `-flto=auto`: Link-time optimization to enable cross-file optimizations with parallel compilation support.
   - `-fomit-frame-pointer`: Frees up a register (especially useful on ARM).
 
 - **Apple Silicon (M1/M2/M3):**
