@@ -292,17 +292,20 @@ void HttpServer::handle(int fd) {
             double max_a = ext->effective_max_charge_a();
             double v = snap.valid && snap.total_voltage_v > 1 ? snap.total_voltage_v : 51.2;
             double nom = snap.valid && snap.nominal_ah > 0 ? snap.nominal_ah : 100.0;
-            bool want_realistic = query.find("realistic=1") != std::string::npos;
+            double soc = snap.valid ? snap.soc_pct : 0;
+            bool want_both = query.find("both=1") != std::string::npos;
+            bool want_realistic = !want_both && query.find("realistic=1") != std::string::npos;
+
             std::vector<ChargeAcceptanceBucket> profile;
             bool profile_from_db = false;
-            if (want_realistic && db_)
+            if ((want_realistic || want_both) && db_)
                 profile = db_->get_charge_acceptance_profile(14);
-            if (want_realistic) {
+            if (want_realistic || want_both) {
                 int total_samples = 0;
                 for (const auto& b : profile) total_samples += b.sample_count;
                 profile_from_db = total_samples >= 10;
             }
-            if (want_realistic && !profile_from_db) {
+            if ((want_realistic || want_both) && !profile_from_db) {
                 static constexpr double kDefaultTaper[] =
                     {1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.95, 0.80, 0.45, 0.15};
                 profile.clear();
@@ -315,14 +318,25 @@ void HttpServer::handle(int fd) {
                     profile.push_back(b);
                 }
             }
-            auto r = ext->weather_forecast().get_forecast_week(
-                cfg.panel_watts, cfg.system_efficiency, max_a, v, nom,
-                snap.valid ? snap.soc_pct : 0,
-                want_realistic ? &profile : nullptr);
-            r.realistic_from_history = profile_from_db;
-            if (!r.valid && !r.error.empty())
-                LOG_DEBUG("Solar /api/solar_forecast_week: %s", r.error.c_str());
-            send_response(fd, 200, "application/json", solar_forecast_week_json(r));
+
+            if (want_both) {
+                auto r_nom = ext->weather_forecast().get_forecast_week(
+                    cfg.panel_watts, cfg.system_efficiency, max_a, v, nom, soc, nullptr);
+                auto r_real = ext->weather_forecast().get_forecast_week(
+                    cfg.panel_watts, cfg.system_efficiency, max_a, v, nom, soc, &profile);
+                r_real.realistic_from_history = profile_from_db;
+                std::string body = "{\"nominal\":" + solar_forecast_week_json(r_nom) +
+                                   ",\"realistic\":" + solar_forecast_week_json(r_real) + "}\n";
+                send_response(fd, 200, "application/json", body);
+            } else {
+                auto r = ext->weather_forecast().get_forecast_week(
+                    cfg.panel_watts, cfg.system_efficiency, max_a, v, nom, soc,
+                    want_realistic ? &profile : nullptr);
+                r.realistic_from_history = profile_from_db;
+                if (!r.valid && !r.error.empty())
+                    LOG_DEBUG("Solar /api/solar_forecast_week: %s", r.error.c_str());
+                send_response(fd, 200, "application/json", solar_forecast_week_json(r));
+            }
         } else {
             LOG_DEBUG("Solar /api/solar_forecast_week: extensions not available");
             send_response(fd, 200, "application/json",
@@ -2693,6 +2707,8 @@ td .rc-main{font-weight:600}
          "function fmtDate(iso){try{var d=new Date(iso+'T12:00:00');return d.toLocaleDateString(getLocale(),{weekday:'short',month:'short',day:'numeric',timeZone:userTZ})}catch(e){return iso}}\n"
          "var lastDailyData=null;\n"
          "var lastSlots=null;\n"
+         "var cachedNominal=null;\n"
+         "var cachedRealistic=null;\n"
          "var solarChartUnit='kwh';\n"
          "var solarChartView='solar';\n"
          "function dayEmoji(cloud){var c=(cloud||0)*100;return c<=25?'☀️':c<=50?'⛅':c<=75?'☁️':'🌧️'}\n"
@@ -3033,17 +3049,18 @@ td .rc-main{font-weight:600}
          "});\n"
          "overlay.addEventListener('mouseleave',function(){tt.style.display='none';});\n"
          "}}\n"
-         "function toggleRealistic(){var cb=$('show-realistic');if(cb)applySetting('show-realistic',cb.checked?'1':'0');loadAll();}\n"
-         "function refreshWeather(){var m=$('refresh-msg');if(m)m.textContent='Refreshing…';fetch('/api/weather_refresh').then(function(r){return r.json()}).then(function(d){if(m)m.textContent=d.ok?'Done! Reloading…':'Error: '+d.message;if(d.ok)setTimeout(loadAll,500)}).catch(function(e){if(m)m.textContent='Error: '+e.message});}\n"
-         "function loadAll(){var t=15000;var base=window.location.origin||(window.location.protocol+'//'+window.location.host);function to(url){return Promise.race([fetch(url),new Promise(function(_,rej){setTimeout(function(){rej(new Error('timeout'))},t)})]).then(function(r){return r.ok?r.json():Promise.reject(new Error(r.status))})}\n"
-         "var rlCb=$('show-realistic');var rlQ=(rlCb&&rlCb.checked)?'?realistic=1':'';\n"
-         "Promise.all([to(base+'/api/solar_forecast_week'+rlQ),to(base+'/api/solar_simulation'),to(base+'/api/solar_forecast')]).then(function(arr){\n"
-         "var d=arr[0],sim=arr[1],fore=arr[2];\n"
-         "if(!d.valid){$('week-kwh').textContent='—';$('days-full').textContent='—';$('best-day').textContent=d.error||'—';$('daily-table').innerHTML='<tr><td colspan=7 class=warn>'+d.error+'</td></tr>'}else{\n"
+         "function applyForecast(d){if(!d||!d.valid){$('week-kwh').textContent='—';$('days-full').textContent='—';$('best-day').textContent=d?(d.error||'—'):'—';var tb=$('daily-table');if(tb)tb.innerHTML='<tr><td colspan=7 class=warn>'+(d?d.error:'No data')+'</td></tr>';return}\n"
          "$('week-kwh').textContent=fmt(d.week_total_kwh,2);$('days-full').textContent=d.days_to_full>0?d.days_to_full:'—';$('best-day').textContent=d.best_day?fmtDate(d.best_day):'—';\n"
          "if(d.solar_perf_coeff>0){var pct=Math.round(d.solar_perf_coeff*100);$('solar-coeff').textContent=pct+'%';$('solar-coeff-detail').textContent=d.solar_perf_samples+' samples (30d)'}else{$('solar-coeff').textContent='—';$('solar-coeff-detail').textContent='collecting data'}\n"
          "var badge=$('realistic-badge');if(badge){if(d.realistic){badge.style.display='';badge.textContent=d.realistic_from_history?'using measured charge data':'using default LiFePO4 taper'}else{badge.style.display='none'}}\n"
-         "var tbody=$('daily-table');if(!d.daily||!d.daily.length){tbody.innerHTML='<tr><td colspan=7 class=dim>No data</td></tr>'}else{lastDailyData=d;if(d.slots)lastSlots=d.slots;var cb=$('show-extended');if(cb)cb.checked=getSetting('show-extended','0')==='1';renderDaily();renderActiveChart();}}\n"
+         "if(d.daily&&d.daily.length){lastDailyData=d;if(d.slots)lastSlots=d.slots;var cb=$('show-extended');if(cb)cb.checked=getSetting('show-extended','0')==='1';renderDaily();renderActiveChart()}else{var tb=$('daily-table');if(tb)tb.innerHTML='<tr><td colspan=7 class=dim>No data</td></tr>'}}\n"
+         "function toggleRealistic(){var cb=$('show-realistic');if(cb)applySetting('show-realistic',cb.checked?'1':'0');var want=cb&&cb.checked;var cached=want?cachedRealistic:cachedNominal;if(cached){applyForecast(cached);return}loadAll();}\n"
+         "function refreshWeather(){var m=$('refresh-msg');if(m)m.textContent='Refreshing…';fetch('/api/weather_refresh').then(function(r){return r.json()}).then(function(d){if(m)m.textContent=d.ok?'Done! Reloading…':'Error: '+d.message;if(d.ok)setTimeout(loadAll,500)}).catch(function(e){if(m)m.textContent='Error: '+e.message});}\n"
+         "function loadAll(){var t=15000;var base=window.location.origin||(window.location.protocol+'//'+window.location.host);function to(url){return Promise.race([fetch(url),new Promise(function(_,rej){setTimeout(function(){rej(new Error('timeout'))},t)})]).then(function(r){return r.ok?r.json():Promise.reject(new Error(r.status))})}\n"
+         "var rlCb=$('show-realistic');var wantReal=rlCb&&rlCb.checked;\n"
+         "Promise.all([to(base+'/api/solar_forecast_week?both=1'),to(base+'/api/solar_simulation'),to(base+'/api/solar_forecast')]).then(function(arr){\n"
+         "var both=arr[0];cachedNominal=both.nominal;cachedRealistic=both.realistic;var sim=arr[1],fore=arr[2];\n"
+         "applyForecast(wantReal?cachedRealistic:cachedNominal);\n"
          "$('today-wh').textContent=sim.expected_today_wh>0?fmt(sim.expected_today_wh/1000,2)+' kilowatt-hours':'—';$('tomorrow-wh').textContent=fore.valid?fmt(fore.tomorrow_generation_wh/1000,1)+' kilowatt-hours':'—';$('bat-proj').textContent=sim.battery_projection||fore.expected_battery_state||'—';\n"
          "}).catch(function(err){try{console.error('Solar loadAll failed:',err);}catch(e){}var t=$('daily-table');if(t)t.innerHTML='<tr><td colspan=7 class=warn>Error loading data. Check solar_enabled and weather_api_key in Settings.</td></tr>';$('week-kwh').textContent='—';$('days-full').textContent='—';$('best-day').textContent='—';$('today-wh').textContent='—';$('tomorrow-wh').textContent='—';$('bat-proj').textContent='—'})}\n"
          "function fmtOptTime(s){if(!s||s==='\u2014')return s;var m=s.match(/^(\\d{1,2}):(\\d{2})$/);if(!m)return s;var h=parseInt(m[1],10),mn=parseInt(m[2],10);var loc=getLocale();if(getSetting('time','24')==='12'){var h12=h%12;if(h12===0)h12=12;return h12+':'+(mn<10?'0':'')+mn+(h<12?' AM':' PM')}try{var d=new Date(2000,0,1,h,mn);return d.toLocaleTimeString(loc,{hour:'2-digit',minute:'2-digit',hour12:getSetting('time','24')==='12'})}catch(e){return h+':'+(mn<10?'0':'')+mn}}\n"
