@@ -58,7 +58,15 @@ private:
     static std::string battery_resistance_json(double mohm, const std::string& trend,
                                               const std::vector<ResistanceSample>& series);
     static std::string solar_forecast_json(const WeatherForecastResult& r);
-    std::string solar_forecast_week_json(const SolarForecastWeekResult& r) const;
+    struct UsageCache {
+        std::vector<UsageSlotProfile> usage;
+        double fallback_w{0};
+        double avg_coeff{0};
+        int perf_count{0};
+    };
+    UsageCache compute_usage_cache() const;
+    std::string solar_forecast_week_json(const SolarForecastWeekResult& r,
+                                         const UsageCache* cache = nullptr) const;
     static std::string system_health_json(const HealthScoreResult& r);
     static std::string html_dashboard(const BatterySnapshot& s, const std::string& ble_state,
                                       const PwrGateSnapshot& pg,

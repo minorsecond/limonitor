@@ -1,8 +1,10 @@
 #pragma once
 #include "pwrgate.hpp"
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -22,12 +24,14 @@ public:
     uint16_t           port() const { return port_; }
 
 private:
-    std::string        host_;
-    uint16_t           port_;
-    int                poll_interval_s_;
-    std::atomic<bool>  running_{false};
-    std::thread        thread_;
-    SnapCb             cb_;
+    std::string           host_;
+    uint16_t              port_;
+    int                   poll_interval_s_;
+    std::atomic<bool>     running_{false};
+    std::thread           thread_;
+    SnapCb                cb_;
+    std::mutex            wake_mu_;
+    std::condition_variable wake_cv_;
 
     void        poll_loop();
     std::string http_get(const std::string& path);

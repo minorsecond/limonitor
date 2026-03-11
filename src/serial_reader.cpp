@@ -85,43 +85,45 @@ void SerialReader::stop() {
 
 void SerialReader::read_loop() {
     std::string line_buf;
-    std::string pending_status; // last seen "PS=..." line waiting for its target line
+    line_buf.reserve(256);
+    std::string pending_status;
+    char rbuf[256];
 
     while (running_) {
-        char c;
-        ssize_t n = read(fd_, &c, 1);
-        if (n < 0) {
+        ssize_t nr = read(fd_, rbuf, sizeof(rbuf));
+        if (nr < 0) {
             if (!running_) break;
             LOG_WARN("Serial: read error: %s", strerror(errno));
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
         }
-        if (n == 0) continue; // VTIME timeout — no data
-        if (c == '\r') continue;
-        if (c != '\n') { line_buf += c; continue; }
+        if (nr == 0) continue;
 
-        // Complete line
-        std::string line = std::move(line_buf);
-        line_buf.clear();
+        for (ssize_t i = 0; i < nr; ++i) {
+            char c = rbuf[i];
+            if (c == '\r') continue;
+            if (c != '\n') { line_buf += c; continue; }
 
-        LOG_DEBUG("Serial RX: [%s]", line.c_str());
+            std::string line = std::move(line_buf);
+            line_buf.clear();
 
-        // EpicPowerGate shows config prompts on connect — answer with defaults
-        if (!line.empty() && (line.back() == ':' || line.back() == '?')) {
-            const char* nl = "\r\n";
-            write(fd_, nl, 2);
-            continue;
-        }
+            LOG_DEBUG("Serial RX: [%s]", line.c_str());
 
-        if (line.find("PS=") != std::string::npos) {
-            // Status line — hold it until we see the matching target line
-            pending_status = line;
-        } else if (!pending_status.empty() &&
-                   line.find("TargetV=") != std::string::npos) {
-            PwrGateSnapshot snap;
-            if (pwrgate::parse(pending_status, line, snap) && cb_)
-                cb_(snap);
-            pending_status.clear();
+            if (!line.empty() && (line.back() == ':' || line.back() == '?')) {
+                const char* nl = "\r\n";
+                write(fd_, nl, 2);
+                continue;
+            }
+
+            if (line.find("PS=") != std::string::npos) {
+                pending_status = std::move(line);
+            } else if (!pending_status.empty() &&
+                       line.find("TargetV=") != std::string::npos) {
+                PwrGateSnapshot snap;
+                if (pwrgate::parse(pending_status, line, snap) && cb_)
+                    cb_(snap);
+                pending_status.clear();
+            }
         }
     }
 }

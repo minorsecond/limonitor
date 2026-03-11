@@ -9,7 +9,8 @@ namespace litime {
 //   setUint16(4, 0x1355) -> 0x13 0x55
 //   setUint16(6, 0xAA17) -> 0xAA 0x17
 std::vector<uint8_t> build_request() {
-    return {0x00, 0x00, 0x04, 0x01, 0x13, 0x55, 0xAA, 0x17};
+    static const std::vector<uint8_t> req = {0x00, 0x00, 0x04, 0x01, 0x13, 0x55, 0xAA, 0x17};
+    return req;
 }
 
 static inline uint16_t u16le(const uint8_t* p) {
@@ -45,6 +46,7 @@ bool parse(const uint8_t* d, size_t len, BatterySnapshot& snap) {
     snap.current_a = -(s32le(d + 48) / 1000.0);
 
     snap.cell_voltages_v.clear();
+    snap.cell_voltages_v.reserve(16);
     snap.cell_min_v = 9999.0;
     snap.cell_max_v = 0.0;
     for (int i = 0; i < 16; ++i) {
@@ -82,7 +84,7 @@ bool parse(const uint8_t* d, size_t len, BatterySnapshot& snap) {
     return true;
 }
 
-void Parser::reset() { buf_.clear(); }
+void Parser::reset() { buf_.clear(); buf_.reserve(MIN_RESPONSE_LEN); }
 
 Parser::Result Parser::feed(const uint8_t* data, size_t len) {
     buf_.insert(buf_.end(), data, data + len);

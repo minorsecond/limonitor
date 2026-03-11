@@ -152,13 +152,14 @@ bool Database::migrate() {
         "CREATE INDEX IF NOT EXISTS sp_ts ON solar_performance(ts);"
 
         "CREATE TABLE IF NOT EXISTS weather_daily ("
-        "  date        TEXT PRIMARY KEY,"  // YYYY-MM-DD
-        "  cloud_cover REAL,"              // 0-1
-        "  kwh_forecast REAL,"             // forecasted kWh generation
-        "  sun_hours   REAL,"              // effective sun hours
-        "  source      TEXT,"              // '3h', 'daily', or 'observed'
-        "  updated_at  INTEGER NOT NULL"   // last update timestamp
+        "  date        TEXT PRIMARY KEY,"
+        "  cloud_cover REAL,"
+        "  kwh_forecast REAL,"
+        "  sun_hours   REAL,"
+        "  source      TEXT,"
+        "  updated_at  INTEGER NOT NULL"
         ");"
+        "CREATE INDEX IF NOT EXISTS wd_updated ON weather_daily(updated_at);"
     );
 }
 
@@ -200,8 +201,18 @@ static void write_setting_to_file(const std::string& path, const std::string& ke
         out << kv.first << "=" << kv.second << "\n";
 }
 
+void Database::invalidate_settings_cache() const {
+    settings_cache_.clear();
+}
+
 std::string Database::get_setting(const std::string& key) const {
     std::lock_guard<std::mutex> lk(mu_);
+    auto now = std::chrono::steady_clock::now();
+    auto age = std::chrono::duration_cast<std::chrono::milliseconds>(now - settings_cache_time_).count();
+    if (age < SETTINGS_CACHE_TTL_MS) {
+        auto it = settings_cache_.find(key);
+        if (it != settings_cache_.end()) return it->second;
+    }
     if (db_) {
         const char* sql = "SELECT value FROM settings WHERE key=?";
         sqlite3_stmt* stmt = nullptr;
@@ -214,6 +225,8 @@ std::string Database::get_setting(const std::string& key) const {
                 result = v;
         }
         sqlite3_finalize(stmt);
+        settings_cache_[key] = result;
+        settings_cache_time_ = now;
         return result;
     }
     return read_setting_from_file(settings_file_path(path_), key);
@@ -230,6 +243,8 @@ void Database::set_setting(const std::string& key, const std::string& value) {
         sqlite3_bind_text(stmt, 2, value.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_step(stmt);
         sqlite3_finalize(stmt);
+        settings_cache_[key] = value;
+        settings_cache_time_ = std::chrono::steady_clock::now();
         return;
     }
     write_setting_to_file(settings_file_path(path_), key, value);
@@ -347,6 +362,7 @@ void Database::insert_system_event(const SystemEvent& e) {
 std::vector<SystemEvent> Database::load_system_events(size_t n) const {
     std::lock_guard<std::mutex> lk(mu_);
     std::vector<SystemEvent> result;
+    result.reserve(std::min(n, size_t{200}));
     if (!db_) return result;
 
     char sql[80];
@@ -374,6 +390,7 @@ std::vector<SystemEvent> Database::load_system_events(size_t n) const {
 std::vector<BatterySnapshot> Database::load_battery_history(size_t n) const {
     std::lock_guard<std::mutex> lk(mu_);
     std::vector<BatterySnapshot> result;
+    result.reserve(std::min(n, size_t{2880}));
     if (!db_) return result;
 
     char sql[256];
@@ -425,6 +442,7 @@ std::vector<BatterySnapshot> Database::load_battery_history(size_t n) const {
 std::vector<PwrGateSnapshot> Database::load_charger_history(size_t n) const {
     std::lock_guard<std::mutex> lk(mu_);
     std::vector<PwrGateSnapshot> result;
+    result.reserve(std::min(n, size_t{2880}));
     if (!db_) return result;
 
     char sql[256];
@@ -520,7 +538,7 @@ std::vector<ChargeAcceptanceBucket> Database::get_charge_acceptance_profile(int 
         "       ELSE 0 END, "
         "       COUNT(*) "
         "FROM charger_readings c "
-        "JOIN battery_readings b ON ABS(c.ts - b.ts) <= 60 "
+        "JOIN battery_readings b ON b.ts BETWEEN c.ts - 60 AND c.ts + 60 "
         "WHERE c.ts > ?1 AND c.bat_a > 0.1 AND c.tgt_a > 0.5 "
         "  AND b.soc >= 0 AND b.soc <= 100 "
         "GROUP BY bucket ORDER BY bucket";

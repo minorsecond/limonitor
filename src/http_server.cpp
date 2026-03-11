@@ -13,14 +13,16 @@
 #include <unistd.h>
 
 static std::string jstr(const std::string& s) {
-    std::string r = "\"";
+    std::string r;
+    r.reserve(s.size() + 4);
+    r += '"';
     for (char c : s) {
         if (c == '"') r += "\\\"";
         else if (c == '\\') r += "\\\\";
         else if (c == '\n') r += "\\n";
         else r += c;
     }
-    r += "\"";
+    r += '"';
     return r;
 }
 static std::string jbool(bool b) { return b ? "true" : "false"; }
@@ -188,35 +190,43 @@ void HttpServer::handle(int fd) {
         }
         h = std::max(0.1, std::min(h, 168.0));
     }
-    std::string init_settings;
-    if (db_) {
-        init_settings = "{\"theme\":" + jstr(db_->get_setting("theme")) +
-            ",\"time\":" + jstr(db_->get_setting("time")) +
-            ",\"range\":" + jstr(db_->get_setting("range")) +
-            ",\"show-extended\":" + jstr(db_->get_setting("show-extended")) +
-            ",\"locale\":" + jstr(db_->get_setting("locale")) + "}";
-    }
-    bool web_needs_setup = false;
-    if (db_) {
-        std::string dn = db_->get_setting("device_name");
-        std::string da = db_->get_setting("device_address");
-        std::string sd = db_->get_setting("serial_device");
-        std::string pr = db_->get_setting("pwrgate_remote");
-        web_needs_setup = dn.empty() && da.empty() && sd.empty() && pr.empty();
-    }
-
     if (path == "/settings" || path == "/settings.html") {
         send_response(fd, 200, "text/html", html_settings_page(db_));
     } else if (path == "/setup") {
         send_response(fd, 200, "text/html", html_settings_page(db_));
-    } else if ((path == "/" || path == "/index.html") && web_needs_setup) {
-        send_response(fd, 200, "text/html", html_settings_page(db_));
     } else if (path == "/" || path == "/index.html") {
-        std::string theme = db_ ? db_->get_setting("theme") : "";
-        send_response(fd, 200, "text/html",
-                      html_dashboard(snap, ble_st, pg,
-                                     store_.purchase_date(), h, poll_interval_s_, init_settings, theme));
+        bool needs_setup = false;
+        if (db_) {
+            needs_setup = db_->get_setting("device_name").empty() &&
+                          db_->get_setting("device_address").empty() &&
+                          db_->get_setting("serial_device").empty() &&
+                          db_->get_setting("pwrgate_remote").empty();
+        }
+        if (needs_setup) {
+            send_response(fd, 200, "text/html", html_settings_page(db_));
+        } else {
+            std::string init_settings;
+            if (db_) {
+                init_settings = "{\"theme\":" + jstr(db_->get_setting("theme")) +
+                    ",\"time\":" + jstr(db_->get_setting("time")) +
+                    ",\"range\":" + jstr(db_->get_setting("range")) +
+                    ",\"show-extended\":" + jstr(db_->get_setting("show-extended")) +
+                    ",\"locale\":" + jstr(db_->get_setting("locale")) + "}";
+            }
+            std::string theme = db_ ? db_->get_setting("theme") : "";
+            send_response(fd, 200, "text/html",
+                          html_dashboard(snap, ble_st, pg,
+                                         store_.purchase_date(), h, poll_interval_s_, init_settings, theme));
+        }
     } else if (path == "/solar" || path == "/solar.html") {
+        std::string init_settings;
+        if (db_) {
+            init_settings = "{\"theme\":" + jstr(db_->get_setting("theme")) +
+                ",\"time\":" + jstr(db_->get_setting("time")) +
+                ",\"range\":" + jstr(db_->get_setting("range")) +
+                ",\"show-extended\":" + jstr(db_->get_setting("show-extended")) +
+                ",\"locale\":" + jstr(db_->get_setting("locale")) + "}";
+        }
         std::string theme = db_ ? db_->get_setting("theme") : "";
         send_response(fd, 200, "text/html", html_solar_page(init_settings, theme));
     } else if (path == "/api/charger") {
@@ -256,7 +266,7 @@ void HttpServer::handle(int fd) {
         auto* ext = store_.extensions();
         if (ext)
             send_response(fd, 200, "application/json",
-                         anomalies_json(ext->anomaly_detector().anomalies()));
+                         anomalies_json(ext->anomaly_detector().anomalies_vec()));
         else
             send_response(fd, 200, "application/json", "{\"anomalies\":[]}\n");
     } else if (path == "/api/solar_simulation") {
@@ -325,8 +335,16 @@ void HttpServer::handle(int fd) {
                 auto r_real = ext->weather_forecast().get_forecast_week(
                     cfg.panel_watts, cfg.system_efficiency, max_a, v, nom, soc, &profile);
                 r_real.realistic_from_history = profile_from_db;
-                std::string body = "{\"nominal\":" + solar_forecast_week_json(r_nom) +
-                                   ",\"realistic\":" + solar_forecast_week_json(r_real) + "}\n";
+                auto uc = compute_usage_cache();
+                auto json_nom = solar_forecast_week_json(r_nom, &uc);
+                auto json_real = solar_forecast_week_json(r_real, &uc);
+                std::string body;
+                body.reserve(json_nom.size() + json_real.size() + 40);
+                body += "{\"nominal\":";
+                body += json_nom;
+                body += ",\"realistic\":";
+                body += json_real;
+                body += "}\n";
                 send_response(fd, 200, "application/json", body);
             } else {
                 auto r = ext->weather_forecast().get_forecast_week(
@@ -454,8 +472,7 @@ void HttpServer::handle(int fd) {
         auto* ext = store_.extensions();
         if (ext) {
             auto an = store_.analytics();
-            auto anomalies = ext->anomaly_detector().anomalies();
-            auto r = ext->health_scorer().compute(an, anomalies);
+            auto r = ext->health_scorer().compute(an, ext->anomaly_detector().anomalies().size());
             send_response(fd, 200, "application/json", system_health_json(r));
         } else {
             send_response(fd, 200, "application/json",
@@ -470,7 +487,9 @@ void HttpServer::handle(int fd) {
 }
 
 std::string HttpServer::status_json(const BatterySnapshot& s, const std::string& ble_st) {
-    std::string o = "{\n";
+    std::string o;
+    o.reserve(2048);
+    o += "{\n";
     o += "  \"timestamp\": " + jstr(s.valid ? iso8601(s.timestamp) : "") + ",\n";
     o += "  \"ble_state\": " + jstr(ble_st) + ",\n";
     o += "  \"device_name\": " + jstr(s.device_name) + ",\n";
@@ -537,7 +556,9 @@ std::string HttpServer::cells_json(const BatterySnapshot& s) {
 }
 
 std::string HttpServer::history_json(const std::vector<BatterySnapshot>& snaps) {
-    std::string o = "[";
+    std::string o;
+    o.reserve(snaps.size() * 96 + 16);
+    o += "[";
     bool first = true;
     for (const auto& s : snaps) {
         if (!s.valid) continue;
@@ -556,6 +577,7 @@ std::string HttpServer::history_json(const std::vector<BatterySnapshot>& snaps) 
 std::string HttpServer::prometheus(const BatterySnapshot& s) {
     if (!s.valid) return "# No data yet\n";
     std::string o;
+    o.reserve(2048);
     auto g = [&](const char* name, const char* help, double val, int prec = 3) {
         o += "# HELP "; o += name; o += " "; o += help; o += "\n";
         o += "# TYPE "; o += name; o += " gauge\n";
@@ -627,7 +649,9 @@ std::string HttpServer::system_events_json(const std::vector<SystemEvent>& event
 
 std::string HttpServer::analytics_json(const AnalyticsSnapshot& a,
                                        const DataStore* store) {
-    std::string o = "{\n";
+    std::string o;
+    o.reserve(4096);
+    o += "{\n";
     o += "  \"energy_charged_today_wh\": "    + jdbl(a.energy_charged_today_wh, 1)    + ",\n";
     o += "  \"energy_discharged_today_wh\": " + jdbl(a.energy_discharged_today_wh, 1) + ",\n";
     o += "  \"solar_energy_today_wh\": "      + jdbl(a.solar_energy_today_wh, 1)      + ",\n";
@@ -768,18 +792,43 @@ std::string HttpServer::solar_forecast_json(const WeatherForecastResult& r) {
     return o;
 }
 
-std::string HttpServer::solar_forecast_week_json(const SolarForecastWeekResult& r) const {
-    std::vector<UsageSlotProfile> usage;
-    if (db_) usage = db_->get_usage_profile(7);
-    double fallback_w = 0;
-    if (!usage.empty()) {
+HttpServer::UsageCache HttpServer::compute_usage_cache() const {
+    UsageCache c;
+    if (db_) c.usage = db_->get_usage_profile(7);
+    if (!c.usage.empty()) {
         int total_n = 0;
         double total_sum = 0;
-        for (const auto& u : usage) { total_sum += u.avg_w * u.sample_count; total_n += u.sample_count; }
-        fallback_w = total_n > 0 ? total_sum / total_n : 0;
+        for (const auto& u : c.usage) { total_sum += u.avg_w * u.sample_count; total_n += u.sample_count; }
+        c.fallback_w = total_n > 0 ? total_sum / total_n : 0;
     }
+    if (db_) {
+        auto perf = db_->load_solar_performance(30);
+        c.perf_count = static_cast<int>(perf.size());
+        if (!perf.empty()) {
+            double sum = 0;
+            int valid_n = 0;
+            for (const auto& p : perf) {
+                if (p.coefficient > 0 && p.coefficient < 2) { sum += p.coefficient; ++valid_n; }
+            }
+            if (valid_n > 0) c.avg_coeff = sum / valid_n;
+        }
+    }
+    return c;
+}
 
-    std::string o = "{\n";
+std::string HttpServer::solar_forecast_week_json(const SolarForecastWeekResult& r,
+                                                  const UsageCache* ext_cache) const {
+    UsageCache local_cache;
+    if (!ext_cache) {
+        local_cache = compute_usage_cache();
+        ext_cache = &local_cache;
+    }
+    const auto& usage = ext_cache->usage;
+    double fallback_w = ext_cache->fallback_w;
+
+    std::string o;
+    o.reserve(8192 + r.daily.size() * 512 + r.slots.size() * 128);
+    o += "{\n";
     o += "  \"valid\": " + jbool(r.valid) + ",\n";
     o += "  \"realistic\": " + jbool(r.realistic) + ",\n";
     o += "  \"realistic_from_history\": " + jbool(r.realistic_from_history) + ",\n";
@@ -873,26 +922,8 @@ std::string HttpServer::solar_forecast_week_json(const SolarForecastWeekResult& 
              ",\"use_hi\":" + jdbl(use_kwh_hi, 4) + "}";
     }
     o += "],\n";
-    // Solar performance coefficient from historical data
-    double avg_coeff = 0;
-    int perf_count = 0;
-    if (db_) {
-        auto perf = db_->load_solar_performance(30);
-        perf_count = static_cast<int>(perf.size());
-        if (!perf.empty()) {
-            double sum = 0;
-            int valid_n = 0;
-            for (const auto& p : perf) {
-                if (p.coefficient > 0 && p.coefficient < 2) {
-                    sum += p.coefficient;
-                    ++valid_n;
-                }
-            }
-            if (valid_n > 0) avg_coeff = sum / valid_n;
-        }
-    }
-    o += "  \"solar_perf_coeff\": " + jdbl(avg_coeff, 3) + ",\n";
-    o += "  \"solar_perf_samples\": " + std::to_string(perf_count) + "\n";
+    o += "  \"solar_perf_coeff\": " + jdbl(ext_cache->avg_coeff, 3) + ",\n";
+    o += "  \"solar_perf_samples\": " + std::to_string(ext_cache->perf_count) + "\n";
     o += "}\n";
     return o;
 }

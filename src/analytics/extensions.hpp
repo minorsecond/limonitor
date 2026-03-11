@@ -23,8 +23,8 @@ public:
 
     void update(const BatterySnapshot& bat, const PwrGateSnapshot* chg,
                 const AnalyticsSnapshot& an,
-                const std::vector<BatterySnapshot>& history,
-                const std::vector<TxEvent>& tx_events);
+                const std::deque<BatterySnapshot>& history,
+                const std::deque<TxEvent>& tx_events);
 
     const AnomalyDetector& anomaly_detector() const { return *anomaly_; }
     const ResistanceEstimator& resistance_estimator() const { return *resistance_; }

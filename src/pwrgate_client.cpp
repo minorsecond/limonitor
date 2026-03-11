@@ -22,6 +22,7 @@ bool PwrGateClient::start() {
 
 void PwrGateClient::stop() {
     running_ = false;
+    wake_cv_.notify_all();
     if (thread_.joinable()) thread_.join();
 }
 
@@ -144,8 +145,8 @@ void PwrGateClient::poll_loop() {
             }
         }
 
-        // Sleep in small increments so stop() wakes up promptly
-        for (int i = 0; i < poll_interval_s_ * 10 && running_; ++i)
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::unique_lock<std::mutex> lk(wake_mu_);
+        wake_cv_.wait_for(lk, std::chrono::seconds(poll_interval_s_),
+                          [this]{ return !running_.load(); });
     }
 }

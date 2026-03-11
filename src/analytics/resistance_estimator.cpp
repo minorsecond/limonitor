@@ -16,8 +16,8 @@ void ResistanceEstimator::push_sample(double ts, double r_mohm) {
     }
 }
 
-void ResistanceEstimator::update(const std::vector<BatterySnapshot>& history,
-                                 const std::vector<TxEvent>& tx_events) {
+void ResistanceEstimator::update(const std::deque<BatterySnapshot>& history,
+                                 const std::deque<TxEvent>& tx_events) {
     if (history.empty()) return;
 
     for (const auto& ev : tx_events) {
@@ -92,6 +92,7 @@ std::string ResistanceEstimator::trend() const {
 std::vector<ResistanceSample> ResistanceEstimator::time_series(size_t n) const {
     std::vector<ResistanceSample> out;
     size_t start = n < r_ring_.size() ? r_ring_.size() - n : 0;
+    out.reserve(r_ring_.size() - start);
     for (size_t i = start; i < r_ring_.size(); ++i) {
         out.push_back({r_ts_[i], r_ring_[i]});
     }

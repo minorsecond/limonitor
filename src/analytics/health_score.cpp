@@ -3,11 +3,12 @@
 #include "../analytics.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 HealthScorer::HealthScorer() = default;
 
 HealthScoreResult HealthScorer::compute(const AnalyticsSnapshot& an,
-                                        const std::vector<AnomalyEvent>& anomalies) const {
+                                        size_t anomaly_count) const {
     HealthScoreResult r;
     int score = 100;
 
@@ -49,9 +50,11 @@ HealthScoreResult HealthScorer::compute(const AnalyticsSnapshot& an,
     }
 
     // Anomalies present (weight 20)
-    if (!anomalies.empty()) {
+    if (anomaly_count > 0) {
         score -= 15;
-        r.anomalies = std::to_string(anomalies.size()) + " detected";
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%zu detected", anomaly_count);
+        r.anomalies = buf;
     } else {
         r.anomalies = "none";
     }

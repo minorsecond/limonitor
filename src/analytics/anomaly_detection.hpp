@@ -30,10 +30,11 @@ public:
                 const AnalyticsSnapshot& an, double r_internal_mohm,
                 double effective_max_charge_a = 10.0);
 
-    std::vector<AnomalyEvent> anomalies() const;
+    const std::deque<AnomalyEvent>& anomalies() const;
+    std::vector<AnomalyEvent> anomalies_vec() const;
 
 private:
-    static constexpr size_t LOAD_WINDOW = 360;  // 30 min at 5s polls
+    static constexpr size_t LOAD_WINDOW = 360;
     static constexpr double LOAD_SPIKE_THRESHOLD = 1.8;
     static constexpr double SLOW_CHARGE_THRESHOLD = 0.6;
     static constexpr double RESISTANCE_INCREASE_THRESHOLD = 1.5;
@@ -45,10 +46,9 @@ private:
     std::deque<int> r_internal_day_;
     static constexpr size_t R_DAYS = 35;
 
-    std::vector<AnomalyEvent> anomalies_;
+    std::deque<AnomalyEvent> anomalies_;
     static constexpr size_t ANOMALIES_MAX = 50;
 
     double rolling_avg_load() const;
-    double r_internal_30day_avg() const;
-    double r_internal_today_avg() const;
+    void r_internal_avgs(double& avg_30d, double& avg_today) const;
 };

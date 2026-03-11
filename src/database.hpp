@@ -2,8 +2,10 @@
 #include "battery_data.hpp"
 #include "pwrgate.hpp"
 #include "system_events.hpp"
+#include <chrono>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // SQLite persistence
@@ -102,6 +104,11 @@ private:
     std::string        path_;
     void*              db_{nullptr};   // sqlite3*
     mutable std::mutex mu_;
+
+    mutable std::unordered_map<std::string, std::string> settings_cache_;
+    mutable std::chrono::steady_clock::time_point settings_cache_time_{};
+    static constexpr int SETTINGS_CACHE_TTL_MS = 2000;
+    void invalidate_settings_cache() const;
 
     bool migrate();
     bool exec(const char* sql);

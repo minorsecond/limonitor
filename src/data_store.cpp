@@ -193,14 +193,11 @@ void DataStore::update(BatterySnapshot snap) {
         analytics_.on_battery(snap, pg_opt.has_value() ? &*pg_opt : nullptr);
         last_bms_update_ = snap.timestamp;
         process_system_events(snap, latest_pwrgate_locked(), analytics_.snapshot());
-        if (extensions_) {
-            std::vector<BatterySnapshot> hist(ring_.begin(), ring_.end());
-            hist.push_back(snap);
-            std::vector<TxEvent> tx_vec(tx_events_.begin(), tx_events_.end());
-            extensions_->update(snap, pg_opt.has_value() ? &*pg_opt : nullptr,
-                               analytics_.snapshot(), hist, tx_vec);
-        }
         ring_.push_back(snap);
+        if (extensions_) {
+            extensions_->update(snap, pg_opt.has_value() ? &*pg_opt : nullptr,
+                               analytics_.snapshot(), ring_, tx_events_);
+        }
         while (ring_.size() > max_history_) ring_.pop_front();
         observers_copy = observers_;
     }
@@ -284,9 +281,7 @@ void DataStore::update_pwrgate(PwrGateSnapshot snap) {
     analytics_.on_charger(snap, bat_opt.has_value() ? &*bat_opt : nullptr);
     last_charger_update_ = snap.timestamp;
     if (extensions_ && bat_opt) {
-        std::vector<BatterySnapshot> hist(ring_.begin(), ring_.end());
-        std::vector<TxEvent> tx_vec(tx_events_.begin(), tx_events_.end());
-        extensions_->update(*bat_opt, &snap, analytics_.snapshot(), hist, tx_vec);
+        extensions_->update(*bat_opt, &snap, analytics_.snapshot(), ring_, tx_events_);
     }
     process_system_events(latest_locked().value_or(BatterySnapshot{}),
                          std::optional<PwrGateSnapshot>(snap), analytics_.snapshot());

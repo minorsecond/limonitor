@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <filesystem>
 #include <cstdio>
@@ -21,13 +22,22 @@
 #include <cmath>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <thread>
 
 // Exposed to ble_manager.cpp for poll interval
 int g_poll_interval_s = 5;
 
 static std::atomic<bool> g_quit{false};
-static void sig_handler(int) { g_quit = true; }
+static std::mutex g_quit_mu;
+static std::condition_variable g_quit_cv;
+static void sig_handler(int) { g_quit = true; g_quit_cv.notify_all(); }
+
+static void wait_quit(int seconds) {
+    std::unique_lock<std::mutex> lk(g_quit_mu);
+    g_quit_cv.wait_for(lk, std::chrono::seconds(seconds),
+                       []{ return g_quit.load(); });
+}
 
 // Config file support
 static std::string default_config_path() {
@@ -390,8 +400,7 @@ static void run_demo(DataStore& store, int interval_s) {
         store.set_ble_state("demo");
 
         ++tick;
-        for (int i = 0; i < interval_s * 10 && !g_quit; ++i)
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        wait_quit(interval_s);
     }
 }
 
@@ -601,7 +610,7 @@ int main(int argc, char** argv) {
         LOG_INFO("Daemon mode: running headless (HTTP on port %d)", cfg.http_port);
         auto last_checkpoint = std::chrono::steady_clock::now();
         while (!g_quit) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            wait_quit(300);
             if (db && db->is_open()) {
                 auto now = std::chrono::steady_clock::now();
                 if (std::chrono::duration_cast<std::chrono::minutes>(now - last_checkpoint).count() >= 5) {
@@ -619,7 +628,10 @@ int main(int argc, char** argv) {
         }
         tui.set_settings_callback([&] { run_tui_settings(db.get(), cfg); });
         std::thread quit_watcher([&]{
-            while (!g_quit) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            {
+                std::unique_lock<std::mutex> lk(g_quit_mu);
+                g_quit_cv.wait(lk, []{ return g_quit.load(); });
+            }
             tui.stop();
         });
 

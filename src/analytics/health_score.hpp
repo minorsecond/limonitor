@@ -19,5 +19,5 @@ public:
     HealthScorer();
 
     HealthScoreResult compute(const AnalyticsSnapshot& an,
-                              const std::vector<AnomalyEvent>& anomalies) const;
+                              size_t anomaly_count) const;
 };

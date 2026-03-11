@@ -1,7 +1,8 @@
 #include "jbd_protocol.hpp"
 #include "logger.hpp"
-#include <cstring>
 #include <algorithm>
+#include <cstdio>
+#include <cstring>
 
 namespace jbd {
 
@@ -33,26 +34,24 @@ Parser::Result Parser::feed(const uint8_t* data, size_t len) {
 }
 
 Parser::Result Parser::try_parse() {
-    // Scan for start byte 0xDD
-    while (!buf_.empty() && buf_[0] != 0xDD) buf_.erase(buf_.begin());
+    // Discard bytes until we find start byte 0xDD
+    size_t skip = 0;
+    while (skip < buf_.size() && buf_[skip] != 0xDD) ++skip;
+    if (skip > 0) buf_.erase(buf_.begin(), buf_.begin() + static_cast<ptrdiff_t>(skip));
 
-    // Need at least: DD cmd status len = 4 bytes to know total length
     if (buf_.size() < 4) return Result::NEED_MORE;
 
     uint8_t data_len = buf_[3];
-    // Total packet = DD + cmd + status + len + data + ck_hi + ck_lo + 0x77
     size_t total = 4u + data_len + 2u + 1u;
 
     if (buf_.size() < total) return Result::NEED_MORE;
 
-    // Validate end byte
     if (buf_[total - 1] != 0x77) {
         LOG_WARN("JBD: bad end byte 0x%02X, discarding", buf_[total - 1]);
-        buf_.erase(buf_.begin()); // shift and retry
+        buf_.erase(buf_.begin());
         return try_parse();
     }
 
-    // Validate checksum — covers buf_[1..3+data_len] (cmd, status, len, data)
     uint16_t stored_ck = (static_cast<uint16_t>(buf_[4 + data_len]) << 8) |
                           buf_[5 + data_len];
     uint16_t calc_ck   = checksum(buf_.data() + 1, 3u + data_len);
@@ -62,7 +61,6 @@ Parser::Result Parser::try_parse() {
         return try_parse();
     }
 
-    // Status byte buf_[2]: 0x00 = OK
     if (buf_[2] != 0x00) {
         LOG_WARN("JBD: error response status=0x%02X for cmd=0x%02X", buf_[2], buf_[1]);
         buf_.erase(buf_.begin(), buf_.begin() + static_cast<ptrdiff_t>(total));
@@ -115,7 +113,9 @@ void Parser::apply(BatterySnapshot& snap) const {
 
         // byte 18: SW version (BCD)
         uint8_t sw_ver = d[18];
-        snap.sw_version = std::to_string(sw_ver >> 4) + "." + std::to_string(sw_ver & 0x0F);
+        char ver_buf[8];
+        std::snprintf(ver_buf, sizeof(ver_buf), "%d.%d", sw_ver >> 4, sw_ver & 0x0F);
+        snap.sw_version = ver_buf;
 
         snap.soc_pct           = d[19];
         uint8_t fet_status     = d[20];

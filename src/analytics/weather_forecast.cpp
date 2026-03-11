@@ -91,6 +91,7 @@ std::string WeatherForecast::fetch_api() const {
         cfg_.zip_code.c_str(), cfg_.api_key.c_str());
 
     std::string body;
+    body.reserve(32768);
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
@@ -125,6 +126,7 @@ std::string WeatherForecast::fetch_daily_api() const {
         cfg_.zip_code.c_str(), cfg_.api_key.c_str());
 
     std::string body;
+    body.reserve(16384);
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
@@ -166,6 +168,7 @@ double WeatherForecast::parse_cloud_cover(const std::string& json) const {
 void WeatherForecast::parse_forecast_list(const std::string& json,
                                          std::vector<std::tuple<int64_t, double, bool>>& out) const {
     out.clear();
+    out.reserve(40);
     size_t pos = 0;
     while ((pos = json.find("\"dt\":", pos)) != std::string::npos) {
         pos += 5;
@@ -179,7 +182,7 @@ void WeatherForecast::parse_forecast_list(const std::string& json,
         auto pod_pos = json.find("\"pod\":\"", pos);
         bool daytime = true;
         if (pod_pos != std::string::npos && pod_pos < pos + 600) {
-            daytime = (json.substr(pod_pos + 7, 1) == "d");
+            daytime = (pod_pos + 7 < json.size() && json[pod_pos + 7] == 'd');
         }
         out.emplace_back(dt, cloud / 100.0, daytime);
         if (out.size() >= 40) break;
@@ -189,6 +192,7 @@ void WeatherForecast::parse_forecast_list(const std::string& json,
 
 std::vector<WeatherForecast::DailyEntry> WeatherForecast::parse_daily_entries(const std::string& json) {
     std::vector<DailyEntry> entries;
+    entries.reserve(16);
     if (json.empty()) return entries;
 
     size_t pos = 0;
@@ -331,7 +335,10 @@ SolarForecastWeekResult WeatherForecast::get_forecast_week(double panel_watts, d
     r.battery_voltage = v;
 
     double cap_wh_total = cap_ah * v;
-    double projected_soc = current_soc_pct; // tracks SoC across slots for realistic mode
+    double projected_soc = current_soc_pct;
+
+    r.slots.reserve(slots.size());
+    r.daily.reserve(16);
 
     std::map<int, std::vector<std::tuple<int64_t, double, bool>>> by_day;
     for (const auto& t : slots) {

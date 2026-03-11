@@ -17,33 +17,22 @@ double AnomalyDetector::rolling_avg_load() const {
     return sum / static_cast<double>(load_count_);
 }
 
-double AnomalyDetector::r_internal_30day_avg() const {
-    if (r_internal_ring_.empty()) return 0;
+void AnomalyDetector::r_internal_avgs(double& avg_30d, double& avg_today) const {
+    avg_30d = 0;
+    avg_today = 0;
+    if (r_internal_ring_.empty()) return;
     int today = static_cast<int>(std::time(nullptr) / 86400);
-    double sum = 0;
-    size_t n = 0;
+    double sum_30d = 0, sum_today = 0;
+    size_t n_30d = 0, n_today = 0;
     for (size_t i = 0; i < r_internal_ring_.size(); ++i) {
+        double r = r_internal_ring_[i];
+        if (r <= 0) continue;
         int d = r_internal_day_[i];
-        if (today - d <= 30 && r_internal_ring_[i] > 0) {
-            sum += r_internal_ring_[i];
-            ++n;
-        }
+        if (today - d <= 30) { sum_30d += r; ++n_30d; }
+        if (d == today) { sum_today += r; ++n_today; }
     }
-    return n > 0 ? sum / n : 0;
-}
-
-double AnomalyDetector::r_internal_today_avg() const {
-    if (r_internal_ring_.empty()) return 0;
-    int today = static_cast<int>(std::time(nullptr) / 86400);
-    double sum = 0;
-    size_t n = 0;
-    for (size_t i = 0; i < r_internal_ring_.size(); ++i) {
-        if (r_internal_day_[i] == today && r_internal_ring_[i] > 0) {
-            sum += r_internal_ring_[i];
-            ++n;
-        }
-    }
-    return n > 0 ? sum / n : 0;
+    if (n_30d > 0) avg_30d = sum_30d / n_30d;
+    if (n_today > 0) avg_today = sum_today / n_today;
 }
 
 void AnomalyDetector::update(const BatterySnapshot& bat, const PwrGateSnapshot* chg,
@@ -94,7 +83,7 @@ void AnomalyDetector::update(const BatterySnapshot& bat, const PwrGateSnapshot* 
             load_w, baseline);
         ev.message = buf;
         anomalies_.push_back(ev);
-        while (anomalies_.size() > ANOMALIES_MAX) anomalies_.erase(anomalies_.begin());
+        while (anomalies_.size() > ANOMALIES_MAX) anomalies_.pop_front();
     }
 
     // Slow charging: charger_state == BULK AND charge_current < expected_current * 0.6
@@ -124,7 +113,7 @@ void AnomalyDetector::update(const BatterySnapshot& bat, const PwrGateSnapshot* 
                 actual, expected);
             ev.message = buf;
             anomalies_.push_back(ev);
-            while (anomalies_.size() > ANOMALIES_MAX) anomalies_.erase(anomalies_.begin());
+            while (anomalies_.size() > ANOMALIES_MAX) anomalies_.pop_front();
         }
     }
 
@@ -137,8 +126,8 @@ void AnomalyDetector::update(const BatterySnapshot& bat, const PwrGateSnapshot* 
         if (now_ts - ts < 86400) recent_resistance = true;
     }
 
-    double r_today = r_internal_today_avg();
-    double r_30d = r_internal_30day_avg();
+    double r_today = 0, r_30d = 0;
+    r_internal_avgs(r_30d, r_today);
     if (!recent_resistance && r_today > 0 && r_30d > 0 && r_today > r_30d * RESISTANCE_INCREASE_THRESHOLD) {
         AnomalyEvent ev;
         ev.type = "resistance_increase";
@@ -151,10 +140,14 @@ void AnomalyDetector::update(const BatterySnapshot& bat, const PwrGateSnapshot* 
             r_today, r_30d);
         ev.message = buf;
         anomalies_.push_back(ev);
-        while (anomalies_.size() > ANOMALIES_MAX) anomalies_.erase(anomalies_.begin());
+        while (anomalies_.size() > ANOMALIES_MAX) anomalies_.pop_front();
     }
 }
 
-std::vector<AnomalyEvent> AnomalyDetector::anomalies() const {
+const std::deque<AnomalyEvent>& AnomalyDetector::anomalies() const {
     return anomalies_;
+}
+
+std::vector<AnomalyEvent> AnomalyDetector::anomalies_vec() const {
+    return std::vector<AnomalyEvent>(anomalies_.begin(), anomalies_.end());
 }

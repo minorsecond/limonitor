@@ -18,8 +18,8 @@ public:
     ResistanceEstimator();
 
     // Call on each update. Processes any new TX events from tx_events using history.
-    void update(const std::vector<BatterySnapshot>& history,
-                const std::vector<TxEvent>& tx_events);
+    void update(const std::deque<BatterySnapshot>& history,
+                const std::deque<TxEvent>& tx_events);
 
     double internal_resistance_mohm() const;
     std::string trend() const;  // "stable", "increasing", "decreasing"

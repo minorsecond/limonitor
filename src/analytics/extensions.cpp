@@ -48,8 +48,8 @@ void AnalyticsExtensions::set_config(const Config& cfg) {
 
 void AnalyticsExtensions::update(const BatterySnapshot& bat, const PwrGateSnapshot* chg,
                                  const AnalyticsSnapshot& an,
-                                 const std::vector<BatterySnapshot>& history,
-                                 const std::vector<TxEvent>& tx_events) {
+                                 const std::deque<BatterySnapshot>& history,
+                                 const std::deque<TxEvent>& tx_events) {
     // Track max charge amps from charger for solar/battery calculations
     if (chg && chg->valid && chg->target_a > 0) {
         max_charge_history_.push_back(chg->target_a);
