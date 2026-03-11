@@ -33,6 +33,7 @@ set(SOURCES
     src/main.cpp
     src/logger.cpp
     src/analytics.cpp
+    src/shelly_client.cpp
     src/data_store.cpp
     src/database.cpp
     src/http_server.cpp
@@ -111,6 +112,7 @@ set(UTEST_SOURCES
     tests/unit_test.cpp
     src/logger.cpp
     src/analytics.cpp
+    src/shelly_client.cpp
     src/data_store.cpp
     src/database.cpp
     src/http_server.cpp

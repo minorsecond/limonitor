@@ -143,6 +143,7 @@ void HttpServer::handle(int fd) {
         std::string turn = "off";
         if (body.find("\"turn\":\"on\"") != std::string::npos || body.find("\"turn\": \"on\"") != std::string::npos)
             turn = "on";
+        bool is_test = (body.find("\"test\":true") != std::string::npos || body.find("\"test\": true") != std::string::npos);
         std::string host = db_ ? db_->get_setting("shelly_host") : "";
         if (host.empty()) {
             send_response(fd, 400, "application/json", "{\"ok\":false,\"error\":\"Shelly not configured\"}\n");
@@ -184,10 +185,20 @@ void HttpServer::handle(int fd) {
         char rbuf[512];
         recv(sock, rbuf, sizeof(rbuf), 0);
         close(sock);
-        if (sent > 0)
+        if (sent > 0) {
+            if (db_) {
+                if (turn == "off" && is_test) {
+                    db_->set_setting("shelly_test_active", "1");
+                    db_->set_setting("shelly_test_start_ts", std::to_string(static_cast<long>(std::time(nullptr))));
+                } else if (turn == "on") {
+                    db_->set_setting("shelly_test_active", "0");
+                    db_->set_setting("shelly_test_start_ts", "");
+                }
+            }
             send_response(fd, 200, "application/json", "{\"ok\":true,\"turn\":\"" + turn + "\"}\n");
-        else
+        } else {
             send_response(fd, 502, "application/json", "{\"ok\":false,\"error\":\"Shelly request failed\"}\n");
+        }
         return;
     }
 
@@ -269,7 +280,8 @@ void HttpServer::handle(int fd) {
                     ",\"show-extended\":" + jstr(db_->get_setting("show-extended")) +
                     ",\"locale\":" + jstr(db_->get_setting("locale")) +
                     ",\"shelly_host\":" + jstr(db_->get_setting("shelly_host")) +
-                    ",\"shelly_enabled\":" + jstr(db_->get_setting("shelly_enabled")) + "}";
+                    ",\"shelly_enabled\":" + jstr(db_->get_setting("shelly_enabled")) +
+                    ",\"shelly_test_active\":" + jstr(db_->get_setting("shelly_test_active")) + "}";
             }
             std::string theme = db_ ? db_->get_setting("theme") : "";
             send_response(fd, 200, "text/html",
@@ -2129,8 +2141,7 @@ function initAtabs(){
 (function(){var n=document.querySelectorAll('nav a[href^="/"]');for(var i=0;i<n.length;i++){n[i].addEventListener('click',function(e){if(e.ctrlKey||e.metaKey||e.shiftKey)return;var h=this.getAttribute('href');if(!h)return;e.preventDefault();location.href=h})}})();
 initSettings()
 initAtabs()
-var shellyTestActive=false
-var gw=$('grid-control-wrap');if(gw){var sh=getSetting('shelly_host',''),se=getSetting('shelly_enabled','0');if(sh&&(se==='1'||se==='true')){gw.style.display='block';var offBtn=$('shelly-off-btn'),onBtn=$('shelly-on-btn'),testStart=$('shelly-test-start-btn'),testEnd=$('shelly-test-end-btn'),shellyMsg=$('shelly-msg');function shellyReq(turn){if(shellyMsg)shellyMsg.textContent='';if(shellyMsg)shellyMsg.className='msg';fetch('/api/shelly/relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({turn:turn})}).then(function(r){return r.json()}).then(function(d){if(d.ok){if(shellyMsg)shellyMsg.textContent='Done. Grid turned '+turn+'.';if(shellyMsg)shellyMsg.className='msg';if(turn==='off'){shellyTestActive=true;if(testStart)testStart.style.display='none';if(testEnd)testEnd.style.display='inline-block'}else{shellyTestActive=false;if(testStart)testStart.style.display='inline-block';if(testEnd)testEnd.style.display='none'}}else{if(shellyMsg){shellyMsg.textContent='Error: '+(d.error||'unknown');shellyMsg.className='msg err'}}}).catch(function(){if(shellyMsg){shellyMsg.textContent='Request failed.';shellyMsg.className='msg err'}})}if(offBtn)offBtn.onclick=function(){if(confirm('Turn off grid power supply? System will run on battery only.'))shellyReq('off')};if(onBtn)onBtn.onclick=function(){if(confirm('Turn on grid power supply?'))shellyReq('on')};if(testStart)testStart.onclick=function(){if(confirm('Start battery test? This will turn off grid to collect discharge data. Run for a few hours, then click End test.'))shellyReq('off')};if(testEnd){testEnd.onclick=function(){if(confirm('End battery test and turn grid back on?'))shellyReq('on')};testEnd.style.display='none'}}}}
+var gw=$('grid-control-wrap');if(gw){var sh=getSetting('shelly_host',''),se=getSetting('shelly_enabled','0');if(sh&&(se==='1'||se==='true')){gw.style.display='block';var offBtn=$('shelly-off-btn'),onBtn=$('shelly-on-btn'),testStart=$('shelly-test-start-btn'),testEnd=$('shelly-test-end-btn'),shellyMsg=$('shelly-msg');var testActive=getSetting('shelly_test_active','0')==='1';if(testActive&&testStart)testStart.style.display='none';if(testActive&&testEnd)testEnd.style.display='inline-block';function shellyReq(turn,isTest){if(shellyMsg)shellyMsg.textContent='';if(shellyMsg)shellyMsg.className='msg';var body={turn:turn};if(isTest)body.test=true;fetch('/api/shelly/relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json()}).then(function(d){if(d.ok){if(shellyMsg)shellyMsg.textContent='Done. Grid turned '+turn+'.';if(shellyMsg)shellyMsg.className='msg';if(turn==='off'){shellyTestActive=true;if(testStart)testStart.style.display='none';if(testEnd)testEnd.style.display='inline-block'}else{shellyTestActive=false;if(testStart)testStart.style.display='inline-block';if(testEnd)testEnd.style.display='none'}}else{if(shellyMsg){shellyMsg.textContent='Error: '+(d.error||'unknown');shellyMsg.className='msg err'}}}).catch(function(){if(shellyMsg){shellyMsg.textContent='Request failed.';shellyMsg.className='msg err'}})}if(offBtn)offBtn.onclick=function(){if(confirm('Turn off grid power supply? System will run on battery only.'))shellyReq('off')};if(onBtn)onBtn.onclick=function(){if(confirm('Turn on grid power supply?'))shellyReq('on')};if(testStart)testStart.onclick=function(){if(confirm('Start battery test? This will turn off grid to collect discharge data. Run for a few hours, then click End test.'))shellyReq('off',true)};if(testEnd){testEnd.onclick=function(){if(confirm('End battery test and turn grid back on?'))shellyReq('on')};testEnd.style.display='none'}}}}
 
 function upBat(){fetch('/api/status').then(function(r){return r.json()}).then(function(d){
   if(!d.valid)return
@@ -3362,7 +3373,13 @@ h1{font-size:1.35rem;font-weight:600;color:var(--green);margin-bottom:.25rem}
     o += esc(g("shelly_host", ""));
     o += "\"></div><div class=\"row\"><label>Enable grid control</label><input type=\"checkbox\" name=\"shelly_enabled\" ";
     o += (g("shelly_enabled", "0") == "1" || g("shelly_enabled", "0") == "true") ? "checked" : "";
-    o += "></div><div class=\"section-title\">EpicPowerGate / Serial</div><div class=\"row\"><label>Serial device</label><input type=\"text\" name=\"serial_device\" placeholder=\"/dev/ttyACM0\" value=\"";
+    o += "></div><div class=\"row\"><label>Auto-end test when data sufficient</label><input type=\"checkbox\" name=\"shelly_battery_test_auto\" ";
+    o += (g("shelly_battery_test_auto", "0") == "1" || g("shelly_battery_test_auto", "0") == "true") ? "checked" : "";
+    o += " title=\"Turn grid back on when 6+ hours of discharge data collected\"></div><div class=\"row\"><label>Max test hours (safety)</label><input type=\"number\" name=\"shelly_battery_test_max_hours\" min=\"1\" max=\"168\" value=\"";
+    o += esc(g("shelly_battery_test_max_hours", "24"));
+    o += "\" title=\"Force grid on after this many hours\"></div><div class=\"row\"><label>Low SoC cutoff % (safety)</label><input type=\"number\" name=\"shelly_battery_test_low_soc\" min=\"5\" max=\"50\" step=\"1\" value=\"";
+    o += esc(g("shelly_battery_test_low_soc", "20"));
+    o += "\" title=\"Turn grid on if battery drops below this %\"></div><div class=\"section-title\">EpicPowerGate / Serial</div><div class=\"row\"><label>Serial device</label><input type=\"text\" name=\"serial_device\" placeholder=\"/dev/ttyACM0\" value=\"";
     o += esc(g("serial_device", ""));
     o += "\"></div><div class=\"row\"><label>Serial baud</label><input type=\"number\" name=\"serial_baud\" value=\"";
     o += esc(g("serial_baud", "115200"));
@@ -3400,7 +3417,7 @@ h1{font-size:1.35rem;font-weight:600;color:var(--green);margin-bottom:.25rem}
     o += "></div><button type=\"submit\" class=\"btn\">Save</button><div id=\"msg\" class=\"msg\"></div></form><script>\n"
          "(function(){var n=document.querySelectorAll('nav a[href^=\"/\"]');for(var i=0;i<n.length;i++){n[i].addEventListener('click',function(e){if(e.ctrlKey||e.metaKey||e.shiftKey)return;var h=this.getAttribute('href');if(!h)return;e.preventDefault();location.href=h})}})();\n"
          "document.getElementById('cfg-form').onsubmit=function(e){e.preventDefault();var f=e.target;var o={settings_initialized:'1'};\n"
-         "['device_name','device_address','adapter_path','http_port','http_bind','log_file','verbose','shelly_host','shelly_enabled','serial_device','serial_baud','pwrgate_remote','poll_interval','db_path','db_interval','battery_purchased','rated_capacity_ah','tx_threshold','solar_enabled','solar_panel_watts','solar_system_efficiency','solar_zip_code','weather_api_key','weather_zip_code','daemon'].forEach(function(k){\n"
+         "['device_name','device_address','adapter_path','http_port','http_bind','log_file','verbose','shelly_host','shelly_enabled','shelly_battery_test_auto','shelly_battery_test_max_hours','shelly_battery_test_low_soc','serial_device','serial_baud','pwrgate_remote','poll_interval','db_path','db_interval','battery_purchased','rated_capacity_ah','tx_threshold','solar_enabled','solar_panel_watts','solar_system_efficiency','solar_zip_code','weather_api_key','weather_zip_code','daemon'].forEach(function(k){\n"
          "var el=f.elements[k];if(el)o[k]=el.type==='checkbox'?(el.checked?'1':'0'):el.value\n"
          "});\nfetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(o)})\n"
          ".then(function(r){if(r.ok){document.getElementById('msg').textContent='Saved. Restart limonitor to apply.';document.getElementById('msg').className='msg'}else{throw new Error()}})\n"

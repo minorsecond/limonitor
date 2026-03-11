@@ -9,6 +9,7 @@
 #include "logger.hpp"
 #include "pwrgate_client.hpp"
 #include "serial_reader.hpp"
+#include "shelly_client.hpp"
 #include "tui.hpp"
 
 #include <atomic>
@@ -468,6 +469,16 @@ int main(int argc, char** argv) {
         store.set_loading_history(false);
 
         int interval = cfg.db_write_interval_s;
+        // Shelly battery test safety check (throttled to every 60s)
+        store.on_update([db, &store](const BatterySnapshot&) {
+            using clock = std::chrono::steady_clock;
+            static auto last_shelly_check = clock::time_point{};
+            auto now = clock::now();
+            if (std::chrono::duration_cast<std::chrono::seconds>(now - last_shelly_check).count() >= 60) {
+                shelly::check_test_conditions(db.get(), store);
+                last_shelly_check = now;
+            }
+        });
         // Battery observer — throttled by db_write_interval_s
         store.on_update([db, interval](const BatterySnapshot& snap) {
             using clock = std::chrono::steady_clock;
@@ -610,9 +621,10 @@ int main(int argc, char** argv) {
         LOG_INFO("Daemon mode: running headless (HTTP on port %d)", cfg.http_port);
         auto last_checkpoint = std::chrono::steady_clock::now();
         while (!g_quit) {
-            wait_quit(300);
+            wait_quit(60);
             if (db && db->is_open()) {
                 auto now = std::chrono::steady_clock::now();
+                shelly::check_test_conditions(db.get(), store);
                 if (std::chrono::duration_cast<std::chrono::minutes>(now - last_checkpoint).count() >= 5) {
                     db->checkpoint();
                     last_checkpoint = now;
