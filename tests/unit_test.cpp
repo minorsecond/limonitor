@@ -492,7 +492,7 @@ static void test_forecast_week_extended_cloud_values() {
             time_t tt = static_cast<time_t>(expected[i].dt);
             struct tm tm_buf{};
             localtime_r(&tt, &tm_buf);
-            char date_buf[16];
+            char date_buf[32];
             std::snprintf(date_buf, sizeof(date_buf), "%04d-%02d-%02d",
                           tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday);
             if (d.date == date_buf) {

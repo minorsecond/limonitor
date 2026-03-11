@@ -63,7 +63,7 @@ else()
 endif()
 
 add_executable(limonitor ${SOURCES})
-target_compile_options(limonitor PRIVATE -Wall -Wextra)
+target_compile_options(limonitor PRIVATE -Wall -Wextra -Wno-psabi)
 
 # Common link libs (atomic needed for 64-bit atomics on 32-bit ARM)
 target_link_libraries(limonitor pthread SQLite::SQLite3)
@@ -103,7 +103,7 @@ else()
 endif()
 
 add_executable(limonitor_integration_test ${ITEST_SOURCES})
-target_compile_options(limonitor_integration_test PRIVATE -Wall -Wextra)
+target_compile_options(limonitor_integration_test PRIVATE -Wall -Wextra -Wno-psabi)
 target_link_libraries(limonitor_integration_test pthread)
 if(APPLE)
     target_link_libraries(limonitor_integration_test
@@ -145,7 +145,7 @@ else()
 endif()
 
 add_executable(limonitor_unit_test ${UTEST_SOURCES})
-target_compile_options(limonitor_unit_test PRIVATE -Wall -Wextra)
+target_compile_options(limonitor_unit_test PRIVATE -Wall -Wextra -Wno-psabi)
 target_link_libraries(limonitor_unit_test pthread SQLite::SQLite3)
 if(NOT APPLE)
     target_link_libraries(limonitor_unit_test atomic)
