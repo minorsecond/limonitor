@@ -254,8 +254,35 @@ void HttpServer::handle(int fd) {
         if (ni != std::string::npos) { try { count = std::stoul(query.substr(ni + 2)); } catch (...) {} }
         send_response(fd, 200, "application/json", tx_events_json(store_.tx_events(count)));
     } else if (path == "/api/analytics") {
+        auto an = store_.analytics();
+        if (an.avg_discharge_24h_w < 0.5 && db_ && snap.valid && snap.nominal_ah > 1.0) {
+            auto usage = db_->get_usage_profile(7);
+            int total_n = 0;
+            double total_sum = 0;
+            for (const auto& u : usage) {
+                total_sum += u.avg_w * u.sample_count;
+                total_n += u.sample_count;
+            }
+            double load_w = (total_n > 0) ? total_sum / total_n : 0;
+            if (load_w > 0.5) {
+                double v = snap.total_voltage_v > 1 ? snap.total_voltage_v : 51.2;
+                int cells = std::max(1, static_cast<int>(std::round(v / 3.3)));
+                double pack_v = cells * 3.2;
+                double cap_wh = snap.nominal_ah * pack_v;
+                double rf = estimate_runtime_h(cap_wh, 100.0, 10.0, load_w);
+                double rn = estimate_runtime_h(cap_wh, snap.soc_pct, 10.0, load_w);
+                if (rn > 0) {
+                    an.avg_discharge_24h_w = load_w;
+                    an.runtime_from_full_h = std::min(rf, 1000.0);
+                    an.runtime_from_current_h = std::min(rn, 1000.0);
+                    an.runtime_full_exceeds_cap = (rf > 1000.0);
+                    an.runtime_current_exceeds_cap = (rn > 1000.0);
+                    an.runtime_from_historical = true;
+                }
+            }
+        }
         send_response(fd, 200, "application/json",
-                      analytics_json(store_.analytics(), &store_));
+                      analytics_json(an, &store_));
     } else if (path == "/api/events") {
         size_t count = 50;
         auto ni = query.find("n=");
@@ -699,6 +726,7 @@ std::string HttpServer::analytics_json(const AnalyticsSnapshot& a,
     o += "  \"runtime_full_exceeds_cap\": "   + jbool(a.runtime_full_exceeds_cap)   + ",\n";
     o += "  \"runtime_current_exceeds_cap\": " + jbool(a.runtime_current_exceeds_cap) + ",\n";
     o += "  \"runtime_from_charger\": "       + jbool(a.runtime_from_charger)       + ",\n";
+    o += "  \"runtime_from_historical\": "    + jbool(a.runtime_from_historical)    + ",\n";
     o += "  \"avg_discharge_24h_w\": "       + jdbl(a.avg_discharge_24h_w, 1)        + ",\n";
     o += "  \"solar_readiness\": "            + jstr(a.solar_readiness)            + ",\n";
     o += "  \"charge_rate_w\": "              + jdbl(a.charge_rate_w, 1)            + ",\n";
@@ -2252,8 +2280,8 @@ function upAnalytics(){fetch('/api/analytics').then(function(r){return r.json()}
   sv('an-runtime-full',rf>0?(excF?'> 1000 h':fmt(rf,1)+' h'):'—')
   sv('an-runtime-now', rn>0?(excN?'> 1000 h':fmt(rn,1)+' h'):'—')
   sv('an-avg-load-24h',avg24>0?fmt(avg24,1)+' W':'—')
-  var a24=$('an-avg-load-24h');if(a24)a24.title=d.runtime_from_charger?'From charger power when charging (est. load when grid drops).':'Load used for runtime. From 24h discharge or 1h profile (BMS+charger).'
-  var rtTip=d.runtime_from_charger?'From charger power when charging (est. load when grid drops). 10% = LiFePO4 cutoff.':'24h discharge or 1h load profile. When charging, uses charger power as fallback. 10% = LiFePO4 cutoff.'
+  var a24=$('an-avg-load-24h');if(a24)a24.title=d.runtime_from_historical?'7-day avg load from DB (on grid). Battery-only estimate.':d.runtime_from_charger?'From charger power when charging (est. load when grid drops).':'Load used for runtime. From 24h discharge or 1h profile (BMS+charger).'
+  var rtTip=d.runtime_from_historical?'Battery-only estimate from 7-day avg load (on grid). 10% = LiFePO4 cutoff.':d.runtime_from_charger?'From charger power when charging (est. load when grid drops). 10% = LiFePO4 cutoff.':'24h discharge or 1h load profile. When charging, uses charger power as fallback. 10% = LiFePO4 cutoff.'
   var rfe=$('an-runtime-full');if(rfe)rfe.title=rtTip
   var rne=$('an-runtime-now');if(rne)rne.title=rtTip
   if(d.uptime_sec!=null){var u=d.uptime_sec,days=Math.floor(u/86400);sv('an-uptime',days>0?days+' days':Math.floor(u/3600)+'h')}

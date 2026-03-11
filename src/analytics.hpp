@@ -63,6 +63,7 @@ struct AnalyticsSnapshot {
     bool   runtime_full_exceeds_cap{false};   // display "> 1000 h" for full
     bool   runtime_current_exceeds_cap{false}; // display "> 1000 h" for current
     bool   runtime_from_charger{false}; // true when load used charger power (charging) fallback
+    bool   runtime_from_historical{false}; // true when load from 7d DB profile (on grid)
     double avg_discharge_24h_w{0};      // 24h average discharge (W), 0 = insufficient data
     std::vector<std::string> health_alerts;
 };
