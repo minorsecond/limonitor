@@ -927,6 +927,7 @@ std::string HttpServer::solar_forecast_week_json(const SolarForecastWeekResult& 
     double cap_wh = r.nominal_ah * r.battery_voltage;
     auto soc_proj = project_battery_soc(r.current_soc_pct, cap_wh, gen_wh_vec, use_wh_vec);
 
+    o += "  \"capacity_wh\": " + jdbl(cap_wh, 1) + ",\n";
     o += "  \"slots\": [";
     for (size_t i = 0; i < r.slots.size(); ++i) {
         const auto& s = r.slots[i];
@@ -2837,6 +2838,7 @@ td .rc-main{font-weight:600}
          "var socArr=[];\n"
          "if(showSoc&&capWh>0){\n"
          "var lastSoc=lastDailyData.current_soc_pct||0;\n"
+         "try{console.log('[SoC Debug] start='+lastSoc+'% capWh='+capWh+' ah='+ah+' bv='+bv+' capacity_wh='+(lastDailyData.capacity_wh||'N/A'));}catch(e){}\n"
          "slots.forEach(function(s){\n"
          "if(typeof s.soc_pct==='number'){lastSoc=s.soc_pct;socArr.push(lastSoc);}\n"
          "else{var netWh=(s.kwh-(s.use_kwh||0))*1000;lastSoc+=(netWh/capWh)*100;lastSoc=Math.max(0,Math.min(100,lastSoc));socArr.push(lastSoc);}\n"
@@ -2905,12 +2907,12 @@ td .rc-main{font-weight:600}
          "var socFill=PL.toFixed(1)+','+(PT+CH).toFixed(1)+' ';\n"
          "slots.forEach(function(sl,i){socFill+=xpM(sl.ts).toFixed(1)+','+ypSoc(socArr[i]).toFixed(1)+' ';});\n"
          "socFill+=(PL+CW).toFixed(1)+','+(PT+CH).toFixed(1);\n"
-         "s+=\"<polygon points='\"+socFill+\"' fill='var(--violet)' opacity='.08'/>\";\n"
+         "s+=\"<polygon points='\"+socFill+\"' fill='var(--violet)' opacity='.12'/>\";\n"
          "var socLine='';slots.forEach(function(sl,i){socLine+=xpM(sl.ts).toFixed(1)+','+ypSoc(socArr[i]).toFixed(1)+' ';});\n"
-         "s+=\"<polyline fill='none' stroke='var(--violet)' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' points='\"+socLine+\"'/>\";\n"
+         "s+=\"<polyline fill='none' stroke='var(--violet)' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' points='\"+socLine+\"'/>\";\n"
          "var startX=xpM(slots[0].ts),startY=ypSoc(socArr[0]);\n"
-         "s+=\"<circle cx='\"+startX.toFixed(1)+\"' cy='\"+startY.toFixed(1)+\"' r='4' fill='var(--violet)' stroke='var(--bg)' stroke-width='1.5'/>\";\n"
-         "s+=\"<text x='\"+(startX+6).toFixed(1)+\"' y='\"+(startY-4).toFixed(1)+\"' font-size='8' font-family='monospace' fill='var(--violet)' font-weight='600'>\"+Math.round(socArr[0])+'%</text>';}\n"
+         "s+=\"<circle cx='\"+startX.toFixed(1)+\"' cy='\"+startY.toFixed(1)+\"' r='5' fill='var(--violet)' stroke='var(--bg)' stroke-width='2'/>\";\n"
+         "s+=\"<text x='\"+(startX+8).toFixed(1)+\"' y='\"+(startY-5).toFixed(1)+\"' font-size='9' font-family='monospace' fill='var(--violet)' font-weight='700'>\"+Math.round(socArr[0])+'%</text>';}\n"
          "var linePts='';slots.forEach(function(sl){linePts+=xpM(sl.ts).toFixed(1)+','+yp(conv(sl.kwh)).toFixed(1)+' ';});\n"
          "s+=\"<polyline fill='none' stroke='var(--green)' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' points='\"+linePts+\"'/>\";\n"
          "slots.forEach(function(sl,i){\n"
@@ -2938,10 +2940,10 @@ td .rc-main{font-weight:600}
          "s+=\"<line x1='\"+(PL-3)+\"' y1='\"+gy.toFixed(1)+\"' x2='\"+PL+\"' y2='\"+gy.toFixed(1)+\"' stroke='var(--muted)' stroke-width='0.5'/>\";\n"
          "s+=\"<text x='\"+(PL-5)+\"' y='\"+(gy+3).toFixed(1)+\"' text-anchor='end'>\"+fmt(yv,ya.dec)+\"</text>\";}\n"
          "s+=\"</g>\";\n"
-         "if(showSoc){s+=\"<g font-size='9' font-family='monospace' fill='var(--violet)'>\";\n"
+         "if(showSoc){s+=\"<g font-size='10' font-family='monospace' fill='var(--violet)' font-weight='600'>\";\n"
          "for(var pv=0;pv<=100;pv+=20){var gy=ypSoc(pv);\n"
-         "s+=\"<line x1='\"+(PL+CW)+\"' y1='\"+gy.toFixed(1)+\"' x2='\"+(PL+CW+3)+\"' y2='\"+gy.toFixed(1)+\"' stroke='var(--violet)' stroke-width='0.5'/>\";\n"
-         "s+=\"<text x='\"+(PL+CW+5)+\"' y='\"+(gy+3).toFixed(1)+\"' text-anchor='start'>\"+pv+\"%</text>\";}\n"
+         "s+=\"<line x1='\"+(PL+CW)+\"' y1='\"+gy.toFixed(1)+\"' x2='\"+(PL+CW+4)+\"' y2='\"+gy.toFixed(1)+\"' stroke='var(--violet)' stroke-width='1'/>\";\n"
+         "s+=\"<text x='\"+(PL+CW+6)+\"' y='\"+(gy+3.5).toFixed(1)+\"' text-anchor='start'>\"+pv+\"%</text>\";}\n"
          "s+=\"</g>\";}\n"
          "else if(showCumul){s+=\"<g font-size='9' font-family='monospace' fill='var(--cyan)'>\";\n"
          "for(var yv=0;yv<=ca.max;yv+=ca.step){var gy=yp2(yv);\n"
