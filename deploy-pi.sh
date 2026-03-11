@@ -22,10 +22,39 @@ if command -v ninja >/dev/null 2>&1; then
     BUILD_GENERATOR="Ninja"
 fi
 
-if [[ "$1" == "--clean" ]]; then
-    echo "=== clean ==="
-    ./clean.sh
-fi
+usage() {
+    echo "Usage: $0 [OPTIONS]"
+    echo ""
+    echo "Clean, build, and deploy limonitor to Raspberry Pi."
+    echo ""
+    echo "Options:"
+    echo "  --clean     Perform a full clean before building."
+    echo "  -h, --help  Show this help message and exit."
+    echo ""
+    echo "Environment Variables:"
+    echo "  LIMONITOR_USER  User to run the service as (default: $SVC_USER)."
+    echo "  LIMONITOR_PORT  HTTP port for the web interface (default: $HTTP_PORT)."
+    echo ""
+}
+
+case "$1" in
+    -h|--help)
+        usage
+        exit 0
+        ;;
+    --clean)
+        echo "=== clean ==="
+        ./clean.sh
+        ;;
+    "")
+        # No arguments, proceed as normal
+        ;;
+    *)
+        echo "Unknown option: $1"
+        usage
+        exit 1
+        ;;
+esac
 
 echo "=== build (using $BUILD_GENERATOR) ==="
 cmake -B build -G "$BUILD_GENERATOR" -DCMAKE_BUILD_TYPE=Release
@@ -90,11 +119,11 @@ if ! diff -q "$TEMP_UNIT" /etc/systemd/system/limonitor.service > /dev/null 2>&1
     sudo systemctl daemon-reload
     echo "updated systemd service unit"
 else
-    rm "$TEMP_UNIT"
+    rm -f "$TEMP_UNIT"
 fi
 
 sudo systemctl enable limonitor
-sudo systemctl start limonitor
+sudo systemctl restart limonitor
 
 echo "done. status: sudo systemctl status limonitor"
 echo "logs: sudo journalctl -u limonitor -f"
