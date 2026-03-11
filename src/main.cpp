@@ -5,6 +5,7 @@
 #include "data_store.hpp"
 #include "database.hpp"
 #include "http_server.hpp"
+#include "testing/runner.hpp"
 #include "ops_events.hpp"
 #include "ops_util.hpp"
 #include "litime_protocol.hpp"
@@ -496,8 +497,11 @@ int main(int argc, char** argv) {
         LOG_WARN("DB: running without persistence");
     }
 
+    // Test runner for battery/system testing
+    testing::TestRunner test_runner(store, db->is_open() ? db.get() : nullptr);
+
     // HTTP server (pass db for settings persistence; works even when db->open() failed, via file fallback)
-    HttpServer http(store, db.get(), cfg.http_bind, cfg.http_port, cfg.poll_interval_s);
+    HttpServer http(store, db.get(), cfg.http_bind, cfg.http_port, cfg.poll_interval_s, &test_runner);
     if (!http.start()) {
         LOG_ERROR("HTTP server failed to start on port %d", cfg.http_port);
         return 1;

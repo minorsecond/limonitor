@@ -10,6 +10,7 @@
 #include "ops_events.hpp"
 #include "system_events.hpp"
 #include "tx_events.hpp"
+#include "testing/runner.hpp"
 #include <atomic>
 #include <cstdint>
 #include <string>
@@ -19,7 +20,7 @@
 class HttpServer {
 public:
     HttpServer(DataStore& store, Database* db, const std::string& bind_addr, uint16_t port,
-               int poll_interval_s = 5);
+               int poll_interval_s = 5, testing::TestRunner* test_runner = nullptr);
     ~HttpServer();
 
     bool start();
@@ -30,6 +31,7 @@ public:
 private:
     DataStore&   store_;
     Database*    db_{nullptr};
+    testing::TestRunner* test_runner_{nullptr};
     std::string  bind_addr_;
     uint16_t     port_;
     int          listen_fd_{-1};
@@ -81,6 +83,8 @@ private:
                                        const std::string& theme = "");
     static std::string html_settings_page(Database* db);
     static std::string html_ops_log_page(Database* db, const std::string& theme);
+    static std::string html_testing_page(Database* db, testing::TestRunner* runner,
+                                        const std::string& theme);
 
     static std::string ops_log_json(const std::vector<OpsEvent>& events);
     static std::string maintenance_status_json(Database* db);

@@ -3,6 +3,7 @@
 #include "ops_events.hpp"
 #include "ops_util.hpp"
 #include "analytics/extensions.hpp"
+#include "testing/types.hpp"
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cerrno>
@@ -57,8 +58,8 @@ static std::string jval_s(const std::string& body, const std::string& key) {
 }
 
 HttpServer::HttpServer(DataStore& store, Database* db, const std::string& bind_addr, uint16_t port,
-                       int poll_interval_s)
-    : store_(store), db_(db), bind_addr_(bind_addr), port_(port),
+                       int poll_interval_s, testing::TestRunner* test_runner)
+    : store_(store), db_(db), test_runner_(test_runner), bind_addr_(bind_addr), port_(port),
       poll_interval_s_(std::max(1, poll_interval_s)) {}
 
 HttpServer::~HttpServer() { stop(); }
@@ -383,6 +384,59 @@ void HttpServer::handle(int fd) {
         return;
     }
 
+    if (method == "POST" && path == "/api/tests/start") {
+        if (!test_runner_) { send_response(fd, 503, "application/json", "{\"ok\":false,\"error\":\"Test runner unavailable\"}\n"); return; }
+        if (test_runner_->is_running()) { send_response(fd, 409, "application/json", "{\"ok\":false,\"error\":\"Test already running\"}\n"); return; }
+        auto body_start = req.find("\r\n\r\n");
+        if (body_start != std::string::npos) body_start += 4;
+        else { body_start = req.find("\n\n"); if (body_start != std::string::npos) body_start += 2; }
+        std::string body = (body_start != std::string::npos && body_start < req.size()) ? req.substr(body_start) : "";
+        std::string type_s = jval_s(body, "test_type");
+        if (type_s.empty()) type_s = "capacity";
+        auto type = testing::parse_test_type(type_s.c_str());
+        int64_t id = test_runner_->start_test(type);
+        if (id > 0) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "{\"ok\":true,\"test_id\":%lld}\n", (long long)id);
+            send_response(fd, 200, "application/json", buf);
+        } else {
+            send_response(fd, 400, "application/json", "{\"ok\":false,\"error\":\"Cannot start test (check SOC, maintenance mode)\"}\n");
+        }
+        return;
+    }
+
+    if (method == "POST" && path == "/api/tests/stop") {
+        if (!test_runner_) { send_response(fd, 503, "application/json", "{\"ok\":false,\"error\":\"Test runner unavailable\"}\n"); return; }
+        test_runner_->stop_test();
+        send_response(fd, 200, "application/json", "{\"ok\":true}\n");
+        return;
+    }
+
+    if (method == "POST" && path.compare(0, 11, "/api/tests/") == 0 && path.find("/notes") != std::string::npos) {
+        size_t notes_pos = path.find("/notes");
+        size_t id_start = 11;
+        size_t id_end = path.find('/', id_start);
+        if (id_end != std::string::npos && id_end < notes_pos) {
+            std::string id_part = path.substr(id_start, id_end - id_start);
+            int64_t id = 0;
+            try { id = std::stoll(id_part); } catch (...) {}
+            if (id > 0 && db_) {
+                auto body_start = req.find("\r\n\r\n");
+                if (body_start != std::string::npos) body_start += 4;
+                else { body_start = req.find("\n\n"); if (body_start != std::string::npos) body_start += 2; }
+                std::string body = (body_start != std::string::npos && body_start < req.size()) ? req.substr(body_start) : "";
+                std::string notes = jval_s(body, "notes");
+                if (db_->update_test_run_notes(id, notes))
+                    send_response(fd, 200, "application/json", "{\"ok\":true}\n");
+                else
+                    send_response(fd, 404, "application/json", "{\"ok\":false,\"error\":\"test not found\"}\n");
+            } else {
+                send_response(fd, 400, "application/json", "{\"ok\":false,\"error\":\"invalid id\"}\n");
+            }
+            return;
+        }
+    }
+
     if (method != "GET") { send_response(fd, 405, "text/plain", "Method Not Allowed"); return; }
 
     auto snap_opt = store_.latest();
@@ -448,6 +502,10 @@ void HttpServer::handle(int fd) {
         std::string theme = db_ ? db_->get_setting("theme") : "";
         if (theme.empty()) theme = "dark";
         send_response(fd, 200, "text/html", html_ops_log_page(db_, theme));
+    } else if (path == "/testing" || path == "/testing.html") {
+        std::string theme = db_ ? db_->get_setting("theme") : "";
+        if (theme.empty()) theme = "dark";
+        send_response(fd, 200, "text/html", html_testing_page(db_, test_runner_, theme));
     } else if (path == "/api/ops_log") {
         size_t n = 100;
         auto ni = query.find("n=");
@@ -566,6 +624,98 @@ void HttpServer::handle(int fd) {
         } else {
             send_response(fd, 200, "application/json",
                          "{\"internal_resistance_milliohms\":0,\"trend\":\"stable\"}\n");
+        }
+    } else if (path == "/api/battery/capacity") {
+        if (!db_) {
+            send_response(fd, 200, "application/json", "{\"history\":[],\"latest_health\":-1}\n");
+        } else {
+            auto hist = db_->load_battery_capacity_history(365);
+            std::string out = "{\"history\":[";
+            for (size_t i = 0; i < hist.size(); ++i) {
+                if (i) out += ",";
+                char buf[64];
+                std::snprintf(buf, sizeof(buf), "[%lld,%.2f]", (long long)hist[i].first, hist[i].second);
+                out += buf;
+            }
+            double latest = hist.empty() ? -1 : hist.back().second;
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "],\"latest_health\":%.1f}\n", latest);
+            out += buf;
+            send_response(fd, 200, "application/json", out);
+        }
+    } else if (path == "/api/battery/health") {
+        auto* ext = store_.extensions();
+        if (ext) {
+            auto an = store_.analytics();
+            auto r = ext->health_scorer().compute(an, ext->anomaly_detector().anomalies().size());
+            send_response(fd, 200, "application/json", system_health_json(r));
+        } else {
+            send_response(fd, 200, "application/json",
+                         "{\"score\":0,\"battery\":\"—\",\"cells\":\"—\",\"charging\":\"—\"}\n");
+        }
+    } else if (path == "/api/tests") {
+        if (!db_) {
+            send_response(fd, 200, "application/json", "{\"tests\":[],\"running\":false}\n");
+        } else {
+            auto runs = db_->load_test_runs(100);
+            std::string out = "{\"tests\":[";
+            for (size_t i = 0; i < runs.size(); ++i) {
+                if (i) out += ",";
+                out += "{\"id\":" + std::to_string(runs[i].id) +
+                    ",\"test_type\":" + jstr(runs[i].test_type) +
+                    ",\"start_time\":" + std::to_string(runs[i].start_time) +
+                    ",\"end_time\":" + std::to_string(runs[i].end_time) +
+                    ",\"duration_seconds\":" + std::to_string(runs[i].duration_seconds) +
+                    ",\"result\":" + jstr(runs[i].result) +
+                    ",\"initial_soc\":" + jdbl(runs[i].initial_soc) +
+                    ",\"user_notes\":" + jstr(runs[i].user_notes) + "}";
+            }
+            out += "],\"running\":" + std::string(test_runner_ && test_runner_->is_running() ? "true" : "false");
+            if (test_runner_ && test_runner_->is_running()) {
+                out += ",\"current_test_id\":" + std::to_string(test_runner_->current_test_id());
+            }
+            out += "}\n";
+            send_response(fd, 200, "application/json", out);
+        }
+    } else if (path.compare(0, 11, "/api/tests/") == 0 && path.size() > 11) {
+        size_t id_end = path.find('/', 11);
+        std::string id_part = (id_end != std::string::npos) ? path.substr(11, id_end - 11) : path.substr(11);
+        std::string suffix = (id_end != std::string::npos && id_end + 1 < path.size()) ? path.substr(id_end + 1) : "";
+        int64_t id = 0;
+        try { id = std::stoll(id_part); } catch (...) {}
+        if (id <= 0 || !db_) {
+            send_response(fd, 404, "application/json", "{\"error\":\"not found\"}\n");
+        } else if (suffix == "telemetry") {
+            auto samples = db_->load_test_telemetry(id, 5000);
+            std::string out = "{\"test_id\":" + std::to_string(id) + ",\"samples\":[";
+            for (size_t i = 0; i < samples.size(); ++i) {
+                if (i) out += ",";
+                char buf[256];
+                std::snprintf(buf, sizeof(buf),
+                    "{\"ts\":%lld,\"v\":%.2f,\"a\":%.2f,\"soc\":%.1f,\"load\":%.1f,\"chg\":\"%s\"}",
+                    (long long)samples[i].timestamp, samples[i].battery_voltage, samples[i].battery_current,
+                    samples[i].battery_soc, samples[i].load_power, samples[i].charger_state.c_str());
+                out += buf;
+            }
+            out += "]}\n";
+            send_response(fd, 200, "application/json", out);
+        } else {
+            auto run = db_->load_test_run(id);
+            if (!run) {
+                send_response(fd, 404, "application/json", "{\"error\":\"not found\"}\n");
+            } else {
+                std::string out = "{\"id\":" + std::to_string(run->id) +
+                    ",\"test_type\":" + jstr(run->test_type) +
+                    ",\"start_time\":" + std::to_string(run->start_time) +
+                    ",\"end_time\":" + std::to_string(run->end_time) +
+                    ",\"duration_seconds\":" + std::to_string(run->duration_seconds) +
+                    ",\"result\":" + jstr(run->result) +
+                    ",\"initial_soc\":" + jdbl(run->initial_soc) +
+                    ",\"initial_voltage\":" + jdbl(run->initial_voltage) +
+                    ",\"metadata_json\":" + jstr(run->metadata_json) +
+                    ",\"user_notes\":" + jstr(run->user_notes) + "}\n";
+                send_response(fd, 200, "application/json", out);
+            }
         }
     } else if (path == "/api/solar_forecast_week") {
         auto* ext = store_.extensions();
@@ -1870,7 +2020,7 @@ html.light .grid-btn-test{background:var(--border);color:var(--text)}
 </head><body><div class="wrap">
 )HTML";
 
-    o += "<nav class=\"tabs\"><a href=\"/\" class=\"tab active\">Dashboard</a><a href=\"/solar\" class=\"tab\">Solar</a><a href=\"/settings\" class=\"tab\">Settings</a><a href=\"/ops_log\" class=\"tab\">Ops Log</a></nav>";
+    o += "<nav class=\"tabs\"><a href=\"/\" class=\"tab active\">Dashboard</a><a href=\"/solar\" class=\"tab\">Solar</a><a href=\"/settings\" class=\"tab\">Settings</a><a href=\"/ops_log\" class=\"tab\">Ops Log</a><a href=\"/testing\" class=\"tab\">Testing</a></nav>";
     o += "<header><h1>limonitor</h1><div class=\"hstat\">";
     o += "<span><span class=\"dot " + dot_cls + "\"></span>" + ble_st + "</span>";
     if (s.valid && !s.device_name.empty())
@@ -3054,7 +3204,7 @@ td .rc-main{font-weight:600}
 <link rel="prefetch" href="/"><link rel="prefetch" href="/settings">
 </head><body>
 )HTML";
-    o += "<nav class=\"tabs\"><a href=\"/\" class=\"tab\">Dashboard</a><a href=\"/solar\" class=\"tab active\">Solar</a><a href=\"/settings\" class=\"tab\">Settings</a><a href=\"/ops_log\" class=\"tab\">Ops Log</a>";
+    o += "<nav class=\"tabs\"><a href=\"/\" class=\"tab\">Dashboard</a><a href=\"/solar\" class=\"tab active\">Solar</a><a href=\"/settings\" class=\"tab\">Settings</a><a href=\"/ops_log\" class=\"tab\">Ops Log</a><a href=\"/testing\" class=\"tab\">Testing</a>";
     o += "<button id=\"thm-btn\" class=\"btn\" onclick=\"toggleTheme()\" title=\"Toggle theme\" style=\"margin-left:auto\">&#9788;</button>";
     o += "<button id=\"set-btn\" class=\"btn\" onclick=\"toggleSettings()\" title=\"Settings\">&#9881;</button></nav>";
     o += "<div id=\"settings-modal\" class=\"set-modal\" style=\"display:none\">"
@@ -3587,7 +3737,7 @@ h1{font-size:1.25rem;color:var(--green);margin-bottom:.75rem}
 .ops-filter button:hover,.ops-filter button.active{border-color:var(--green);color:var(--green)}
 .maint-active{background:rgba(96,165,250,.15)!important;border:1px solid var(--blue);padding:.75rem;border-radius:6px;margin-bottom:.5rem}
 </style></head><body>
-<nav><a href="/">Dashboard</a><a href="/solar">Solar</a><a href="/settings">Settings</a><a href="/ops_log" class="active">Ops Log</a></nav>
+<nav><a href="/">Dashboard</a><a href="/solar">Solar</a><a href="/settings">Settings</a><a href="/ops_log" class="active">Ops Log</a><a href="/testing">Testing</a></nav>
 <h1>Ops Log</h1>
 <div class="ops-card" id="maint-card">
 <h2>Maintenance</h2>
@@ -3635,6 +3785,95 @@ $('note-submit').onclick=function(){var inp=$('note-input');var msg=inp.value.tr
 $('note-input').onkeydown=function(e){if(e.key==='Enter')$('note-submit').click()}
 document.querySelectorAll('.ops-filter-btn').forEach(function(b){b.onclick=function(){document.querySelectorAll('.ops-filter-btn').forEach(function(x){x.classList.remove('active')});b.classList.add('active');loadOpsLog(b.dataset.filter)}})
 loadMaintStatus();loadOpsLog();
+</script></body></html>)HTML";
+    return o;
+}
+
+std::string HttpServer::html_testing_page(Database* db, testing::TestRunner* runner,
+                                          const std::string& theme) {
+    (void)db;
+    (void)runner;
+    std::string o;
+    o.reserve(5000);
+    o += R"HTML(<!DOCTYPE html><html lang="en" class=")HTML";
+    o += (theme == "light") ? "light" : "";
+    o += R"HTML("><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>System Testing — limonitor</title>
+<link rel="prefetch" href="/"><link rel="prefetch" href="/solar"><link rel="prefetch" href="/ops_log">
+<style>
+:root{--bg:#0d0d11;--card:#16161c;--border:#2e2e3a;--text:#e0e0ea;--muted:#9090a8;--green:#4ade80;--orange:#fb923c;--red:#f87171;--blue:#60a5fa}
+html.light{--bg:#f2f3f7;--card:#fff;--border:#d4d4e0;--text:#1a1a2c;--muted:#5a5a72;--green:#16a34a;--orange:#ea580c;--red:#dc2626;--blue:#2563eb}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,sans-serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5;padding:1rem;max-width:720px;margin:0 auto}
+nav{display:flex;align-items:center;gap:.5rem;margin-bottom:1rem;padding-bottom:.75rem;border-bottom:1px solid var(--border)}
+nav a{color:var(--muted);text-decoration:none;font-size:.9rem;padding:.35rem .6rem;border-radius:6px}
+nav a:hover{color:var(--text)}nav a.active{color:var(--green);font-weight:600}
+h1{font-size:1.25rem;color:var(--green);margin-bottom:.75rem}
+.test-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem;margin-bottom:.75rem}
+.test-card h2{font-size:.85rem;color:var(--muted);margin-bottom:.5rem;text-transform:uppercase;letter-spacing:.08em}
+.test-btn{font-family:inherit;font-size:.85rem;font-weight:600;padding:.5rem 1rem;border-radius:6px;cursor:pointer;border:none;margin-right:.5rem;margin-bottom:.5rem}
+.test-btn-start{background:var(--green);color:#fff}.test-btn-stop{background:var(--red);color:#fff}
+.test-btn:disabled{opacity:.5;cursor:not-allowed}
+.test-table{width:100%;border-collapse:collapse;font-size:.85rem}
+.test-table th,.test-table td{padding:.4rem .5rem;text-align:left;border-bottom:1px solid var(--border)}
+.test-table th{color:var(--muted);font-weight:600;font-size:.75rem;text-transform:uppercase}
+.test-table tr:hover{background:var(--card)}
+.test-table a{color:var(--blue);text-decoration:none}
+.test-table a:hover{text-decoration:underline}
+.running{color:var(--green)}.passed{color:var(--green)}.failed{color:var(--red)}.aborted{color:var(--orange)}
+</style></head><body>
+<nav><a href="/">Dashboard</a><a href="/solar">Solar</a><a href="/settings">Settings</a><a href="/ops_log">Ops Log</a><a href="/testing" class="active">Testing</a></nav>
+<h1>System Testing</h1>
+<div class="test-card">
+<h2>Run Test</h2>
+<button type="button" class="test-btn test-btn-start" id="start-capacity">Capacity Test</button>
+<button type="button" class="test-btn test-btn-stop" id="stop-test" disabled>Stop Test</button>
+<span id="test-status" style="color:var(--muted);margin-left:.5rem"></span>
+</div>
+<div class="test-card">
+<h2>Test History</h2>
+<table class="test-table"><thead><tr><th>Date</th><th>Type</th><th>Duration</th><th>Result</th><th>Notes</th></tr></thead>
+<tbody id="test-tbody"></tbody></table>
+</div>
+<div class="test-card" id="replay-card" style="display:none">
+<h2>Telemetry Replay</h2>
+<div id="replay-chart" style="height:200px;background:var(--bg);border-radius:6px"></div>
+</div>
+<script>
+function $(id){return document.getElementById(id)}
+function fmtDate(ts){if(!ts)return'—';var d=new Date(ts*1000);return d.toLocaleString()}
+function loadTests(){fetch('/api/tests').then(function(r){return r.json()}).then(function(d){
+var tbody=$('test-tbody');tbody.innerHTML='';
+var tests=d.tests||[];
+if(!tests.length){tbody.innerHTML='<tr><td colspan=5 style="color:var(--muted)">No tests yet</td></tr>';return}
+tests.forEach(function(t){
+var tr=document.createElement('tr');
+var resCls='';if(t.result==='running')resCls='running';else if(t.result==='passed')resCls='passed';else if(t.result==='failed')resCls='failed';else if(t.result==='aborted')resCls='aborted';
+var dur=t.duration_seconds?Math.floor(t.duration_seconds/60)+'m':(t.result==='running'?'…':'—');
+tr.innerHTML='<td>'+fmtDate(t.start_time)+'</td><td><a href="#" data-id="'+t.id+'">'+t.test_type+'</a></td><td>'+dur+'</td><td class="'+resCls+'">'+t.result+'</td><td>'+(t.user_notes||'')+'</td>';
+tr.onclick=function(e){if(e.target.tagName==='A'&&e.target.dataset.id){e.preventDefault();loadReplay(parseInt(e.target.dataset.id,10))}};
+tbody.appendChild(tr);
+});
+var run=$('stop-test');if(run)run.disabled=!d.running;
+var st=$('test-status');if(st)st.textContent=d.running?'Test running (id='+d.current_test_id+')':'';
+})}
+function loadReplay(id){fetch('/api/tests/'+id+'/telemetry').then(function(r){return r.json()}).then(function(d){
+var card=$('replay-card');card.style.display='block';
+var samples=d.samples||[];if(!samples.length){$('replay-chart').innerHTML='<div style="padding:2rem;text-align:center;color:var(--muted)">No telemetry</div>';return}
+var svg='<svg width="100%" height="200" viewBox="0 0 400 200" preserveAspectRatio="none">';
+var minV=999,maxV=0,minSoc=999,maxSoc=0;
+samples.forEach(function(s){if(s.v>0){minV=Math.min(minV,s.v);maxV=Math.max(maxV,s.v)}if(s.soc>=0){minSoc=Math.min(minSoc,s.soc);maxSoc=Math.max(maxSoc,s.soc)}});
+if(maxV<=minV)maxV=minV+1;if(maxSoc<=minSoc)maxSoc=minSoc+1;
+var w=400,h=200;var pad=30;var x=function(i){return pad+(w-pad*2)*(i/(samples.length-1||1))};var yV=function(v){return h-pad-(h-pad*2)*(v-minV)/(maxV-minV)};var yS=function(s){return h-pad-(h-pad*2)*(s-minSoc)/(maxSoc-minSoc)};
+svg+='<path d="M';samples.forEach(function(s,i){svg+=(i?'L':'')+x(i)+','+yV(s.v);});svg+='" fill="none" stroke="var(--green)" stroke-width="1.5"/>';
+svg+='<path d="M';samples.forEach(function(s,i){svg+=(i?'L':'')+x(i)+','+yS(s.soc);});svg+='" fill="none" stroke="var(--blue)" stroke-width="1" opacity=".7"/>';
+svg+='</svg>';
+$('replay-chart').innerHTML=svg;
+})}
+$('start-capacity').onclick=function(){fetch('/api/tests/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({test_type:'capacity'})}).then(function(r){return r.json()}).then(function(d){if(d.ok){loadTests();setInterval(loadTests,3000)}})}
+$('stop-test').onclick=function(){fetch('/api/tests/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})}).then(function(r){return r.json()}).then(function(d){if(d.ok)loadTests()})}
+loadTests();setInterval(loadTests,10000);
 </script></body></html>)HTML";
     return o;
 }
@@ -3696,7 +3935,7 @@ h1{font-size:1.35rem;font-weight:600;color:var(--green);margin-bottom:.25rem}
 .test-banner .tb-btn{background:#fff!important;color:#c2410c!important;border:none;padding:.35rem .8rem;font-weight:600;cursor:pointer;border-radius:4px}
 .test-banner .tb-btn:hover{opacity:.92}
 </style></head><body>
-<nav><a href="/">Dashboard</a><a href="/solar">Solar</a><a href="/settings" class="active">Settings</a><a href="/ops_log">Ops Log</a><span class="spacer"></span><button class="thm" id="thm-btn" onclick="toggleTheme()" title="Toggle theme">)HTML";
+<nav><a href="/">Dashboard</a><a href="/solar">Solar</a><a href="/settings" class="active">Settings</a><a href="/ops_log">Ops Log</a><a href="/testing">Testing</a><span class="spacer"></span><button class="thm" id="thm-btn" onclick="toggleTheme()" title="Toggle theme">)HTML";
     o += (theme == "light") ? "&#9788;" : "&#263d;";
     o += R"HTML(</button></nav>
 <div id="test-banner" class="test-banner"><span><strong>Battery test active</strong> &middot; SoC: <span id="tb-soc">—</span>% &middot; Load: <span id="tb-load">—</span> W &middot; Runtime: <span id="tb-rt">—</span> h</span><button class="tb-btn" onclick="endTestFromBanner()">End test</button></div>

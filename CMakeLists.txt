@@ -48,6 +48,9 @@ set(SOURCES
     src/analytics/weather_forecast.cpp
     src/analytics/health_score.cpp
     src/analytics/extensions.cpp
+    src/testing/types.cpp
+    src/testing/telemetry.cpp
+    src/testing/runner.cpp
     ${PROTO_SOURCES}
 )
 
@@ -127,6 +130,9 @@ set(UTEST_SOURCES
     src/analytics/weather_forecast.cpp
     src/analytics/health_score.cpp
     src/analytics/extensions.cpp
+    src/testing/types.cpp
+    src/testing/telemetry.cpp
+    src/testing/runner.cpp
     ${PROTO_SOURCES}
 )
 if(APPLE)

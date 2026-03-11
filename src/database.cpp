@@ -1,5 +1,6 @@
 #include "database.hpp"
 #include "logger.hpp"
+#include "testing/types.hpp"
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -81,7 +82,7 @@ bool Database::migrate() {
     if (!exec("PRAGMA journal_mode=WAL;")) return false;
     if (!exec("PRAGMA synchronous=NORMAL;")) return false;
 
-    return exec(
+    if (!exec(
         "CREATE TABLE IF NOT EXISTS battery_readings ("
         "  id         INTEGER PRIMARY KEY AUTOINCREMENT,"
         "  ts         INTEGER NOT NULL,"   // Unix timestamp (s)
@@ -172,7 +173,100 @@ bool Database::migrate() {
         "  updated_at  INTEGER NOT NULL"
         ");"
         "CREATE INDEX IF NOT EXISTS wd_updated ON weather_daily(updated_at);"
-    );
+    )) return false;
+
+    if (!exec(
+        "CREATE TABLE IF NOT EXISTS test_runs ("
+        "  id               INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  test_type        TEXT NOT NULL,"
+        "  start_time       INTEGER NOT NULL,"
+        "  end_time         INTEGER,"
+        "  duration_seconds  INTEGER,"
+        "  result           TEXT DEFAULT 'running',"
+        "  initial_soc      REAL,"
+        "  initial_voltage  REAL,"
+        "  average_load     REAL,"
+        "  metadata_json    TEXT DEFAULT '',"
+        "  user_notes       TEXT DEFAULT ''"
+        ");"
+        "CREATE INDEX IF NOT EXISTS tr_start ON test_runs(start_time);"
+        "CREATE INDEX IF NOT EXISTS tr_type ON test_runs(test_type);"
+    )) return false;
+
+    if (!exec(
+        "CREATE TABLE IF NOT EXISTS test_telemetry ("
+        "  id              INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  test_id         INTEGER NOT NULL,"
+        "  timestamp       INTEGER NOT NULL,"
+        "  battery_voltage REAL,"
+        "  battery_current REAL,"
+        "  battery_soc     REAL,"
+        "  load_power      REAL,"
+        "  grid_voltage    REAL,"
+        "  solar_voltage   REAL,"
+        "  solar_current   REAL,"
+        "  charger_state   TEXT,"
+        "  charger_voltage REAL,"
+        "  charger_current REAL,"
+        "  temperature     REAL,"
+        "  cell_delta      REAL"
+        ");"
+        "CREATE INDEX IF NOT EXISTS tt_test ON test_telemetry(test_id);"
+        "CREATE INDEX IF NOT EXISTS tt_ts ON test_telemetry(timestamp);"
+    )) return false;
+
+    if (!exec(
+        "CREATE TABLE IF NOT EXISTS battery_resistance ("
+        "  id            INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  timestamp     INTEGER NOT NULL,"
+        "  resistance_ohms REAL NOT NULL,"
+        "  load_current  REAL,"
+        "  voltage_drop  REAL,"
+        "  test_id       INTEGER,"
+        "  source        TEXT"
+        ");"
+        "CREATE INDEX IF NOT EXISTS br_ts ON battery_resistance(timestamp);"
+    )) return false;
+
+    if (!exec(
+        "CREATE TABLE IF NOT EXISTS battery_capacity_tests ("
+        "  id                   INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  timestamp            INTEGER NOT NULL,"
+        "  measured_capacity_wh REAL,"
+        "  soc_start            REAL,"
+        "  soc_end              REAL,"
+        "  energy_delivered_wh  REAL,"
+        "  health_percent       REAL,"
+        "  test_id              INTEGER"
+        ");"
+        "CREATE INDEX IF NOT EXISTS bct_ts ON battery_capacity_tests(timestamp);"
+    )) return false;
+
+    if (!exec(
+        "CREATE TABLE IF NOT EXISTS voltage_sag_samples ("
+        "  id            INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  timestamp     INTEGER NOT NULL,"
+        "  voltage_before REAL,"
+        "  voltage_min   REAL,"
+        "  load_current  REAL,"
+        "  sag_volts     REAL,"
+        "  source        TEXT"
+        ");"
+        "CREATE INDEX IF NOT EXISTS vss_ts ON voltage_sag_samples(timestamp);"
+    )) return false;
+
+    if (!exec(
+        "CREATE TABLE IF NOT EXISTS charger_efficiency_samples ("
+        "  id           INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  timestamp    INTEGER NOT NULL,"
+        "  efficiency   REAL,"
+        "  input_power  REAL,"
+        "  battery_power REAL"
+        ");"
+        "CREATE INDEX IF NOT EXISTS ces_ts ON charger_efficiency_samples(timestamp);"
+    )) return false;
+
+    return true;
 }
 
 static std::string settings_file_path(const std::string& db_path) {
@@ -820,6 +914,344 @@ double Database::get_avg_solar_coefficient(int days_back) const {
     }
     sqlite3_finalize(stmt);
     return avg;
+}
+
+// Testing framework
+int64_t Database::insert_test_run(const TestRunRow& row) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return 0;
+    auto* db = db_handle(db_);
+    const char* sql = "INSERT INTO test_runs (test_type, start_time, end_time, duration_seconds, "
+        "result, initial_soc, initial_voltage, average_load, metadata_json, user_notes) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return 0;
+    sqlite3_bind_text(stmt, 1, row.test_type.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 2, row.start_time);
+    sqlite3_bind_int64(stmt, 3, row.end_time);
+    sqlite3_bind_int(stmt, 4, row.duration_seconds);
+    sqlite3_bind_text(stmt, 5, row.result.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_double(stmt, 6, row.initial_soc);
+    sqlite3_bind_double(stmt, 7, row.initial_voltage);
+    sqlite3_bind_double(stmt, 8, row.average_load);
+    sqlite3_bind_text(stmt, 9, row.metadata_json.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 10, row.user_notes.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+    int64_t id = sqlite3_last_insert_rowid(db);
+    sqlite3_finalize(stmt);
+    return id;
+}
+
+bool Database::update_test_run(int64_t id, int64_t end_time, int duration_seconds,
+                               const std::string& result, const std::string& metadata_json) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return false;
+    auto* db = db_handle(db_);
+    const char* sql = "UPDATE test_runs SET end_time=?, duration_seconds=?, result=?, metadata_json=? WHERE id=?";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_int64(stmt, 1, end_time);
+    sqlite3_bind_int(stmt, 2, duration_seconds);
+    sqlite3_bind_text(stmt, 3, result.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, metadata_json.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 5, id);
+    bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+bool Database::update_test_run_notes(int64_t id, const std::string& notes) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return false;
+    auto* db = db_handle(db_);
+    const char* sql = "UPDATE test_runs SET user_notes=? WHERE id=?";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_text(stmt, 1, notes.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 2, id);
+    bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+std::vector<Database::TestRunRow> Database::load_test_runs(size_t limit) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<TestRunRow> result;
+    if (!db_) return result;
+    auto* db = db_handle(db_);
+    char sql[320];
+    std::snprintf(sql, sizeof(sql),
+        "SELECT id, test_type, start_time, end_time, duration_seconds, result, "
+        "initial_soc, initial_voltage, average_load, metadata_json, user_notes "
+        "FROM test_runs ORDER BY start_time DESC LIMIT %zu", std::min(limit, size_t{500}));
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return result;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        TestRunRow r;
+        r.id = sqlite3_column_int64(stmt, 0);
+        if (auto* t = sqlite3_column_text(stmt, 1)) r.test_type = reinterpret_cast<const char*>(t);
+        r.start_time = sqlite3_column_int64(stmt, 2);
+        r.end_time = sqlite3_column_int64(stmt, 3);
+        r.duration_seconds = sqlite3_column_int(stmt, 4);
+        if (auto* t = sqlite3_column_text(stmt, 5)) r.result = reinterpret_cast<const char*>(t);
+        r.initial_soc = sqlite3_column_double(stmt, 6);
+        r.initial_voltage = sqlite3_column_double(stmt, 7);
+        r.average_load = sqlite3_column_double(stmt, 8);
+        if (auto* t = sqlite3_column_text(stmt, 9)) r.metadata_json = reinterpret_cast<const char*>(t);
+        if (auto* t = sqlite3_column_text(stmt, 10)) r.user_notes = reinterpret_cast<const char*>(t);
+        result.push_back(std::move(r));
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+std::optional<Database::TestRunRow> Database::load_test_run(int64_t id) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return std::nullopt;
+    auto* db = db_handle(db_);
+    const char* sql = "SELECT id, test_type, start_time, end_time, duration_seconds, result, "
+        "initial_soc, initial_voltage, average_load, metadata_json, user_notes "
+        "FROM test_runs WHERE id=?";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return std::nullopt;
+    sqlite3_bind_int64(stmt, 1, id);
+    if (sqlite3_step(stmt) != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        return std::nullopt;
+    }
+    TestRunRow r;
+    r.id = sqlite3_column_int64(stmt, 0);
+    if (auto* t = sqlite3_column_text(stmt, 1)) r.test_type = reinterpret_cast<const char*>(t);
+    r.start_time = sqlite3_column_int64(stmt, 2);
+    r.end_time = sqlite3_column_int64(stmt, 3);
+    r.duration_seconds = sqlite3_column_int(stmt, 4);
+    if (auto* t = sqlite3_column_text(stmt, 5)) r.result = reinterpret_cast<const char*>(t);
+    r.initial_soc = sqlite3_column_double(stmt, 6);
+    r.initial_voltage = sqlite3_column_double(stmt, 7);
+    r.average_load = sqlite3_column_double(stmt, 8);
+    if (auto* t = sqlite3_column_text(stmt, 9)) r.metadata_json = reinterpret_cast<const char*>(t);
+    if (auto* t = sqlite3_column_text(stmt, 10)) r.user_notes = reinterpret_cast<const char*>(t);
+    sqlite3_finalize(stmt);
+    return r;
+}
+
+void Database::insert_test_telemetry_batch(const std::vector<testing::TestTelemetrySample>& samples) {
+    if (samples.empty()) return;
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return;
+    auto* db = db_handle(db_);
+    const char* sql = "INSERT INTO test_telemetry (test_id, timestamp, battery_voltage, battery_current, "
+        "battery_soc, load_power, grid_voltage, solar_voltage, solar_current, charger_state, "
+        "charger_voltage, charger_current, temperature, cell_delta) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return;
+    for (const auto& s : samples) {
+        sqlite3_bind_int64(stmt, 1, s.test_id);
+        sqlite3_bind_int64(stmt, 2, s.timestamp);
+        sqlite3_bind_double(stmt, 3, s.battery_voltage);
+        sqlite3_bind_double(stmt, 4, s.battery_current);
+        sqlite3_bind_double(stmt, 5, s.battery_soc);
+        sqlite3_bind_double(stmt, 6, s.load_power);
+        sqlite3_bind_double(stmt, 7, s.grid_voltage);
+        sqlite3_bind_double(stmt, 8, s.solar_voltage);
+        sqlite3_bind_double(stmt, 9, s.solar_current);
+        sqlite3_bind_text(stmt, 10, s.charger_state.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_double(stmt, 11, s.charger_voltage);
+        sqlite3_bind_double(stmt, 12, s.charger_current);
+        sqlite3_bind_double(stmt, 13, s.temperature);
+        sqlite3_bind_double(stmt, 14, s.cell_delta);
+        sqlite3_step(stmt);
+        sqlite3_reset(stmt);
+    }
+    sqlite3_finalize(stmt);
+}
+
+std::vector<testing::TestTelemetrySample> Database::load_test_telemetry(int64_t test_id,
+                                                                        size_t limit) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<testing::TestTelemetrySample> result;
+    if (!db_) return result;
+    auto* db = db_handle(db_);
+    char sql[320];
+    std::snprintf(sql, sizeof(sql),
+        "SELECT test_id, timestamp, battery_voltage, battery_current, battery_soc, load_power, "
+        "grid_voltage, solar_voltage, solar_current, charger_state, charger_voltage, charger_current, "
+        "temperature, cell_delta FROM test_telemetry WHERE test_id=? ORDER BY timestamp LIMIT %zu",
+        limit);
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return result;
+    sqlite3_bind_int64(stmt, 1, test_id);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        testing::TestTelemetrySample s;
+        s.test_id = sqlite3_column_int64(stmt, 0);
+        s.timestamp = sqlite3_column_int64(stmt, 1);
+        s.battery_voltage = sqlite3_column_double(stmt, 2);
+        s.battery_current = sqlite3_column_double(stmt, 3);
+        s.battery_soc = sqlite3_column_double(stmt, 4);
+        s.load_power = sqlite3_column_double(stmt, 5);
+        s.grid_voltage = sqlite3_column_double(stmt, 6);
+        s.solar_voltage = sqlite3_column_double(stmt, 7);
+        s.solar_current = sqlite3_column_double(stmt, 8);
+        if (auto* t = sqlite3_column_text(stmt, 9)) s.charger_state = reinterpret_cast<const char*>(t);
+        s.charger_voltage = sqlite3_column_double(stmt, 10);
+        s.charger_current = sqlite3_column_double(stmt, 11);
+        s.temperature = sqlite3_column_double(stmt, 12);
+        s.cell_delta = sqlite3_column_double(stmt, 13);
+        result.push_back(s);
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+void Database::insert_battery_resistance(int64_t ts, double resistance_ohms, double load_current,
+                                         double voltage_drop, int64_t test_id, const std::string& source) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return;
+    auto* db = db_handle(db_);
+    const char* sql = "INSERT INTO battery_resistance (timestamp, resistance_ohms, load_current, voltage_drop, test_id, source) VALUES (?, ?, ?, ?, ?, ?)";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return;
+    sqlite3_bind_int64(stmt, 1, ts);
+    sqlite3_bind_double(stmt, 2, resistance_ohms);
+    sqlite3_bind_double(stmt, 3, load_current);
+    sqlite3_bind_double(stmt, 4, voltage_drop);
+    sqlite3_bind_int64(stmt, 5, test_id > 0 ? test_id : 0);
+    sqlite3_bind_text(stmt, 6, source.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
+std::vector<std::pair<int64_t, double>> Database::load_battery_resistance_history(int days_back) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<std::pair<int64_t, double>> result;
+    if (!db_) return result;
+    auto* db = db_handle(db_);
+    auto cutoff = std::time(nullptr) - days_back * 86400;
+    char sql[256];
+    std::snprintf(sql, sizeof(sql),
+        "SELECT timestamp, resistance_ohms FROM battery_resistance WHERE timestamp > %lld ORDER BY timestamp",
+        (long long)cutoff);
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return result;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        result.emplace_back(sqlite3_column_int64(stmt, 0), sqlite3_column_double(stmt, 1));
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+void Database::insert_battery_capacity_test(int64_t ts, double measured_wh, double soc_start,
+                                            double soc_end, double energy_wh, double health_pct,
+                                            int64_t test_id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return;
+    auto* db = db_handle(db_);
+    const char* sql = "INSERT INTO battery_capacity_tests (timestamp, measured_capacity_wh, soc_start, soc_end, energy_delivered_wh, health_percent, test_id) VALUES (?, ?, ?, ?, ?, ?, ?)";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return;
+    sqlite3_bind_int64(stmt, 1, ts);
+    sqlite3_bind_double(stmt, 2, measured_wh);
+    sqlite3_bind_double(stmt, 3, soc_start);
+    sqlite3_bind_double(stmt, 4, soc_end);
+    sqlite3_bind_double(stmt, 5, energy_wh);
+    sqlite3_bind_double(stmt, 6, health_pct);
+    sqlite3_bind_int64(stmt, 7, test_id > 0 ? test_id : 0);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
+std::vector<std::pair<int64_t, double>> Database::load_battery_capacity_history(int days_back) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<std::pair<int64_t, double>> result;
+    if (!db_) return result;
+    auto* db = db_handle(db_);
+    auto cutoff = std::time(nullptr) - days_back * 86400;
+    char sql[256];
+    std::snprintf(sql, sizeof(sql),
+        "SELECT timestamp, health_percent FROM battery_capacity_tests WHERE timestamp > %lld ORDER BY timestamp",
+        (long long)cutoff);
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return result;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        result.emplace_back(sqlite3_column_int64(stmt, 0), sqlite3_column_double(stmt, 1));
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+void Database::insert_voltage_sag(int64_t ts, double v_before, double v_min, double load_a,
+                                  double sag_v, const std::string& source) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return;
+    auto* db = db_handle(db_);
+    const char* sql = "INSERT INTO voltage_sag_samples (timestamp, voltage_before, voltage_min, load_current, sag_volts, source) VALUES (?, ?, ?, ?, ?, ?)";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return;
+    sqlite3_bind_int64(stmt, 1, ts);
+    sqlite3_bind_double(stmt, 2, v_before);
+    sqlite3_bind_double(stmt, 3, v_min);
+    sqlite3_bind_double(stmt, 4, load_a);
+    sqlite3_bind_double(stmt, 5, sag_v);
+    sqlite3_bind_text(stmt, 6, source.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
+std::vector<std::pair<int64_t, double>> Database::load_voltage_sag_history(int days_back) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<std::pair<int64_t, double>> result;
+    if (!db_) return result;
+    auto* db = db_handle(db_);
+    auto cutoff = std::time(nullptr) - days_back * 86400;
+    char sql[256];
+    std::snprintf(sql, sizeof(sql),
+        "SELECT timestamp, sag_volts FROM voltage_sag_samples WHERE timestamp > %lld ORDER BY timestamp",
+        (long long)cutoff);
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return result;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        result.emplace_back(sqlite3_column_int64(stmt, 0), sqlite3_column_double(stmt, 1));
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+void Database::insert_charger_efficiency(int64_t ts, double efficiency, double input_w, double battery_w) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return;
+    auto* db = db_handle(db_);
+    const char* sql = "INSERT INTO charger_efficiency_samples (timestamp, efficiency, input_power, battery_power) VALUES (?, ?, ?, ?)";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return;
+    sqlite3_bind_int64(stmt, 1, ts);
+    sqlite3_bind_double(stmt, 2, efficiency);
+    sqlite3_bind_double(stmt, 3, input_w);
+    sqlite3_bind_double(stmt, 4, battery_w);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
+std::vector<std::pair<int64_t, double>> Database::load_charger_efficiency_history(int days_back) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<std::pair<int64_t, double>> result;
+    if (!db_) return result;
+    auto* db = db_handle(db_);
+    auto cutoff = std::time(nullptr) - days_back * 86400;
+    char sql[256];
+    std::snprintf(sql, sizeof(sql),
+        "SELECT timestamp, efficiency FROM charger_efficiency_samples WHERE timestamp > %lld ORDER BY timestamp",
+        (long long)cutoff);
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return result;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        result.emplace_back(sqlite3_column_int64(stmt, 0), sqlite3_column_double(stmt, 1));
+    }
+    sqlite3_finalize(stmt);
+    return result;
 }
 
 std::string Database::default_path() {

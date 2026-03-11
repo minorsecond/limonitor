@@ -3,8 +3,10 @@
 #include "ops_events.hpp"
 #include "pwrgate.hpp"
 #include "system_events.hpp"
+#include "testing/types.hpp"
 #include <chrono>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -97,6 +99,48 @@ public:
     void insert_solar_performance(const SolarPerfRow& row);
     std::vector<SolarPerfRow> load_solar_performance(int days_back = 30) const;
     double get_avg_solar_coefficient(int days_back = 30) const;
+
+    // Testing framework
+    struct TestRunRow {
+        int64_t id{0};
+        std::string test_type;
+        int64_t start_time{0};
+        int64_t end_time{0};
+        int duration_seconds{0};
+        std::string result;
+        double initial_soc{0};
+        double initial_voltage{0};
+        double average_load{0};
+        std::string metadata_json;
+        std::string user_notes;
+    };
+    int64_t insert_test_run(const TestRunRow& row);
+    bool update_test_run(int64_t id, int64_t end_time, int duration_seconds,
+                        const std::string& result, const std::string& metadata_json);
+    bool update_test_run_notes(int64_t id, const std::string& notes);
+    std::vector<TestRunRow> load_test_runs(size_t limit = 100) const;
+    std::optional<TestRunRow> load_test_run(int64_t id) const;
+
+    void insert_test_telemetry_batch(const std::vector<testing::TestTelemetrySample>& samples);
+    std::vector<testing::TestTelemetrySample> load_test_telemetry(int64_t test_id,
+                                                                  size_t limit = 10000) const;
+
+    // Battery analytics persistence
+    void insert_battery_resistance(int64_t ts, double resistance_ohms, double load_current,
+                                   double voltage_drop, int64_t test_id, const std::string& source);
+    std::vector<std::pair<int64_t, double>> load_battery_resistance_history(int days_back = 365) const;
+
+    void insert_battery_capacity_test(int64_t ts, double measured_wh, double soc_start,
+                                      double soc_end, double energy_wh, double health_pct,
+                                      int64_t test_id);
+    std::vector<std::pair<int64_t, double>> load_battery_capacity_history(int days_back = 365) const;
+
+    void insert_voltage_sag(int64_t ts, double v_before, double v_min, double load_a,
+                            double sag_v, const std::string& source);
+    std::vector<std::pair<int64_t, double>> load_voltage_sag_history(int days_back = 90) const;
+
+    void insert_charger_efficiency(int64_t ts, double efficiency, double input_w, double battery_w);
+    std::vector<std::pair<int64_t, double>> load_charger_efficiency_history(int days_back = 90) const;
 
     const std::string& path() const { return path_; }
 
