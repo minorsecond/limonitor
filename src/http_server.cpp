@@ -2399,6 +2399,17 @@ html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--gre
 .tab{padding:.5rem 1rem;font-size:.8rem;color:var(--muted);background:none;border:none;border-bottom:2px solid transparent;cursor:pointer;font-family:inherit;text-decoration:none}
 .tab:hover{color:var(--text)}
 .tab.active{color:var(--green);border-bottom-color:var(--green);font-weight:600}
+/* ── Performance Toggles ── */
+.p-toggles{display:flex;gap:4px;background:var(--bg);padding:3px;border-radius:6px;margin-bottom:1rem;border:1px solid var(--border);width:fit-content}
+.p-toggle{padding:.3rem .8rem;font-size:.7rem;border-radius:4px;cursor:pointer;color:var(--muted);transition:all .15s;font-weight:600}
+.p-toggle:hover{color:var(--text)}
+.p-toggle.active{background:var(--card);color:var(--green);box-shadow:0 1px 3px rgba(0,0,0,.15)}
+.p-bar-wrap{height:6px;background:var(--bg);border-radius:3px;overflow:hidden;margin-top:4px;border:1px solid var(--border)}
+.p-bar-fill{height:100%;background:var(--green);transition:width .4s ease-out}
+.p-bar-fill.warn{background:var(--orange)}
+.p-bar-fill.err{background:var(--red)}
+.p-grid{display:grid;grid-template-columns:1fr;gap:.8rem}
+.p-sec-title{font-size:.65rem;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:.4rem;font-weight:700}
 .chart-svg{width:100%;display:block;background:var(--chart-bg);border-radius:4px}
 /* ── Energy Flow Diagram ── */
 .flow-wrap{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1.4rem;margin-bottom:.7rem;box-shadow:0 1px 3px rgba(0,0,0,.06)}
@@ -2705,10 +2716,9 @@ html.light .pwr-modal-submit{background:#16a34a}
 
     // Performance monitoring (Self-monitor)
     o += "<div class=\"card\"><div class=\"card-title\">Application Performance</div><table class=\"dt\">\n";
-    snprintf(buf, sizeof(buf), "<tr><td>Memory (RSS / VSZ)</td><td id=\"sys-mem\">%.1f / %.1f MB</td></tr>\n", a.process_rss_kb / 1024.0, a.process_vsz_kb / 1024.0);
-    o += buf;
-    snprintf(buf, sizeof(buf), "<tr><td>CPU Usage</td><td id=\"sys-cpu\">%.1f%%</td></tr>\n", a.process_cpu_pct);
-    o += buf;
+    o += "<tr><td>Server CPU</td><td id=\"sys-cpu-short\">—</td></tr>\n";
+    o += "<tr><td>Server RAM</td><td id=\"sys-mem-short\">—</td></tr>\n";
+    o += "<tr><td>UI Latency</td><td id=\"sys-ui-lat-short\">—</td></tr>\n";
     {
         auto uptime = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - store.startup_time()).count();
         int days = static_cast<int>(uptime / 86400);
@@ -2854,6 +2864,35 @@ html.light .pwr-modal-submit{background:#16a34a}
 
     o += "<div class=\"atab-pane\" data-atab=\"system\"><div class=\"acards\">\n";
     // System group
+    o += "<div class=\"acard\" style=\"grid-column: 1 / -1\"><div class=\"card-title\">Self-Analysis Performance</div>"
+         "<div class=\"p-toggles\">"
+         "<div class=\"p-toggle active\" data-pview=\"both\">Both Together</div>"
+         "<div class=\"p-toggle\" data-pview=\"backend\">C++ Backend</div>"
+         "<div class=\"p-toggle\" data-pview=\"frontend\">Web UI Frontend</div>"
+         "</div>"
+         "<div class=\"p-grid\">"
+         "<div id=\"p-sec-backend\">"
+         "<div class=\"p-sec-title\">C++ Server Backend</div>"
+         "<table class=\"dt\">"
+         "<tr><td>CPU Usage <span id=\"p-be-cpu-val\" style=\"float:right;font-weight:600\">—</span>"
+         "<div class=\"p-bar-wrap\"><div id=\"p-be-cpu-bar\" class=\"p-bar-fill\" style=\"width:0\"></div></div></td></tr>"
+         "<tr><td>Memory (RSS) <span id=\"p-be-mem-val\" style=\"float:right;font-weight:600\">—</span>"
+         "<div class=\"p-bar-wrap\"><div id=\"p-be-mem-bar\" class=\"p-bar-fill\" style=\"width:0\"></div></div></td></tr>"
+         "<tr><td>Virtual Size (VSZ)</td><td id=\"p-be-vsz\" style=\"text-align:right\">—</td></tr>"
+         "<tr><td>Uptime</td><td id=\"p-be-uptime\" style=\"text-align:right\">—</td></tr>"
+         "</table></div>"
+         "<div id=\"p-sec-frontend\">"
+         "<div class=\"p-sec-title\">Web UI Frontend</div>"
+         "<table class=\"dt\">"
+         "<tr><td>JS Heap <span id=\"p-fe-mem-val\" style=\"float:right;font-weight:600\">—</span>"
+         "<div class=\"p-bar-wrap\"><div id=\"p-fe-mem-bar\" class=\"p-bar-fill\" style=\"width:0\"></div></div></td></tr>"
+         "<tr><td>Update Latency <span id=\"p-fe-lat-val\" style=\"float:right;font-weight:600\">—</span>"
+         "<div class=\"p-bar-wrap\"><div id=\"p-fe-lat-bar\" class=\"p-bar-fill\" style=\"width:0\"></div></div></td></tr>"
+         "<tr><td>DOM Nodes</td><td id=\"p-fe-nodes\" style=\"text-align:right\">—</td></tr>"
+         "<tr><td>JS Environment</td><td id=\"p-fe-env\" style=\"text-align:right\">—</td></tr>"
+         "</table></div>"
+         "</div></div>\n";
+
     o += "<div class=\"acard\"><div class=\"card-title\">System Load Profile</div><table class=\"dt\">\n"
          "<tr><td>Average</td><td><span id=\"an-avg-load\">—</span> W</td></tr>\n"
          "<tr><td>Peak</td><td><span id=\"an-peak-load\">—</span> W</td></tr>\n"
@@ -3367,12 +3406,70 @@ function upAnalytics(){fetch('/api/analytics').then(function(r){return r.json()}
   sv('an-runtime-full',rf>0?(excF?'> 1000 h':fmt(rf,1)+' h'):'—')
   sv('an-runtime-now', rn>0?(excN?'> 1000 h':fmt(rn,1)+' h'):'—')
   sv('an-avg-load-24h',avg24>0?fmt(avg24,1)+' W':'—')
+
+  // Performance Update
+  (function(){
+    var now=performance.now();
+    var lat=window.lastAnUpdate ? (now - window.lastAnUpdate) : 0;
+    window.lastAnUpdate = now;
+    
+    var rss=d.process_rss_kb||0, vsz=d.process_vsz_kb||0, cpu=d.process_cpu_pct||0;
+    sv('sys-mem-short', (rss/1024).toFixed(1) + ' MB');
+    sv('sys-cpu-short', cpu.toFixed(1) + '%');
+    sv('sys-ui-lat-short', lat>0 ? Math.round(lat)+'ms' : '—');
+    
+    sv('p-be-cpu-val', cpu.toFixed(1) + '%');
+    var cBar=$('p-be-cpu-bar'); if(cBar){cBar.style.width=Math.min(cpu,100)+'%'; cBar.className='p-bar-fill '+(cpu>80?'err':cpu>50?'warn':'')}
+    sv('p-be-mem-val', (rss/1024).toFixed(1) + ' MB');
+    var mBar=$('p-be-mem-bar'); if(mBar){var mp=Math.min((rss/1024)/512*100,100); mBar.style.width=mp+'%'; mBar.className='p-bar-fill '+(mp>85?'err':mp>70?'warn':'')}
+    sv('p-be-vsz', (vsz/1024).toFixed(1) + ' MB');
+    if(d.uptime_sec!=null){var u=d.uptime_sec,days=Math.floor(u/86400),hours=Math.floor((u%86400)/3600),mins=Math.floor((u%3600)/60);sv('p-be-uptime',days+'d '+hours+'h '+mins+'m')}
+
+    // Frontend
+    var nodes=document.getElementsByTagName('*').length;
+    sv('p-fe-nodes', nodes);
+    sv('p-fe-lat-val', Math.round(lat)+'ms');
+    var lBar=$('p-fe-lat-bar'); if(lBar){var lp=Math.min(lat/500*100,100); lBar.style.width=lp+'%'; lBar.className='p-bar-fill '+(lat>200?'err':lat>100?'warn':'')}
+    
+    if(window.performance && performance.memory) {
+      var mem=performance.memory.usedJSHeapSize / 1024 / 1024;
+      var limit=performance.memory.jsHeapSizeLimit / 1024 / 1024;
+      sv('p-fe-mem-val', mem.toFixed(1) + ' MB');
+      var fBar=$('p-fe-mem-bar'); if(fBar){var fp=Math.min(mem/limit*100,100); fBar.style.width=fp+'%'; fBar.className='p-bar-fill '+(fp>80?'err':fp>50?'warn':'')}
+    } else {
+      sv('p-fe-mem-val', 'N/A');
+    }
+    sv('p-fe-env', (window.chrome?'Chrome/Blink':(window.sidebar?'Firefox/Gecko':(window.safari?'Safari/WebKit':'Other'))));
+  })();
+
   var a24=$('an-avg-load-24h');if(a24)a24.title=d.runtime_from_historical?'7-day avg load from DB (on grid). Battery-only estimate.':d.runtime_from_charger?'From charger power when charging (est. load when grid drops).':'Load used for runtime. From 24h discharge or 1h profile (BMS+charger).'
   var rtTip=d.runtime_from_historical?'Battery-only estimate from 7-day avg load (on grid). 10% = LiFePO4 cutoff.':d.runtime_from_charger?'From charger power when charging (est. load when grid drops). 10% = LiFePO4 cutoff.':'24h discharge or 1h load profile. When charging, uses charger power as fallback. 10% = LiFePO4 cutoff.'
   var rfe=$('an-runtime-full');if(rfe)rfe.title=rtTip
   var rne=$('an-runtime-now');if(rne)rne.title=rtTip
   if(d.uptime_sec!=null){var u=d.uptime_sec,days=Math.floor(u/86400);sv('an-uptime',days>0?days+' days':Math.floor(u/3600)+'h')}
   else sv('an-uptime','—')
+  
+  // Performance toggles
+  if(!window.perfInit){
+    document.querySelectorAll('.p-toggle').forEach(function(btn){
+      btn.onclick=function(){
+        document.querySelectorAll('.p-toggle').forEach(function(b){b.classList.remove('active')});
+        this.classList.add('active');
+        var v=this.dataset.pview, grid=document.querySelector('.p-grid');
+        var be=$('p-sec-backend'), fe=$('p-sec-frontend');
+        if(v==='both'){ be.style.display=''; fe.style.display=''; grid.style.gridTemplateColumns='1fr 1fr' }
+        else if(v==='backend'){ be.style.display=''; fe.style.display='none'; grid.style.gridTemplateColumns='1fr' }
+        else if(v==='frontend'){ be.style.display='none'; fe.style.display=''; grid.style.gridTemplateColumns='1fr' }
+      }
+    });
+    // Initial state based on screen width
+    if(window.innerWidth < 600) {
+        var bt=document.querySelector('.p-toggle[data-pview="both"]');
+        if(bt) bt.click(); // Mobile default is still both, but stacked
+    }
+    window.perfInit=true;
+  }
+
   if(d.last_bms_update_ago_sec!=null){var b=d.last_bms_update_ago_sec;sv('an-bms-ago',b<60?b+' s ago':b<3600?Math.floor(b/60)+' m ago':'—')}
   else sv('an-bms-ago','—')
   if(d.last_charger_update_ago_sec!=null){var c=d.last_charger_update_ago_sec;sv('an-chg-ago',c<60?c+' s ago':c<3600?Math.floor(c/60)+' m ago':'—')}
