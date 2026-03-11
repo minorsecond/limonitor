@@ -84,6 +84,20 @@ void TestRunner::stop_test() {
     capture_running_ = false;
 }
 
+TestRunner::ActiveStats TestRunner::active_stats() const {
+    ActiveStats s;
+    if (!running_ || current_test_id_ == 0) return s;
+    std::lock_guard<std::mutex> lk(mu_);
+    s.test_id = current_test_id_;
+    s.start_time = test_start_ts_;
+    s.test_type = test_type_str(current_test_type_);
+    auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    s.duration_seconds = static_cast<int>(now - test_start_ts_);
+    s.energy_delivered_wh = load_sum_wh_;
+    s.voltage_at_start = voltage_at_start_;
+    return s;
+}
+
 void TestRunner::capture_loop() {
     while (capture_running_ && running_) {
         auto bat = store_.latest();
@@ -133,6 +147,7 @@ void TestRunner::on_telemetry_tick(const BatterySnapshot* bat, const PwrGateSnap
     // Integrate energy (discharge only)
     if (bat && bat->valid && bat->current_a > 0.01) {
         double pwr = bat->power_w > 0 ? bat->power_w : (bat->total_voltage_v * bat->current_a);
+        std::lock_guard<std::mutex> lk(mu_);
         load_sum_wh_ += pwr * (1.0 / 3600.0);  // assume 1s tick
         load_sample_count_++;
     }

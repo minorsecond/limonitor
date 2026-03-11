@@ -32,6 +32,17 @@ public:
     void set_safety_limits(const SafetyLimits& limits) { limits_ = limits; }
     const SafetyLimits& safety_limits() const { return limits_; }
 
+    // Active test stats for live monitoring
+    struct ActiveStats {
+        int64_t test_id{0};
+        int64_t start_time{0};
+        std::string test_type;
+        int duration_seconds{0};
+        double energy_delivered_wh{0};
+        double voltage_at_start{0};
+    };
+    ActiveStats active_stats() const;
+
     // Called from main loop when battery/charger data updates — captures telemetry
     void on_telemetry_tick(const BatterySnapshot* bat, const PwrGateSnapshot* chg,
                            double load_w, bool tx_active, double tx_power);
@@ -60,7 +71,7 @@ private:
     int64_t last_telemetry_ts_{0};
     static constexpr int TELEMETRY_INTERVAL_SEC = 2;
 
-    std::mutex mu_;
+    mutable std::mutex mu_;
 
     void capture_loop();
     void flush_telemetry();

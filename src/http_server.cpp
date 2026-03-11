@@ -665,6 +665,83 @@ void HttpServer::handle(int fd) {
             send_response(fd, 200, "application/json",
                          "{\"score\":0,\"battery\":\"—\",\"cells\":\"—\",\"charging\":\"—\"}\n");
         }
+    } else if (path == "/api/tests/safety_limits") {
+        if (!test_runner_) {
+            send_response(fd, 200, "application/json",
+                "{\"soc_floor_pct\":10,\"voltage_floor_v\":11,\"max_duration_sec\":7200}\n");
+        } else {
+            const auto& lim = test_runner_->safety_limits();
+            char buf[128];
+            std::snprintf(buf, sizeof(buf),
+                "{\"soc_floor_pct\":%.1f,\"voltage_floor_v\":%.1f,\"max_duration_sec\":%d}\n",
+                lim.soc_floor_pct, lim.voltage_floor_v, lim.max_duration_sec);
+            send_response(fd, 200, "application/json", buf);
+        }
+    } else if (path == "/api/tests/active") {
+        if (!test_runner_ || !test_runner_->is_running()) {
+            send_response(fd, 200, "application/json", "{\"running\":false}\n");
+        } else {
+            auto st = test_runner_->active_stats();
+            auto bat = store_.latest();
+            auto chg = store_.latest_pwrgate();
+            double v = bat && bat->valid ? bat->total_voltage_v : 0;
+            double a = bat && bat->valid ? bat->current_a : 0;
+            double soc = bat && bat->valid ? bat->soc_pct : 0;
+            double load = bat && bat->valid && bat->current_a > 0
+                ? (bat->power_w > 0 ? bat->power_w : bat->total_voltage_v * bat->current_a) : 0;
+            double v_start = st.voltage_at_start > 0 ? st.voltage_at_start : v;
+            double v_min = v;
+            if (db_) {
+                auto samples = db_->load_test_telemetry(st.test_id, 500);
+                for (const auto& s : samples) {
+                    if (s.battery_voltage > 0 && (v_min <= 0 || s.battery_voltage < v_min))
+                        v_min = s.battery_voltage;
+                }
+            }
+            double sag = (v_start > 0 && v_min > 0 && v_start > v_min) ? (v_start - v_min) : 0;
+            char buf[384];
+            std::snprintf(buf, sizeof(buf),
+                "{\"running\":true,\"test_id\":%lld,\"test_type\":\"%s\",\"start_time\":%lld,\"duration_seconds\":%d,"
+                "\"battery_voltage\":%.2f,\"battery_current\":%.2f,\"battery_soc\":%.1f,\"load_power\":%.1f,"
+                "\"energy_delivered_wh\":%.1f,\"voltage_sag\":%.2f}\n",
+                (long long)st.test_id, st.test_type.c_str(), (long long)st.start_time, st.duration_seconds,
+                v, a, soc, load, st.energy_delivered_wh, sag);
+            (void)chg;
+            send_response(fd, 200, "application/json", buf);
+        }
+    } else if (path == "/api/battery/diagnostics") {
+        double capacity_pct = -1;
+        double resistance_mohm = 0;
+        double avg_sag = -1;
+        double charge_eff = -1;
+        int health_score = 0;
+        if (db_) {
+            auto cap_hist = db_->load_battery_capacity_history(365);
+            if (!cap_hist.empty()) capacity_pct = cap_hist.back().second;
+            auto sag_hist = db_->load_voltage_sag_history(90);
+            if (!sag_hist.empty()) {
+                double sum = 0;
+                for (const auto& p : sag_hist) sum += p.second;
+                avg_sag = sum / sag_hist.size();
+            }
+        }
+        if (store_.extensions()) {
+            resistance_mohm = store_.extensions()->resistance_estimator().internal_resistance_mohm();
+        }
+        auto an = store_.analytics();
+        if (an.efficiency_valid && an.charger_efficiency >= 0)
+            charge_eff = an.charger_efficiency * 100;
+        auto* ext = store_.extensions();
+        if (ext) {
+            auto r = ext->health_scorer().compute(an, ext->anomaly_detector().anomalies().size());
+            health_score = r.score;
+        }
+        char buf[256];
+        std::snprintf(buf, sizeof(buf),
+            "{\"estimated_capacity_pct\":%.1f,\"internal_resistance_mohm\":%.1f,\"avg_voltage_sag_v\":%.2f,"
+            "\"charge_efficiency_pct\":%.1f,\"health_score\":%d}\n",
+            capacity_pct, resistance_mohm, avg_sag, charge_eff, health_score);
+        send_response(fd, 200, "application/json", buf);
     } else if (path == "/api/tests") {
         if (!db_) {
             send_response(fd, 200, "application/json", "{\"tests\":[],\"running\":false}\n");
@@ -704,9 +781,9 @@ void HttpServer::handle(int fd) {
                 if (i) out += ",";
                 char buf[256];
                 std::snprintf(buf, sizeof(buf),
-                    "{\"ts\":%lld,\"v\":%.2f,\"a\":%.2f,\"soc\":%.1f,\"load\":%.1f,\"chg\":\"%s\"}",
+                    "{\"ts\":%lld,\"v\":%.2f,\"a\":%.2f,\"soc\":%.1f,\"load\":%.1f,\"chg_a\":%.2f,\"chg\":\"%s\"}",
                     (long long)samples[i].timestamp, samples[i].battery_voltage, samples[i].battery_current,
-                    samples[i].battery_soc, samples[i].load_power, samples[i].charger_state.c_str());
+                    samples[i].battery_soc, samples[i].load_power, samples[i].charger_current, samples[i].charger_state.c_str());
                 out += buf;
             }
             out += "]}\n";
@@ -3901,58 +3978,107 @@ h1{font-size:1.25rem;color:var(--green);margin-bottom:.75rem}
 .test-table a{color:var(--blue);text-decoration:none}
 .test-table a:hover{text-decoration:underline}
 .running{color:var(--green)}.passed{color:var(--green)}.failed{color:var(--red)}.aborted{color:var(--orange)}
+.test-row{cursor:pointer}
+.test-row:hover{background:var(--card)}
+.test-item{display:flex;justify-content:space-between;align-items:center;padding:.6rem 0;border-bottom:1px solid var(--border);gap:.5rem}
+.test-item:last-child{border-bottom:none}
+.test-item-desc{font-size:.8rem;color:var(--muted);margin-top:.2rem}
+.test-item-meta{font-size:.72rem;color:var(--muted);margin-top:.25rem}
+.test-item-btn{flex-shrink:0}
+.active-monitor{background:linear-gradient(135deg,rgba(74,222,128,.08) 0%,rgba(96,165,250,.06) 100%);border:1px solid var(--green)}
+html.light .active-monitor{background:linear-gradient(135deg,rgba(22,163,74,.06) 0%,rgba(37,99,235,.05) 100%)}
+.diag-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:.5rem;margin-bottom:.5rem}
+.diag-item{background:var(--bg);border-radius:6px;padding:.5rem;font-size:.8rem}
+.diag-item .val{font-weight:700;font-size:1rem;color:var(--green)}
+.sched-item{display:flex;justify-content:space-between;align-items:center;padding:.4rem 0;font-size:.85rem}
+.sched-placeholder{color:var(--muted);font-size:.85rem;font-style:italic}
+.detail-chart{height:140px;background:var(--bg);border-radius:6px;margin-bottom:.5rem}
+.notes-prompt{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem;margin-top:.5rem}
+.notes-prompt textarea{width:100%;padding:.5rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:.85rem;min-height:60px;margin-bottom:.5rem}
+.export-btns{display:flex;gap:.5rem;margin-top:.5rem}
 </style></head><body>
 <nav><a href="/">Dashboard</a><a href="/solar">Solar</a><a href="/settings">Settings</a><a href="/ops_log">Ops Log</a><a href="/testing" class="active">Testing</a></nav>
 <h1>System Testing</h1>
 <div class="test-card">
 <h2>Run Test</h2>
-<button type="button" class="test-btn test-btn-start" id="start-capacity">Capacity Test</button>
+<div id="test-list"></div>
 <button type="button" class="test-btn test-btn-stop" id="stop-test" disabled>Stop Test</button>
 <span id="test-status" style="color:var(--muted);margin-left:.5rem"></span>
 </div>
+<div class="test-card active-monitor" id="active-monitor" style="display:none">
+<h2>Active Test</h2>
+<div id="active-content"></div>
+<div id="active-charts" style="margin-top:.75rem"></div>
+</div>
+<div class="test-card">
+<h2>Battery Health</h2>
+<div class="diag-grid" id="battery-health"></div>
+</div>
+<div class="test-card">
+<h2>Scheduled Tests</h2>
+<div id="sched-list" class="sched-placeholder">No scheduled tests. Add schedules in Settings.</div>
+</div>
+<div class="test-card">
+<h2>Test Safety Limits</h2>
+<div id="safety-limits" style="font-size:.85rem"></div>
+</div>
 <div class="test-card">
 <h2>Test History</h2>
-<table class="test-table"><thead><tr><th>Date</th><th>Type</th><th>Duration</th><th>Result</th><th>Notes</th></tr></thead>
+<table class="test-table"><thead><tr><th>Date</th><th>Type</th><th>Result</th><th>Duration</th><th>Notes</th></tr></thead>
 <tbody id="test-tbody"></tbody></table>
 </div>
-<div class="test-card" id="replay-card" style="display:none">
-<h2>Telemetry Replay</h2>
-<div id="replay-chart" style="height:200px;background:var(--bg);border-radius:6px"></div>
+<div class="test-card" id="detail-card" style="display:none">
+<h2>Test Details <span id="detail-id"></span></h2>
+<div id="detail-metrics"></div>
+<div id="detail-charts"></div>
+<div class="export-btns"><button type="button" class="test-btn test-btn-start" id="export-csv">Export CSV</button><button type="button" class="test-btn test-btn-start" id="export-json">Export JSON</button></div>
+<div style="margin-top:1rem"><label style="font-size:.8rem;color:var(--muted)">Notes</label><textarea id="detail-notes" class="notes-prompt" style="width:100%;padding:.5rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);min-height:50px;margin-top:.3rem"></textarea><button type="button" class="test-btn test-btn-start" id="save-notes" style="margin-top:.5rem">Save Notes</button></div>
+</div>
+<div class="test-card notes-prompt" id="notes-prompt-card" style="display:none">
+<h2>Test Complete</h2>
+<p style="font-size:.85rem;margin-bottom:.5rem">Add notes about this test? (optional)</p>
+<textarea id="finish-notes" placeholder="e.g. PSU unplugged manually, Radio transmitting during test"></textarea>
+<button type="button" class="test-btn test-btn-start" id="finish-notes-ok">Save & Close</button>
 </div>
 <script>
 function $(id){return document.getElementById(id)}
-function fmtDate(ts){if(!ts)return'—';var d=new Date(ts*1000);return d.toLocaleString()}
+var TEST_TYPES=[{id:'ups_failover',name:'UPS Failover Test',desc:'Verify grid to battery transition',dur:'~5m',impact:'Brief discharge'},{id:'load_spike',name:'Load Spike Test',desc:'Measure voltage sag under load',dur:'~12s',impact:'Minimal'},{id:'capacity',name:'Capacity Test',desc:'Estimate battery capacity',dur:'2-6h',impact:'Significant discharge'},{id:'charger_recovery',name:'Charger Recovery Test',desc:'Verify charging ramp after outage',dur:'~15m',impact:'Charge cycle'},{id:'simulated_outage',name:'Simulated Outage',desc:'Predict runtime without cutting power',dur:'~5m',impact:'Simulation only'}]
+var lastStoppedTestId=null
+function fmtDate(ts){if(!ts)return'—';var d=new Date(ts*1000);return d.toLocaleDateString()+' '+d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}
+function fmtDateShort(ts){if(!ts)return'—';var d=new Date(ts*1000);return d.toLocaleDateString()}
+function fmtDur(s){if(!s)return'—';if(s<60)return s+'s';if(s<3600)return Math.floor(s/60)+'m';return Math.floor(s/3600)+'h '+(Math.floor((s%3600)/60))+'m'}
+function fmtType(t){var x=TEST_TYPES.find(function(p){return p.id===t});return x?x.name:t}
+function renderTestList(running){var wrap=$('test-list');wrap.innerHTML='';TEST_TYPES.forEach(function(t){var div=document.createElement('div');div.className='test-item';div.innerHTML='<div><strong>'+t.name+'</strong><div class="test-item-desc">'+t.desc+'</div><div class="test-item-meta">'+t.dur+' &middot; '+t.impact+'</div></div><button type="button" class="test-btn test-btn-start test-item-btn" data-type="'+t.id+'">Run</button>';div.querySelector('button').onclick=function(){if(running)return;fetch('/api/tests/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({test_type:t.id})}).then(function(r){return r.json()}).then(function(d){if(d.ok){loadTests();loadActive();setInterval(loadTests,3000)}})};wrap.appendChild(div)})}
+function loadBatteryHealth(){fetch('/api/battery/diagnostics').then(function(r){return r.json()}).then(function(d){var wrap=$('battery-health');wrap.innerHTML='<div class="diag-item"><span class="val">'+(d.estimated_capacity_pct>=0?d.estimated_capacity_pct.toFixed(0)+'%':'—')+'</span><div>Est. Capacity</div></div><div class="diag-item"><span class="val">'+(d.internal_resistance_mohm>0?(d.internal_resistance_mohm/1000).toFixed(3)+' Ω':'—')+'</span><div>Resistance</div></div><div class="diag-item"><span class="val">'+(d.avg_voltage_sag_v>=0?d.avg_voltage_sag_v.toFixed(2)+' V':'—')+'</span><div>Avg Sag</div></div><div class="diag-item"><span class="val">'+(d.charge_efficiency_pct>=0?d.charge_efficiency_pct.toFixed(0)+'%':'—')+'</span><div>Charge Eff.</div></div><div class="diag-item"><span class="val">'+(d.health_score||0)+'/100</span><div>Health Score</div></div>'})}
+function loadSafetyLimits(){fetch('/api/tests/safety_limits').then(function(r){return r.json()}).then(function(d){$('safety-limits').innerHTML='Min SOC: '+d.soc_floor_pct+'% &middot; Min Voltage: '+d.voltage_floor_v+' V &middot; Max Duration: '+fmtDur(d.max_duration_sec)})}
+function loadActive(){fetch('/api/tests/active').then(function(r){return r.json()}).then(function(d){var mon=$('active-monitor');if(!d.running){mon.style.display='none';return}mon.style.display='block';var start=new Date(d.start_time*1000);$('active-content').innerHTML='<div><strong>'+fmtType(d.test_type)+'</strong><div class="test-item-meta">Started: '+start.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})+'</div></div><div class="diag-grid"><div class="diag-item">Battery: <span class="val">'+d.battery_voltage.toFixed(2)+' V</span></div><div class="diag-item">Current: <span class="val">'+d.battery_current.toFixed(1)+' A</span></div><div class="diag-item">Load: <span class="val">'+d.load_power.toFixed(0)+' W</span></div><div class="diag-item">SOC: <span class="val">'+d.battery_soc.toFixed(0)+'%</span></div><div class="diag-item">Energy: <span class="val">'+d.energy_delivered_wh.toFixed(0)+' Wh</span></div><div class="diag-item">Sag: <span class="val">'+d.voltage_sag.toFixed(2)+' V</span></div></div>';fetch('/api/tests/'+d.test_id+'/telemetry').then(function(x){return x.json()}).then(function(tel){var s=tel.samples||[];if(s.length<2)return;var w=400,h=100,pad=25;var svg='<svg width="100%" height="100" viewBox="0 0 400 100"><path d="M';var minV=999,maxV=0;s.forEach(function(x){if(x.v>0){minV=Math.min(minV,x.v);maxV=Math.max(maxV,x.v)}});if(maxV<=minV)maxV=minV+1;var xf=function(i){return pad+(w-pad*2)*(i/(s.length-1||1))};var yf=function(v){return h-pad-(h-pad*2)*(v-minV)/(maxV-minV)};s.forEach(function(x,i){svg+=(i?'L':'')+xf(i)+','+yf(x.v)});svg+='" fill="none" stroke="var(--green)" stroke-width="1"/></svg>';$('active-charts').innerHTML='<div class="detail-chart">Voltage</div>'+svg})})})}
 function loadTests(){fetch('/api/tests').then(function(r){return r.json()}).then(function(d){
 var tbody=$('test-tbody');tbody.innerHTML='';
 var tests=d.tests||[];
 if(!tests.length){tbody.innerHTML='<tr><td colspan=5 style="color:var(--muted)">No tests yet</td></tr>';return}
 tests.forEach(function(t){
-var tr=document.createElement('tr');
+var tr=document.createElement('tr');tr.className='test-row';
 var resCls='';if(t.result==='running')resCls='running';else if(t.result==='passed')resCls='passed';else if(t.result==='failed')resCls='failed';else if(t.result==='aborted')resCls='aborted';
-var dur=t.duration_seconds?Math.floor(t.duration_seconds/60)+'m':(t.result==='running'?'…':'—');
-tr.innerHTML='<td>'+fmtDate(t.start_time)+'</td><td><a href="#" data-id="'+t.id+'">'+t.test_type+'</a></td><td>'+dur+'</td><td class="'+resCls+'">'+t.result+'</td><td>'+(t.user_notes||'')+'</td>';
-tr.onclick=function(e){if(e.target.tagName==='A'&&e.target.dataset.id){e.preventDefault();loadReplay(parseInt(e.target.dataset.id,10))}};
+var dur=t.duration_seconds?fmtDur(t.duration_seconds):(t.result==='running'?'…':'—');
+tr.innerHTML='<td>'+fmtDateShort(t.start_time)+'</td><td>'+fmtType(t.test_type)+'</td><td class="'+resCls+'">'+(t.result||'—').toUpperCase()+'</td><td>'+dur+'</td><td>'+(t.user_notes||'—')+'</td>';
+tr.dataset.id=t.id;tr.onclick=function(){loadDetail(parseInt(tr.dataset.id,10))};
 tbody.appendChild(tr);
 });
 var run=$('stop-test');if(run)run.disabled=!d.running;
-var st=$('test-status');if(st)st.textContent=d.running?'Test running (id='+d.current_test_id+')':'';
+var st=$('test-status');if(st)st.textContent=d.running?'Test running':'';
+if(d.running)window._lastTestId=d.current_test_id;else window._lastTestId=null;
+renderTestList(d.running);
 })}
-function loadReplay(id){fetch('/api/tests/'+id+'/telemetry').then(function(r){return r.json()}).then(function(d){
-var card=$('replay-card');card.style.display='block';
-var samples=d.samples||[];if(!samples.length){$('replay-chart').innerHTML='<div style="padding:2rem;text-align:center;color:var(--muted)">No telemetry</div>';return}
-var svg='<svg width="100%" height="200" viewBox="0 0 400 200" preserveAspectRatio="none">';
-var minV=999,maxV=0,minSoc=999,maxSoc=0;
-samples.forEach(function(s){if(s.v>0){minV=Math.min(minV,s.v);maxV=Math.max(maxV,s.v)}if(s.soc>=0){minSoc=Math.min(minSoc,s.soc);maxSoc=Math.max(maxSoc,s.soc)}});
-if(maxV<=minV)maxV=minV+1;if(maxSoc<=minSoc)maxSoc=minSoc+1;
-var w=400,h=200;var pad=30;var x=function(i){return pad+(w-pad*2)*(i/(samples.length-1||1))};var yV=function(v){return h-pad-(h-pad*2)*(v-minV)/(maxV-minV)};var yS=function(s){return h-pad-(h-pad*2)*(s-minSoc)/(maxSoc-minSoc)};
-svg+='<path d="M';samples.forEach(function(s,i){svg+=(i?'L':'')+x(i)+','+yV(s.v);});svg+='" fill="none" stroke="var(--green)" stroke-width="1.5"/>';
-svg+='<path d="M';samples.forEach(function(s,i){svg+=(i?'L':'')+x(i)+','+yS(s.soc);});svg+='" fill="none" stroke="var(--blue)" stroke-width="1" opacity=".7"/>';
-svg+='</svg>';
-$('replay-chart').innerHTML=svg;
-})}
-$('start-capacity').onclick=function(){fetch('/api/tests/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({test_type:'capacity'})}).then(function(r){return r.json()}).then(function(d){if(d.ok){loadTests();setInterval(loadTests,3000)}})}
-$('stop-test').onclick=function(){fetch('/api/tests/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})}).then(function(r){return r.json()}).then(function(d){if(d.ok)loadTests()})}
-loadTests();setInterval(loadTests,10000);
+function loadDetail(id){$('detail-card').style.display='block';$('detail-id').textContent='#'+id;window._detailId=id;fetch('/api/tests/'+id).then(function(r){return r.json()}).then(function(t){var meta={};try{meta=(t.metadata_json&&t.metadata_json.length)?JSON.parse(t.metadata_json):{}}catch(e){}var html='<div class="diag-grid">';if(meta.energy_delivered_wh)html+='<div class="diag-item">Energy: <span class="val">'+meta.energy_delivered_wh.toFixed(0)+' Wh</span></div>';if(meta.health_percent>=0)html+='<div class="diag-item">Health: <span class="val">'+meta.health_percent.toFixed(1)+'%</span></div>';html+='<div class="diag-item">Duration: <span class="val">'+fmtDur(t.duration_seconds)+'</span></div><div class="diag-item">Result: <span class="val">'+t.result+'</span></div></div>';$('detail-metrics').innerHTML=html;$('detail-notes').value=t.user_notes||''});fetch('/api/tests/'+id+'/telemetry').then(function(r){return r.json()}).then(function(d){var s=d.samples||[];if(!s.length){$('detail-charts').innerHTML='<div style="color:var(--muted);padding:1rem">No telemetry</div>';return}var w=400,h=120,pad=30;var charts=[];var series=[{key:'v',label:'Voltage (V)',color:'var(--green)'},{key:'a',label:'Current (A)',color:'var(--blue)'},{key:'load',label:'Load (W)',color:'var(--orange)'},{key:'chg_a',label:'Charger (A)',color:'var(--muted)'}];series.forEach(function(ser){var min=999,max=-999;s.forEach(function(x){var v=x[ser.key];if(v!=null&&!isNaN(v)){min=Math.min(min,v);max=Math.max(max,v)}});if(max<min)max=min+1;var xf=function(i){return pad+(w-pad*2)*(i/(s.length-1||1))};var yf=function(v){return h-pad-(h-pad*2)*(v-min)/(max-min)};var path='M';s.forEach(function(x,i){var v=x[ser.key]!=null?x[ser.key]:min;path+=(i?'L':'')+xf(i)+','+yf(v)});charts.push('<div class="detail-chart"><div class="test-item-meta">'+ser.label+'</div><svg width="100%" height="120" viewBox="0 0 400 120"><path d="'+path+'" fill="none" stroke="'+ser.color+'" stroke-width="1"/></svg></div>')});$('detail-charts').innerHTML=charts.join('')})}
+function exportTest(id,fmt){fetch('/api/tests/'+id+'/telemetry').then(function(r){return r.json()}).then(function(d){var s=d.samples||[];if(fmt==='csv'){var h='timestamp,voltage_v,current_a,soc_pct,load_w,charger_a\n';var rows=s.map(function(x){return x.ts+','+(x.v||'')+','+(x.a||'')+','+(x.soc||'')+','+(x.load||'')+','+(x.chg_a||'')});var blob=new Blob([h+rows.join('\n')],{type:'text/csv'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='test-'+id+'.csv';a.click()}else{var blob=new Blob([JSON.stringify(d)],{type:'application/json'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='test-'+id+'.json';a.click()}})}
+$('stop-test').onclick=function(){var tid=window._lastTestId;fetch('/api/tests/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})}).then(function(r){return r.json()}).then(function(d){if(d.ok){loadTests();loadActive();if(tid){lastStoppedTestId=tid;$('notes-prompt-card').style.display='block';$('finish-notes').value=''}}})}
+$('export-csv').onclick=function(){if(window._detailId)exportTest(window._detailId,'csv')}
+$('export-json').onclick=function(){if(window._detailId)exportTest(window._detailId,'json')}
+$('save-notes').onclick=function(){if(!window._detailId)return;var n=$('detail-notes').value;fetch('/api/tests/'+window._detailId+'/notes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({notes:n})}).then(function(r){return r.json()}).then(function(d){if(d.ok)loadTests()})}
+$('finish-notes-ok').onclick=function(){if(lastStoppedTestId&&$('finish-notes').value.trim()){fetch('/api/tests/'+lastStoppedTestId+'/notes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({notes:$('finish-notes').value.trim()})}).then(function(r){return r.json()})}$('notes-prompt-card').style.display='none';lastStoppedTestId=null}
+loadTests();loadBatteryHealth();loadSafetyLimits();loadActive();
+setInterval(function(){loadTests();loadActive()},5000);
+setInterval(loadBatteryHealth,60000);
 </script></body></html>)HTML";
     return o;
 }
