@@ -60,7 +60,8 @@ The build system (`CMakeLists.txt`) now automatically detects the target archite
   - **Automated Cleanup:** To prevent the database from growing indefinitely during years of unattended operation, an automated maintenance routine runs once every 24 hours.
   - **Tiered Retention:**
     - High-resolution telemetry (battery, charger, solar) is kept for a base period (default 90 days, configurable via `--retention`).
-    - Critical system and operational events (`system_events`, `ops_events`) are preserved for a much longer duration (default 3650 days / 10 years, configurable via `--event-retention`) to maintain a long-term historical record of the system's performance and interventions.
+    - Operational events (`ops_events`) are preserved for a much longer duration (default 3650 days / 10 years, configurable via `--ops-event-retention`) to maintain a long-term historical record of the system's performance and interventions.
+    - System events (`system_events`) are kept for a medium-term period (default 180 days / 6 months, configurable via `--system-event-retention`) to provide recent operational context without excessive database growth.
   - **Efficient Space Reuse:** Uses SQLite's Write-Ahead Logging (WAL) and periodic checkpoints to ensure that deleted space is reused by new data without requiring a heavy `VACUUM` operation that could block the system.
 
 - **Data Stability (Emergency Focus):**

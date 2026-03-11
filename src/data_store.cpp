@@ -365,7 +365,7 @@ void DataStore::update_self_monitor() {
     static auto last_db_cleanup = std::chrono::steady_clock::now();
     auto now = std::chrono::steady_clock::now();
     if (db_ && std::chrono::duration_cast<std::chrono::hours>(now - last_db_cleanup).count() >= 24) {
-        db_->cleanup(cfg_.data_retention_days, cfg_.event_retention_days);
+        db_->cleanup(cfg_.data_retention_days, cfg_.system_event_retention_days, cfg_.ops_event_retention_days);
         last_db_cleanup = now;
     }
 }

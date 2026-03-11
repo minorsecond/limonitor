@@ -193,7 +193,7 @@ public:
      * Keeps events and test runs for longer.
      * @param max_age_days - Delete telemetry data older than this many days.
      */
-    void cleanup(int max_age_days, int event_max_age_days);
+    void cleanup(int max_age_days, int system_event_max_age_days, int ops_event_max_age_days);
 
     // Platform default:
     //   macOS: ~/Library/Application Support/limonitor/limonitor.db

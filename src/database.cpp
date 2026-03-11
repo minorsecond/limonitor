@@ -1582,7 +1582,7 @@ std::vector<std::pair<std::string, int64_t>> Database::table_sizes() const {
     return result;
 }
 
-void Database::cleanup(int max_age_days, int event_max_age_days) {
+void Database::cleanup(int max_age_days, int system_event_max_age_days, int ops_event_max_age_days) {
     if (max_age_days <= 0) return;
     std::lock_guard<std::mutex> lk(mu_);
     if (!db_) return;
@@ -1622,28 +1622,34 @@ void Database::cleanup(int max_age_days, int event_max_age_days) {
         }
     }
 
-    // Keep events for much longer (e.g. event_max_age_days) to maintain historical context for years.
-    if (event_max_age_days > 0) {
-        int64_t event_threshold = now - (static_cast<int64_t>(event_max_age_days) * 86400);
-        LOG_INFO("DB: Event cleanup (event_max_age_days=%d, threshold=%lld)", event_max_age_days, (long long)event_threshold);
+    // Tiered event cleanup: Keep system events for system_event_max_age_days, ops events for ops_event_max_age_days.
+    if (system_event_max_age_days > 0) {
+        int64_t system_threshold = now - (static_cast<int64_t>(system_event_max_age_days) * 86400);
+        LOG_INFO("DB: System event cleanup (days=%d, threshold=%lld)", system_event_max_age_days, (long long)system_threshold);
+        char sql[256];
+        std::snprintf(sql, sizeof(sql), "DELETE FROM system_events WHERE ts < %lld", (long long)system_threshold);
+        char* zErrMsg = nullptr;
+        if (sqlite3_exec(db, sql, nullptr, nullptr, &zErrMsg) == SQLITE_OK) {
+            int changes = sqlite3_changes(db);
+            if (changes > 0) LOG_INFO("DB: Cleaned up %d rows from system_events", changes);
+        } else {
+            LOG_WARN("DB: Failed to cleanup system_events: %s", zErrMsg ? zErrMsg : "unknown error");
+            if (zErrMsg) sqlite3_free(zErrMsg);
+        }
+    }
 
-        std::vector<CleanupTarget> event_targets = {
-            {"system_events", "ts"},
-            {"ops_events", "ts"}
-        };
-        for (const auto& target : event_targets) {
-            char sql[256];
-            std::snprintf(sql, sizeof(sql), "DELETE FROM %s WHERE %s < %lld", target.table, target.ts_col, (long long)event_threshold);
-            char* zErrMsg = nullptr;
-            int rc = sqlite3_exec(db, sql, nullptr, nullptr, &zErrMsg);
-            if (rc == SQLITE_OK) {
-                int changes = sqlite3_changes(db);
-                if (changes > 0) {
-                    LOG_INFO("DB: Cleaned up %d rows from event table %s", changes, target.table);
-                }
-            } else {
-                LOG_WARN("DB: Failed to cleanup event table %s", target.table);
-            }
+    if (ops_event_max_age_days > 0) {
+        int64_t ops_threshold = now - (static_cast<int64_t>(ops_event_max_age_days) * 86400);
+        LOG_INFO("DB: Ops event cleanup (days=%d, threshold=%lld)", ops_event_max_age_days, (long long)ops_threshold);
+        char sql[256];
+        std::snprintf(sql, sizeof(sql), "DELETE FROM ops_events WHERE ts < %lld", (long long)ops_threshold);
+        char* zErrMsg = nullptr;
+        if (sqlite3_exec(db, sql, nullptr, nullptr, &zErrMsg) == SQLITE_OK) {
+            int changes = sqlite3_changes(db);
+            if (changes > 0) LOG_INFO("DB: Cleaned up %d rows from ops_events", changes);
+        } else {
+            LOG_WARN("DB: Failed to cleanup ops_events: %s", zErrMsg ? zErrMsg : "unknown error");
+            if (zErrMsg) sqlite3_free(zErrMsg);
         }
     }
 
