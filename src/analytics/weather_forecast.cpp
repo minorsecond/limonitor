@@ -485,7 +485,7 @@ SolarForecastWeekResult WeatherForecast::get_forecast_week(double panel_watts, d
 
         double day_wh = (realistic ? day_kwh_accepted : day_kwh_nominal) * 1000.0;
         double cap_wh = cap_ah * v;
-        double headroom_pct = std::max(0.0, 100.0 - current_soc_pct);
+        double headroom_pct = std::max(0.0, 100.0 - daily_projected_soc);
         double cv = 0.10 + 0.10 * d.cloud_cover;  // 10–20% coefficient of variation
         double margin = 1.96 * cv;                 // 95% CI half-width
         double mult_lo = std::max(0.0, 1.0 - margin);

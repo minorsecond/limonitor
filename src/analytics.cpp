@@ -215,25 +215,28 @@ void AnalyticsEngine::compute_voltage_trend() {
         snap_.voltage_trend = "—";
         return;
     }
-    // Linear regression slope on last N samples
-    double sum_x = 0, sum_y = 0, sum_xy = 0, sum_xx = 0;
     size_t n = voltage_ring_count_;
+    double sum_x = 0, sum_y = 0;
     for (size_t i = 0; i < n; ++i) {
         size_t idx = (voltage_ring_head_ + VOLTAGE_N - 1 - i) % VOLTAGE_N;
-        double x = voltage_ring_ts_[idx];
-        double y = voltage_ring_[idx];
-        sum_x += x;
-        sum_y += y;
-        sum_xy += x * y;
-        sum_xx += x * x;
+        sum_x += voltage_ring_ts_[idx];
+        sum_y += voltage_ring_[idx];
     }
-    double denom = n * sum_xx - sum_x * sum_x;
-    if (std::fabs(denom) < 1e-12) {
+    double x_bar = sum_x / n;
+    double y_bar = sum_y / n;
+    double sum_dxdy = 0, sum_dx2 = 0;
+    for (size_t i = 0; i < n; ++i) {
+        size_t idx = (voltage_ring_head_ + VOLTAGE_N - 1 - i) % VOLTAGE_N;
+        double dx = voltage_ring_ts_[idx] - x_bar;
+        double dy = voltage_ring_[idx] - y_bar;
+        sum_dx2  += dx * dx;
+        sum_dxdy += dx * dy;
+    }
+    if (sum_dx2 < 1e-6) {
         snap_.voltage_trend = "stable";
         return;
     }
-    double slope = (n * sum_xy - sum_x * sum_y) / denom;
-    // Slope in V/s — threshold ~1e-6 V/s (0.036 V/h) for "trend"
+    double slope = sum_dxdy / sum_dx2;
     if (slope > 1e-6)
         snap_.voltage_trend = "up";
     else if (slope < -1e-6)
@@ -248,26 +251,30 @@ void AnalyticsEngine::compute_soc_trend() {
         snap_.soc_rate_pct_per_h = 0;
         return;
     }
-    double sum_x = 0, sum_y = 0, sum_xy = 0, sum_xx = 0;
     size_t n = voltage_ring_count_;
+    double sum_x = 0, sum_y = 0;
     for (size_t i = 0; i < n; ++i) {
         size_t idx = (voltage_ring_head_ + VOLTAGE_N - 1 - i) % VOLTAGE_N;
-        double x = voltage_ring_ts_[idx];
-        double y = soc_ring_[idx];
-        sum_x += x;
-        sum_y += y;
-        sum_xy += x * y;
-        sum_xx += x * x;
+        sum_x += voltage_ring_ts_[idx];
+        sum_y += soc_ring_[idx];
     }
-    double denom = n * sum_xx - sum_x * sum_x;
-    if (std::fabs(denom) < 1e-12) {
+    double x_bar = sum_x / n;
+    double y_bar = sum_y / n;
+    double sum_dxdy = 0, sum_dx2 = 0;
+    for (size_t i = 0; i < n; ++i) {
+        size_t idx = (voltage_ring_head_ + VOLTAGE_N - 1 - i) % VOLTAGE_N;
+        double dx = voltage_ring_ts_[idx] - x_bar;
+        double dy = soc_ring_[idx] - y_bar;
+        sum_dx2  += dx * dx;
+        sum_dxdy += dx * dy;
+    }
+    if (sum_dx2 < 1e-6) {
         snap_.soc_trend = "stable";
         snap_.soc_rate_pct_per_h = 0;
         return;
     }
-    double slope = (n * sum_xy - sum_x * sum_y) / denom;  // %/s
-    snap_.soc_rate_pct_per_h = slope * 3600.0;            // %/h
-    // Threshold ~0.03 %/h (1e-5 %/s) for "trend"
+    double slope = sum_dxdy / sum_dx2;  // %/s
+    snap_.soc_rate_pct_per_h = slope * 3600.0;
     if (slope > 1e-5)
         snap_.soc_trend = "up";
     else if (slope < -1e-5)
@@ -519,7 +526,11 @@ void AnalyticsEngine::compute_extended_analytics(const BatterySnapshot& bat,
     // Require load high enough for plausible runtime (avoid >1000 h on typical 100Ah pack)
     constexpr double MIN_LOAD_FOR_PLAUSIBLE_H = 1.2;  // 1200 Wh / 1.2 W = 1000 h
     if (load_w >= MIN_LOAD_FOR_PLAUSIBLE_H && bat.nominal_ah > 1.0) {
-        double pack_v = bat.total_voltage_v > 1 ? bat.total_voltage_v : 51.2;
+        // Use nominal voltage (3.2V/cell for LiFePO4) for stable runtime estimates.
+        // Derive cell count from instantaneous voltage, then use 3.2V * cells.
+        double measured_v = bat.total_voltage_v > 1 ? bat.total_voltage_v : 51.2;
+        int cells = std::max(1, static_cast<int>(std::round(measured_v / 3.3)));
+        double pack_v = cells * 3.2;
         double total_wh = bat.nominal_ah * pack_v;
         double usable_from_full_wh = total_wh * (100.0 - LIFEPO4_CUTOFF_PCT) / 100.0;
         double usable_from_current_wh = total_wh * (bat.soc_pct - LIFEPO4_CUTOFF_PCT) / 100.0;

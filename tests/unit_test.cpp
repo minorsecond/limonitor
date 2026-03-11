@@ -842,6 +842,139 @@ static void test_soc_full_drain_recovery() {
     ASSERT(approx_eq(soc[6], 60.0), "soc_drain_recover: slot 6 = 60%");
 }
 
+// ---------- Centered regression test ----------
+
+// Standalone regression using same centered algorithm as the fix
+static double centered_regression_slope(const std::vector<double>& xs,
+                                        const std::vector<double>& ys) {
+    size_t n = std::min(xs.size(), ys.size());
+    if (n < 2) return 0;
+    double sum_x = 0, sum_y = 0;
+    for (size_t i = 0; i < n; ++i) { sum_x += xs[i]; sum_y += ys[i]; }
+    double x_bar = sum_x / n;
+    double y_bar = sum_y / n;
+    double sum_dxdy = 0, sum_dx2 = 0;
+    for (size_t i = 0; i < n; ++i) {
+        double dx = xs[i] - x_bar;
+        double dy = ys[i] - y_bar;
+        sum_dx2 += dx * dx;
+        sum_dxdy += dx * dy;
+    }
+    if (sum_dx2 < 1e-12) return 0;
+    return sum_dxdy / sum_dx2;
+}
+
+static void test_regression_centered() {
+    // Unix timestamps ~1.74e9 with 5-second spacing, voltage rising linearly
+    // True slope = 0.001 V/s (3.6 V/h)
+    double t0 = 1741700000.0;
+    double v0 = 13.200;
+    std::vector<double> ts, vs;
+    for (int i = 0; i < 12; ++i) {
+        ts.push_back(t0 + i * 5.0);
+        vs.push_back(v0 + i * 5.0 * 0.001);
+    }
+    double slope = centered_regression_slope(ts, vs);
+    ASSERT(approx_eq(slope, 0.001, 1e-8), "regression_centered: slope = 0.001 V/s for linear data");
+
+    // Negative slope
+    std::vector<double> vs_down;
+    for (int i = 0; i < 12; ++i) vs_down.push_back(v0 - i * 5.0 * 0.0005);
+    double slope2 = centered_regression_slope(ts, vs_down);
+    ASSERT(approx_eq(slope2, -0.0005, 1e-8), "regression_centered: slope = -0.0005 V/s for downward");
+
+    // Verify the OLD naive algorithm fails on this data
+    double sum_x = 0, sum_y = 0, sum_xy = 0, sum_xx = 0;
+    size_t n = ts.size();
+    for (size_t i = 0; i < n; ++i) {
+        sum_x += ts[i]; sum_y += vs[i]; sum_xy += ts[i] * vs[i]; sum_xx += ts[i] * ts[i];
+    }
+    double naive_denom = n * sum_xx - sum_x * sum_x;
+    double naive_slope = (n * sum_xy - sum_x * sum_y) / naive_denom;
+    double naive_error = std::fabs(naive_slope - 0.001);
+    double centered_error = std::fabs(slope - 0.001);
+    ASSERT(centered_error < naive_error * 0.01 || centered_error < 1e-10,
+           "regression_centered: centered is far more accurate than naive");
+}
+
+static void test_regression_flat() {
+    // Flat data should give ~0 slope
+    double t0 = 1741700000.0;
+    std::vector<double> ts, vs;
+    for (int i = 0; i < 12; ++i) {
+        ts.push_back(t0 + i * 5.0);
+        vs.push_back(13.45);
+    }
+    double slope = centered_regression_slope(ts, vs);
+    ASSERT(std::fabs(slope) < 1e-12, "regression_flat: flat data gives ~0 slope");
+}
+
+// ---------- Runtime nominal voltage test ----------
+
+static void test_runtime_nominal_voltage() {
+    // For a 4-cell (12V) LiFePO4 battery, nominal = 4 * 3.2 = 12.8V
+    // With 100Ah: capacity = 1280 Wh
+    // But the actual voltage varies 12.0-14.6V — runtime should NOT change with it.
+    // The estimate_runtime_h function uses exact cap_wh, so we test the
+    // cell-count derivation logic here.
+    auto derive_nominal_v = [](double measured_v) -> double {
+        int cells = std::max(1, static_cast<int>(std::round(measured_v / 3.3)));
+        return cells * 3.2;
+    };
+    // 4S LiFePO4: voltages ranging from 12.0V (empty) to 14.4V (full)
+    ASSERT(approx_eq(derive_nominal_v(12.0), 12.8, 0.01), "nominal_v: 12.0V → 4S → 12.8V");
+    ASSERT(approx_eq(derive_nominal_v(13.2), 12.8, 0.01), "nominal_v: 13.2V → 4S → 12.8V");
+    ASSERT(approx_eq(derive_nominal_v(13.56), 12.8, 0.01), "nominal_v: 13.56V → 4S → 12.8V");
+    ASSERT(approx_eq(derive_nominal_v(14.4), 12.8, 0.01), "nominal_v: 14.4V → 4S → 12.8V");
+    // 16S (48V) LiFePO4
+    ASSERT(approx_eq(derive_nominal_v(51.2), 51.2, 0.01), "nominal_v: 51.2V → 16S → 51.2V");
+    ASSERT(approx_eq(derive_nominal_v(56.0), 54.4, 0.01), "nominal_v: 56.0V → 17S → 54.4V");
+    // 1S (single cell)
+    ASSERT(approx_eq(derive_nominal_v(3.2), 3.2, 0.01), "nominal_v: 3.2V → 1S → 3.2V");
+}
+
+// ---------- Daily CI variance addition test ----------
+
+static void test_daily_ci_variance_addition() {
+    // 8 independent slots with known mean and stddev
+    // Daily mean = sum of slot means
+    // Daily variance = sum of slot variances (for independent slots)
+    // Daily stddev = sqrt(sum of variances)
+    double slot_avg = 14.0;   // 14W per slot
+    double slot_sd = 3.0;     // 3W stddev
+
+    // Daily mean energy (kWh): 8 * 14W * 3h / 1000 = 0.336 kWh
+    double daily_mean = 8 * slot_avg * 3.0 / 1000.0;
+    ASSERT(approx_eq(daily_mean, 0.336, 0.001), "daily_ci: mean = 0.336 kWh");
+
+    // Variance per slot in Wh²: sd² * 3h² = 9 * 9 = 81 Wh²
+    // Total variance: 8 * 81 = 648 Wh²
+    // Daily stddev: sqrt(648) / 1000 kWh ≈ 0.02546 kWh
+    double daily_var = 8 * slot_sd * slot_sd * 9.0;
+    double daily_sd = std::sqrt(daily_var) / 1000.0;
+    ASSERT(approx_eq(daily_sd, 0.02546, 0.001), "daily_ci: sd ≈ 0.0255 kWh");
+
+    // 95% CI: mean ± 1.96 * sd
+    double lo = daily_mean - 1.96 * daily_sd;
+    double hi = daily_mean + 1.96 * daily_sd;
+    ASSERT(approx_eq(lo, 0.286, 0.01), "daily_ci: lo ≈ 0.286 kWh");
+    ASSERT(approx_eq(hi, 0.386, 0.01), "daily_ci: hi ≈ 0.386 kWh");
+
+    // Old (wrong) method: sum individual slot CIs
+    double wrong_lo = 0, wrong_hi = 0;
+    for (int s = 0; s < 8; ++s) {
+        wrong_lo += std::max(0.0, (slot_avg - 1.96 * slot_sd) * 3.0) / 1000.0;
+        wrong_hi += (slot_avg + 1.96 * slot_sd) * 3.0 / 1000.0;
+    }
+    // Wrong method gives much wider CI
+    ASSERT(hi - lo < wrong_hi - wrong_lo, "daily_ci: correct CI is narrower than naive sum");
+    // Specifically, wrong width / correct width ≈ sqrt(8) ≈ 2.83
+    double correct_width = hi - lo;
+    double wrong_width = wrong_hi - wrong_lo;
+    ASSERT(approx_eq(wrong_width / correct_width, std::sqrt(8.0), 0.1),
+           "daily_ci: naive CI is ~sqrt(8)x too wide");
+}
+
 int main() {
     std::fprintf(stderr, "\n=== limonitor unit tests ===\n\n");
 
@@ -889,6 +1022,11 @@ int main() {
     test_scale_uneven_counts();
 
     test_soc_with_scaled_usage();
+
+    test_regression_centered();
+    test_regression_flat();
+    test_runtime_nominal_voltage();
+    test_daily_ci_variance_addition();
 
     std::fprintf(stderr, "\n=== %d failure(s) ===\n", g_failures);
     return g_failures > 0 ? 1 : 0;

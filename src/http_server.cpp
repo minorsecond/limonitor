@@ -860,15 +860,16 @@ std::string HttpServer::solar_forecast_week_json(const SolarForecastWeekResult& 
     for (size_t i = 0; i < r.daily.size(); ++i) {
         const auto& d = r.daily[i];
         if (i) o += ",";
-        double usage_kwh = 0, usage_kwh_lo = 0, usage_kwh_hi = 0;
+        double usage_kwh = 0, usage_var_wh2 = 0;
         for (int s = 0; s < 8; ++s) {
             double avg = (s < (int)usage.size() && usage[s].sample_count >= 3) ? usage[s].avg_w : fallback_w;
             double sd  = (s < (int)usage.size() && usage[s].sample_count >= 3) ? usage[s].stddev_w : avg * 0.2;
-            double slot_wh = avg * 3.0;
-            usage_kwh += slot_wh / 1000.0;
-            usage_kwh_lo += std::max(0.0, (avg - 1.96 * sd) * 3.0) / 1000.0;
-            usage_kwh_hi += (avg + 1.96 * sd) * 3.0 / 1000.0;
+            usage_kwh += avg * 3.0 / 1000.0;
+            usage_var_wh2 += sd * sd * 9.0;  // var of 3h slot energy (Wh²)
         }
+        double daily_sd_kwh = std::sqrt(usage_var_wh2) / 1000.0;
+        double usage_kwh_lo = std::max(0.0, usage_kwh - 1.96 * daily_sd_kwh);
+        double usage_kwh_hi = usage_kwh + 1.96 * daily_sd_kwh;
         double surplus = d.kwh - usage_kwh;
         double surplus_lo = d.max_recovery_wh_lo / 1000.0 - usage_kwh_hi;
         double surplus_hi = d.max_recovery_wh_hi / 1000.0 - usage_kwh_lo;
