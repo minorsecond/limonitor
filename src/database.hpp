@@ -129,6 +129,24 @@ public:
     // Mark any test_runs with result='running' as 'aborted' (recovery from crashes).
     void abort_interrupted_tests();
 
+    // Grid connectivity events — for outage/maintenance classification
+    struct GridEventRow {
+        int64_t id{0};
+        int64_t start_ts{0};
+        int64_t end_ts{0};
+        int duration_s{0};
+        double soc_start{0};
+        double soc_end{0};
+        std::string classification;  // "unclassified", "outage", "maintenance", "false_alarm"
+        std::string user_notes;
+        int64_t classified_ts{0};
+    };
+    int64_t insert_grid_event(int64_t start_ts, double soc_start);
+    bool close_grid_event(int64_t id, int64_t end_ts, int duration_s, double soc_end);
+    bool classify_grid_event(int64_t id, const std::string& classification, const std::string& notes);
+    std::vector<GridEventRow> load_grid_events(size_t limit = 100) const;
+    std::vector<GridEventRow> load_unclassified_grid_events() const;
+
     // Test schedules (automated tests)
     struct TestScheduleRow {
         int64_t id{0};

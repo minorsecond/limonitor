@@ -284,6 +284,21 @@ bool Database::migrate() {
         "CREATE INDEX IF NOT EXISTS ts_next ON test_schedules(next_run_ts);"
     )) return false;
 
+    if (!exec(
+        "CREATE TABLE IF NOT EXISTS grid_events ("
+        "  id             INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  start_ts       INTEGER NOT NULL,"
+        "  end_ts         INTEGER DEFAULT 0,"
+        "  duration_s     INTEGER DEFAULT 0,"
+        "  soc_start      REAL DEFAULT 0,"
+        "  soc_end        REAL DEFAULT 0,"
+        "  classification TEXT DEFAULT 'unclassified',"
+        "  user_notes     TEXT DEFAULT '',"
+        "  classified_ts  INTEGER DEFAULT 0"
+        ");"
+        "CREATE INDEX IF NOT EXISTS ge_cls ON grid_events(classification,end_ts);"
+    )) return false;
+
     return true;
 }
 
@@ -1416,4 +1431,102 @@ void Database::abort_interrupted_tests() {
         LOG_WARN("DB: abort_interrupted_tests: %s", err ? err : "error");
         sqlite3_free(err);
     }
+}
+
+int64_t Database::insert_grid_event(int64_t start_ts, double soc_start) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return 0;
+    auto* db = db_handle(db_);
+    const char* sql = "INSERT INTO grid_events (start_ts, soc_start, classification) VALUES (?,?,'unclassified')";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return 0;
+    sqlite3_bind_int64(stmt, 1, start_ts);
+    sqlite3_bind_double(stmt, 2, soc_start);
+    sqlite3_step(stmt);
+    int64_t id = sqlite3_last_insert_rowid(db);
+    sqlite3_finalize(stmt);
+    return id;
+}
+
+bool Database::close_grid_event(int64_t id, int64_t end_ts, int duration_s, double soc_end) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return false;
+    auto* db = db_handle(db_);
+    const char* sql = "UPDATE grid_events SET end_ts=?,duration_s=?,soc_end=? WHERE id=?";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_int64(stmt, 1, end_ts);
+    sqlite3_bind_int(stmt, 2, duration_s);
+    sqlite3_bind_double(stmt, 3, soc_end);
+    sqlite3_bind_int64(stmt, 4, id);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+bool Database::classify_grid_event(int64_t id, const std::string& classification, const std::string& notes) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return false;
+    auto* db = db_handle(db_);
+    const char* sql = "UPDATE grid_events SET classification=?,user_notes=?,classified_ts=? WHERE id=?";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_text(stmt, 1, classification.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, notes.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 3, (int64_t)std::time(nullptr));
+    sqlite3_bind_int64(stmt, 4, id);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+static void fill_grid_event_row(Database::GridEventRow& r, sqlite3_stmt* stmt) {
+    r.id           = sqlite3_column_int64(stmt, 0);
+    r.start_ts     = sqlite3_column_int64(stmt, 1);
+    r.end_ts       = sqlite3_column_int64(stmt, 2);
+    r.duration_s   = sqlite3_column_int(stmt, 3);
+    r.soc_start    = sqlite3_column_double(stmt, 4);
+    r.soc_end      = sqlite3_column_double(stmt, 5);
+    if (auto* t = sqlite3_column_text(stmt, 6)) r.classification = reinterpret_cast<const char*>(t);
+    if (auto* t = sqlite3_column_text(stmt, 7)) r.user_notes     = reinterpret_cast<const char*>(t);
+    r.classified_ts = sqlite3_column_int64(stmt, 8);
+}
+
+std::vector<Database::GridEventRow> Database::load_grid_events(size_t limit) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<GridEventRow> result;
+    if (!db_) return result;
+    auto* db = db_handle(db_);
+    const char* sql = "SELECT id,start_ts,end_ts,duration_s,soc_start,soc_end,classification,user_notes,classified_ts"
+                      " FROM grid_events ORDER BY start_ts DESC LIMIT ?";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return result;
+    sqlite3_bind_int64(stmt, 1, (int64_t)limit);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        GridEventRow r;
+        fill_grid_event_row(r, stmt);
+        result.push_back(r);
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+std::vector<Database::GridEventRow> Database::load_unclassified_grid_events() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<GridEventRow> result;
+    if (!db_) return result;
+    auto* db = db_handle(db_);
+    // Only completed events (end_ts > 0) awaiting classification
+    const char* sql = "SELECT id,start_ts,end_ts,duration_s,soc_start,soc_end,classification,user_notes,classified_ts"
+                      " FROM grid_events WHERE classification='unclassified' AND end_ts>0"
+                      " ORDER BY start_ts ASC";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return result;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        GridEventRow r;
+        fill_grid_event_row(r, stmt);
+        result.push_back(r);
+    }
+    sqlite3_finalize(stmt);
+    return result;
 }

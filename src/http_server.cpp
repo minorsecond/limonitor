@@ -68,6 +68,17 @@ static int jval_i(const std::string& body, const std::string& key, int def) {
     if (p >= body.size()) return def;
     return std::atoi(body.c_str() + p);
 }
+static double jval_d(const std::string& body, const std::string& key, double def) {
+    std::string pat = "\"" + key + "\"";
+    auto p = body.find(pat);
+    if (p == std::string::npos) return def;
+    p = body.find(':', p);
+    if (p == std::string::npos) return def;
+    p++;
+    while (p < body.size() && (body[p] == ' ' || body[p] == '\t')) p++;
+    if (p >= body.size()) return def;
+    try { return std::stod(body.c_str() + p); } catch (...) { return def; }
+}
 static int64_t compute_next_schedule_run(const std::string& freq, int hour, int min, int day) {
     std::time_t now = std::time(nullptr);
     struct tm t{};
@@ -500,12 +511,9 @@ void HttpServer::handle(int fd) {
             return;
         }
         testing::SafetyLimits lim = test_runner_->safety_limits();
-        auto sv = jval_s(body, "soc_floor_pct");
-        if (!sv.empty()) { try { lim.soc_floor_pct = std::stod(sv); } catch (...) {} }
-        sv = jval_s(body, "voltage_floor_v");
-        if (!sv.empty()) { try { lim.voltage_floor_v = std::stod(sv); } catch (...) {} }
-        sv = jval_s(body, "max_duration_sec");
-        if (!sv.empty()) { try { lim.max_duration_sec = std::stoi(sv); } catch (...) {} }
+        lim.soc_floor_pct   = jval_d(body, "soc_floor_pct",   lim.soc_floor_pct);
+        lim.voltage_floor_v = jval_d(body, "voltage_floor_v", lim.voltage_floor_v);
+        lim.max_duration_sec = jval_i(body, "max_duration_sec", lim.max_duration_sec);
         if (body.find("\"abort_on_overtemp\":true") != std::string::npos)
             lim.abort_on_overtemp = true;
         else if (body.find("\"abort_on_overtemp\":false") != std::string::npos)
@@ -644,6 +652,55 @@ void HttpServer::handle(int fd) {
         send_response(fd, 200, "application/json", ops_log_json(events));
     } else if (path == "/api/maintenance_status") {
         send_response(fd, 200, "application/json", maintenance_status_json(db_));
+    } else if (path == "/api/grid_events") {
+        bool unclassified_only = query.find("unclassified=1") != std::string::npos;
+        auto evs = db_ ? (unclassified_only ? db_->load_unclassified_grid_events()
+                                             : db_->load_grid_events())
+                       : std::vector<Database::GridEventRow>{};
+        std::string out = "[";
+        bool gfirst = true;
+        for (const auto& e : evs) {
+            if (!gfirst) out += ",";
+            gfirst = false;
+            out += "{\"id\":"           + std::to_string(e.id)
+                 + ",\"start_ts\":"     + std::to_string(e.start_ts)
+                 + ",\"end_ts\":"       + std::to_string(e.end_ts)
+                 + ",\"duration_s\":"   + std::to_string(e.duration_s)
+                 + ",\"soc_start\":"    + jdbl(e.soc_start, 1)
+                 + ",\"soc_end\":"      + jdbl(e.soc_end, 1)
+                 + ",\"classification\":" + jstr(e.classification)
+                 + ",\"user_notes\":"   + jstr(e.user_notes)
+                 + "}";
+        }
+        out += "]\n";
+        send_response(fd, 200, "application/json", out);
+    } else if (method == "POST" && path.size() > 17 &&
+               path.substr(0, 17) == "/api/grid_events/" &&
+               path.find("/classify") != std::string::npos) {
+        // POST /api/grid_events/{id}/classify
+        int64_t event_id = 0;
+        try { event_id = std::stoll(path.substr(17)); } catch (...) {}
+        std::string body;
+        { auto p = req.find("\r\n\r\n"); if (p != std::string::npos) body = req.substr(p + 4);
+          else { p = req.find("\n\n"); if (p != std::string::npos) body = req.substr(p + 2); } }
+        auto jfield = [&](const std::string& key) -> std::string {
+            std::string pat = "\"" + key + "\":\"";
+            auto p = body.find(pat);
+            if (p == std::string::npos) return "";
+            p += pat.size();
+            auto q = body.find('"', p);
+            return q == std::string::npos ? "" : body.substr(p, q - p);
+        };
+        std::string cls   = jfield("classification");
+        std::string notes = jfield("notes");
+        // Validate classification value
+        if (event_id > 0 && db_ &&
+            (cls == "outage" || cls == "maintenance" || cls == "false_alarm")) {
+            db_->classify_grid_event(event_id, cls, notes);
+            send_response(fd, 200, "application/json", "{\"ok\":true}\n");
+        } else {
+            send_response(fd, 400, "application/json", "{\"ok\":false,\"error\":\"invalid\"}\n");
+        }
     } else if (path == "/api/shelly/status") {
         bool active = db_ && db_->get_setting("shelly_test_active") == "1";
         std::string start = db_ ? db_->get_setting("shelly_test_start_ts") : "";
@@ -1976,6 +2033,50 @@ static std::string effective_charger_state(const PwrGateSnapshot& pg) {
     return pg.state;
 }
 
+std::string HttpServer::grid_event_banner_js() {
+    // Raw JS injected into every page. Uses \uXXXX escapes so JS handles Unicode.
+    // checkGridEvents() fetches unclassified events and shows a fixed red banner.
+    // clsGrid() POSTs the classification and re-checks for more events.
+    return R"JS(
+function checkGridEvents(){
+fetch('/api/grid_events?unclassified=1').then(function(r){return r.json()}).then(function(evs){
+var b=document.getElementById('grid-evt-banner');if(b)b.remove();
+if(!evs||!evs.length)return;
+var ev=evs[0];
+var dur=ev.duration_s>0?(ev.duration_s>=3600?(ev.duration_s/3600).toFixed(1)+' hr':Math.ceil(ev.duration_s/60)+' min'):'<1 min';
+var ts=new Date(ev.start_ts*1000).toLocaleString();
+var si=ev.soc_start>0?' \u00b7 Battery: '+ev.soc_start.toFixed(0)+'%\u2192'+(ev.soc_end>0?ev.soc_end.toFixed(0)+'%':'?'):'';
+var wrap=document.createElement('div');
+wrap.id='grid-evt-banner';
+wrap.style.cssText='position:fixed;top:0;left:0;right:0;z-index:9999;background:#7f1d1d;color:#fff;padding:10px 16px;font-size:13px;font-family:system-ui,sans-serif;box-shadow:0 2px 12px rgba(0,0,0,.5);display:flex;align-items:center;gap:10px;flex-wrap:wrap;';
+var msg=document.createElement('span');
+msg.style.cssText='flex:1;min-width:160px';
+msg.innerHTML='<b>\u26a1 Grid event \u2014 classification required:</b> '+dur+' at '+ts+si;
+wrap.appendChild(msg);
+var notes=document.createElement('input');
+notes.id='grid-evt-notes';notes.placeholder='Notes (optional)';
+notes.style.cssText='padding:4px 8px;border-radius:4px;border:none;font-size:12px;min-width:110px;background:rgba(255,255,255,0.15);color:#fff;outline:none';
+wrap.appendChild(notes);
+[['Outage','outage','#fff','#7f1d1d','700'],
+ ['Maintenance','maintenance','rgba(255,255,255,0.2)','#fff','400'],
+ ['False Alarm','false_alarm','rgba(255,255,255,0.1)','rgba(255,255,255,0.7)','400']
+].forEach(function(x){
+  var btn=document.createElement('button');
+  btn.textContent=x[0];
+  btn.style.cssText='background:'+x[2]+';color:'+x[3]+';border:1px solid rgba(255,255,255,0.35);padding:5px 12px;border-radius:5px;cursor:pointer;font-size:12px;font-weight:'+x[4]+';font-family:system-ui,sans-serif';
+  btn.onclick=function(){clsGrid(ev.id,x[1])};
+  wrap.appendChild(btn);
+});
+document.body.insertBefore(wrap,document.body.firstChild);
+}).catch(function(){});}
+window.clsGrid=function(id,cls){
+var n=document.getElementById('grid-evt-notes');
+fetch('/api/grid_events/'+id+'/classify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({classification:cls,notes:n?n.value:''})}).then(function(r){if(r.ok)checkGridEvents()}).catch(function(){});
+};
+checkGridEvents();
+)JS";
+}
+
 shelly::Status HttpServer::fetch_shelly_status() {
     std::lock_guard<std::mutex> lk(shelly_cache_mu_);
     return shelly_cache_;
@@ -1987,6 +2088,7 @@ void HttpServer::shelly_poll_loop() {
         std::this_thread::sleep_for(std::chrono::seconds(1));
         if (!running_) break;
         if (--wait_ticks > 0) continue;
+
         shelly::Status st;
         try {
             st = shelly::get_status(db_);
@@ -1997,8 +2099,45 @@ void HttpServer::shelly_poll_loop() {
             std::lock_guard<std::mutex> lk(shelly_cache_mu_);
             shelly_cache_ = st;
         }
-        // Back off longer when healthy (30s), retry sooner on failure (10s)
         wait_ticks = st.ok ? 30 : 10;
+
+        // Grid outage detection — only when Shelly is configured
+        bool host_configured = db_ && !db_->get_setting("shelly_host").empty();
+        if (!host_configured) continue;
+
+        bool test_active  = db_->get_setting("shelly_test_active") == "1";
+        bool maintenance  = db_->get_setting("maintenance_mode")   == "1";
+
+        if (!st.ok && !test_active && !maintenance) {
+            ++shelly_fail_count_;
+            // Require 2 consecutive failures (~20s) + battery discharging before logging
+            if (shelly_fail_count_ == 2 && active_grid_event_id_ == 0) {
+                auto bat = store_.latest();
+                bool discharging = bat && bat->valid && bat->current_a > 0.1;
+                if (discharging) {
+                    double soc = bat->soc_pct;
+                    int64_t now_ts = static_cast<int64_t>(std::time(nullptr));
+                    active_grid_event_id_ = db_->insert_grid_event(now_ts, soc);
+                    grid_event_start_ts_  = now_ts;
+                    LOG_WARN("Grid: connectivity lost while battery discharging — possible outage (event id=%lld)",
+                             (long long)active_grid_event_id_);
+                }
+            }
+        } else if (st.ok) {
+            if (active_grid_event_id_ > 0) {
+                // Outage ended — close the event so the classification banner appears
+                auto bat = store_.latest();
+                double soc_end = bat && bat->valid ? bat->soc_pct : 0;
+                int64_t now_ts  = static_cast<int64_t>(std::time(nullptr));
+                int duration_s  = static_cast<int>(now_ts - grid_event_start_ts_);
+                db_->close_grid_event(active_grid_event_id_, now_ts, duration_s, soc_end);
+                LOG_INFO("Grid: connectivity restored after %ds (event id=%lld) — awaiting classification",
+                         duration_s, (long long)active_grid_event_id_);
+                active_grid_event_id_ = 0;
+                grid_event_start_ts_  = 0;
+            }
+            shelly_fail_count_ = 0;
+        }
     }
 }
 
@@ -3420,7 +3559,7 @@ function renderChgChart(data){
 loadCharts()
 setInterval(loadCharts,Math.max(pollIvl*1000,10000));
 (function(){var rt;window.addEventListener('resize',function(){clearTimeout(rt);rt=setTimeout(loadCharts,150)})})()
-</script></div></body></html>)";
+)" + grid_event_banner_js() + R"(</script></div></body></html>)";
 
     return o;
 }
@@ -4010,6 +4149,7 @@ td .rc-main{font-weight:600}
          "(function(){var n=document.querySelectorAll('nav a[href^=\"/\"]');for(var i=0;i<n.length;i++){n[i].addEventListener('click',function(e){if(e.ctrlKey||e.metaKey||e.shiftKey)return;var h=this.getAttribute('href');if(!h)return;e.preventDefault();location.href=h})}})();\n"
          "initSettings();loadAll();setInterval(loadAll,300000)\n"
          "fetch('/api/shelly/status').then(function(r){return r.json()}).then(function(s){if(s.test_active){var b=$('test-banner');if(b){b.classList.add('show');upTestBanner();setInterval(upTestBanner,5000)}}}).catch(function(){})\n"
+         + grid_event_banner_js() +
          "</script></body></html>";
     return o;
 }
@@ -4116,7 +4256,7 @@ $('note-submit').onclick=function(){var inp=$('note-input');var msg=inp.value.tr
 $('note-input').onkeydown=function(e){if(e.key==='Enter')$('note-submit').click()}
 document.querySelectorAll('.ops-filter-btn').forEach(function(b){b.onclick=function(){document.querySelectorAll('.ops-filter-btn').forEach(function(x){x.classList.remove('active')});b.classList.add('active');loadOpsLog(b.dataset.filter)}})
 loadMaintStatus();loadOpsLog();
-</script></body></html>)HTML";
+)HTML" + grid_event_banner_js() + R"HTML(</script></body></html>)HTML";
     return o;
 }
 
@@ -4192,14 +4332,25 @@ html.light .active-monitor{background:linear-gradient(135deg,rgba(22,163,74,.06)
 </div>
 <div class="test-card">
 <h2>Scheduled Tests</h2>
+<p style="font-size:.85rem;color:var(--muted);margin:.25rem 0 .75rem">Automatically run a test at a recurring time. Tests will only start if the battery SoC is above the safety floor and no test is already running.</p>
 <div id="sched-list" class="sched-placeholder">No scheduled tests.</div>
-<div style="margin-top:.75rem;display:flex;flex-wrap:wrap;gap:.5rem;align-items:flex-end">
-<select id="sched-type" style="font-family:inherit;font-size:.85rem;padding:.35rem .5rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)"><option value="ups_failover">UPS Failover</option><option value="load_spike">Load Spike</option><option value="capacity">Capacity</option><option value="charger_recovery">Charger Recovery</option><option value="simulated_outage">Simulated Outage</option></select>
-<select id="sched-freq" style="font-family:inherit;font-size:.85rem;padding:.35rem .5rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)"><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly" selected>Monthly</option></select>
-<input type="number" id="sched-hour" min="0" max="23" value="2" placeholder="Hr" title="Hour (0–23)" style="width:3.5rem;font-family:inherit;font-size:.85rem;padding:.35rem .4rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">
-<input type="number" id="sched-min" min="0" max="59" value="0" placeholder="Min" title="Minute" style="width:3.5rem;font-family:inherit;font-size:.85rem;padding:.35rem .4rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">
-<input type="number" id="sched-dom" min="1" max="28" value="1" placeholder="Day" title="Day of month" style="width:3.5rem;font-family:inherit;font-size:.85rem;padding:.35rem .4rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">
-<button type="button" class="test-btn test-btn-start" onclick="addTestSchedule()" style="margin:0">Add</button>
+<div style="margin-top:.75rem;display:flex;flex-wrap:wrap;gap:.75rem;align-items:flex-end">
+<label style="display:flex;flex-direction:column;gap:.25rem;font-size:.8rem;color:var(--muted)">Test type
+<select id="sched-type" onchange="schedFreqChange()" style="font-family:inherit;font-size:.85rem;padding:.4rem .5rem;height:2.1rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)"><option value="ups_failover">UPS Failover</option><option value="load_spike">Load Spike</option><option value="capacity">Capacity</option><option value="charger_recovery">Charger Recovery</option><option value="simulated_outage">Simulated Outage</option></select>
+</label>
+<label style="display:flex;flex-direction:column;gap:.25rem;font-size:.8rem;color:var(--muted)">Frequency
+<select id="sched-freq" onchange="schedFreqChange()" style="font-family:inherit;font-size:.85rem;padding:.4rem .5rem;height:2.1rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)"><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly" selected>Monthly</option></select>
+</label>
+<label style="display:flex;flex-direction:column;gap:.25rem;font-size:.8rem;color:var(--muted)">Hour (0–23)
+<input type="number" id="sched-hour" min="0" max="23" value="2" style="width:4rem;font-family:inherit;font-size:.85rem;padding:.4rem .4rem;height:2.1rem;box-sizing:border-box;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">
+</label>
+<label style="display:flex;flex-direction:column;gap:.25rem;font-size:.8rem;color:var(--muted)">Minute
+<input type="number" id="sched-min" min="0" max="59" value="0" style="width:4rem;font-family:inherit;font-size:.85rem;padding:.4rem .4rem;height:2.1rem;box-sizing:border-box;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">
+</label>
+<label id="sched-dom-label" style="display:flex;flex-direction:column;gap:.25rem;font-size:.8rem;color:var(--muted)">Day of month
+<input type="number" id="sched-dom" min="1" max="28" value="1" style="width:4rem;font-family:inherit;font-size:.85rem;padding:.4rem .4rem;height:2.1rem;box-sizing:border-box;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">
+</label>
+<button type="button" class="test-btn test-btn-start" onclick="addTestSchedule()" style="margin:0;height:2.1rem;padding:0 1rem">Add schedule</button>
 </div>
 </div>
 <div class="test-card">
@@ -4280,7 +4431,7 @@ function loadSchedules(){fetch('/api/tests/schedules').then(function(r){return r
 loadTests();loadBatteryHealth();loadSafetyLimits();loadActive();loadSchedules();
 setInterval(function(){loadTests();loadActive()},3000);
 setInterval(loadBatteryHealth,60000);
-</script></body></html>)HTML";
+)HTML" + grid_event_banner_js() + R"HTML(</script></body></html>)HTML";
     return o;
 }
 
@@ -4454,6 +4605,7 @@ h1{font-size:1.35rem;font-weight:600;color:var(--green);margin-bottom:.25rem}
          "function loadSchedSettings(){fetch('/api/tests/schedules').then(function(r){return r.json()}).then(function(d){var s=d.schedules||[];var el=$('sched-list-settings');if(!el)return;if(!s.length){el.innerHTML='No scheduled tests. Add above.';return}el.innerHTML=s.map(function(x){var n=new Date(x.next_run_ts*1000);return x.test_type+' ('+x.frequency+') &middot; Next: '+n.toLocaleDateString()+' '+n.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})+' <a href=\"#\" onclick=\"delSchedule('+x.id+');return false\" style=\"color:var(--muted);margin-left:.5rem\">Remove</a>'}).join('<br>')})}\n"
          "function delSchedule(id){fetch('/api/tests/schedules/'+id,{method:'DELETE'}).then(function(r){if(r.ok)loadSchedSettings()})}\n"
          "loadSchedSettings();\n"
+         + grid_event_banner_js() +
          "</script></body></html>";
     return o;
 }

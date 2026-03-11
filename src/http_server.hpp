@@ -57,9 +57,14 @@ private:
                                   const shelly::Status& shelly = {});
     shelly::Status fetch_shelly_status();  // reads from cache — zero latency
     void shelly_poll_loop();               // background thread — polls Shelly every N seconds
+    static std::string grid_event_banner_js();
     shelly::Status shelly_cache_{};
     mutable std::mutex shelly_cache_mu_;
     std::thread shelly_poll_thread_;
+    // Grid outage detection state (managed by shelly_poll_loop)
+    int shelly_fail_count_{0};
+    int64_t active_grid_event_id_{0};
+    int64_t grid_event_start_ts_{0};
     static std::string tx_events_json(const std::vector<TxEvent>& events);
     static std::string system_events_json(const std::vector<SystemEvent>& events);
     static std::string analytics_json(const AnalyticsSnapshot& a,
