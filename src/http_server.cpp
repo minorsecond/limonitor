@@ -428,7 +428,7 @@ void HttpServer::handle(int fd) {
         size_t notes_pos = path.find("/notes");
         size_t id_start = 11;
         size_t id_end = path.find('/', id_start);
-        if (id_end != std::string::npos && id_end < notes_pos) {
+        if (id_end != std::string::npos && id_end <= notes_pos) {
             std::string id_part = path.substr(id_start, id_end - id_start);
             int64_t id = 0;
             try { id = std::stoll(id_part); } catch (...) {}

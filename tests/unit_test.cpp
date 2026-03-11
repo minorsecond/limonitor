@@ -6,6 +6,8 @@ int g_poll_interval_s = 5;  // required by ble_manager
 #include "../src/data_store.hpp"
 #include "../src/http_server.hpp"
 #include "../src/logger.hpp"
+#include "../src/testing/types.hpp"
+#include "../src/testing/runner.hpp"
 #include "analytics/weather_forecast.hpp"
 
 #include <arpa/inet.h>
@@ -1008,6 +1010,495 @@ static void test_daily_ci_variance_addition() {
            "daily_ci: naive CI is ~sqrt(8)x too wide");
 }
 
+// ---------- Testing framework: types ----------
+
+static void test_parse_test_type() {
+    ASSERT(testing::parse_test_type("ups_failover") == testing::TestType::UPS_FAILOVER,
+           "parse_test_type: ups_failover");
+    ASSERT(testing::parse_test_type("capacity") == testing::TestType::BATTERY_CAPACITY,
+           "parse_test_type: capacity");
+    ASSERT(testing::parse_test_type("load_spike") == testing::TestType::LOAD_SPIKE,
+           "parse_test_type: load_spike");
+    ASSERT(testing::parse_test_type("charger_recovery") == testing::TestType::CHARGER_RECOVERY,
+           "parse_test_type: charger_recovery");
+    ASSERT(testing::parse_test_type("simulated_outage") == testing::TestType::SIMULATED_OUTAGE,
+           "parse_test_type: simulated_outage");
+    ASSERT(testing::parse_test_type("unknown") == testing::TestType::UPS_FAILOVER,
+           "parse_test_type: unknown defaults to UPS_FAILOVER");
+    ASSERT(testing::parse_test_type(nullptr) == testing::TestType::UPS_FAILOVER,
+           "parse_test_type: nullptr defaults to UPS_FAILOVER");
+}
+
+static void test_test_type_str() {
+    ASSERT(std::string(testing::test_type_str(testing::TestType::UPS_FAILOVER)) == "ups_failover",
+           "test_type_str: UPS_FAILOVER");
+    ASSERT(std::string(testing::test_type_str(testing::TestType::BATTERY_CAPACITY)) == "capacity",
+           "test_type_str: BATTERY_CAPACITY");
+    ASSERT(std::string(testing::test_type_str(testing::TestType::LOAD_SPIKE)) == "load_spike",
+           "test_type_str: LOAD_SPIKE");
+    ASSERT(std::string(testing::test_type_str(testing::TestType::CHARGER_RECOVERY)) == "charger_recovery",
+           "test_type_str: CHARGER_RECOVERY");
+    ASSERT(std::string(testing::test_type_str(testing::TestType::SIMULATED_OUTAGE)) == "simulated_outage",
+           "test_type_str: SIMULATED_OUTAGE");
+}
+
+static void test_test_result_str() {
+    ASSERT(std::string(testing::test_result_str(testing::TestResult::RUNNING)) == "running",
+           "test_result_str: RUNNING");
+    ASSERT(std::string(testing::test_result_str(testing::TestResult::PASSED)) == "passed",
+           "test_result_str: PASSED");
+    ASSERT(std::string(testing::test_result_str(testing::TestResult::FAILED)) == "failed",
+           "test_result_str: FAILED");
+    ASSERT(std::string(testing::test_result_str(testing::TestResult::ABORTED)) == "aborted",
+           "test_result_str: ABORTED");
+}
+
+static void test_make_telemetry_sample() {
+    BatterySnapshot bat;
+    bat.timestamp = std::chrono::system_clock::now();
+    bat.valid = true;
+    bat.total_voltage_v = 13.45;
+    bat.current_a = -2.5;
+    bat.soc_pct = 75.0;
+    bat.power_w = 33.6;
+    bat.cell_delta_v = 0.025;
+    bat.temperatures_c = {18.5, 19.0};
+
+    PwrGateSnapshot chg;
+    chg.timestamp = bat.timestamp;
+    chg.valid = true;
+    chg.state = "Charging";
+    chg.ps_v = 14.0;
+    chg.bat_v = 13.45;
+    chg.bat_a = 2.5;
+    chg.sol_v = 18.0;
+
+    auto s = testing::make_telemetry_sample(42, &bat, &chg, 0, false, 0);
+    ASSERT(s.test_id == 42, "make_telemetry_sample: test_id");
+    ASSERT(s.battery_voltage == 13.45, "make_telemetry_sample: voltage");
+    ASSERT(s.battery_current == -2.5, "make_telemetry_sample: current");
+    ASSERT(s.battery_soc == 75.0, "make_telemetry_sample: soc");
+    ASSERT(s.load_power >= 0, "make_telemetry_sample: load_power");
+    ASSERT(s.charger_state == "Charging", "make_telemetry_sample: charger_state");
+    ASSERT(s.charger_voltage == 13.45, "make_telemetry_sample: charger_voltage");
+    ASSERT(s.charger_current == 2.5, "make_telemetry_sample: charger_current");
+    ASSERT(s.cell_delta == 0.025, "make_telemetry_sample: cell_delta");
+    ASSERT(s.temperature == 18.5, "make_telemetry_sample: temperature");
+
+    auto s2 = testing::make_telemetry_sample(1, nullptr, nullptr, 50.0, true, 25.0);
+    ASSERT(s2.test_id == 1, "make_telemetry_sample null: test_id");
+    ASSERT(s2.battery_voltage == 0, "make_telemetry_sample null: voltage zero");
+    ASSERT(s2.radio_tx_active == true, "make_telemetry_sample null: tx_active");
+    ASSERT(s2.radio_tx_power == 25.0, "make_telemetry_sample null: tx_power");
+}
+
+// ---------- Testing framework: database ----------
+
+static void test_database_test_runs() {
+    std::string path = "/tmp/limonitor_test_runs_" + std::to_string(getpid()) + ".db";
+    Database db(path);
+    ASSERT(db.open(), "Database open for test_runs");
+
+    Database::TestRunRow row;
+    row.test_type = "capacity";
+    row.start_time = 1700000000;
+    row.end_time = 0;
+    row.duration_seconds = 0;
+    row.result = "running";
+    row.initial_soc = 80.0;
+    row.initial_voltage = 13.4;
+    row.average_load = 0;
+    row.metadata_json = "";
+    row.user_notes = "";
+
+    int64_t id = db.insert_test_run(row);
+    ASSERT(id > 0, "insert_test_run returns positive id");
+
+    auto runs = db.load_test_runs(10);
+    ASSERT(!runs.empty(), "load_test_runs returns at least one");
+    ASSERT(runs[0].id == id, "load_test_runs first has correct id");
+    ASSERT(runs[0].test_type == "capacity", "load_test_runs first has correct type");
+    ASSERT(runs[0].result == "running", "load_test_runs first has running result");
+
+    auto opt = db.load_test_run(id);
+    ASSERT(opt.has_value(), "load_test_run finds by id");
+    ASSERT(opt->test_type == "capacity", "load_test_run returns correct type");
+
+    bool ok = db.update_test_run(id, 1700003600, 3600, "passed", "{\"energy\":100}");
+    ASSERT(ok, "update_test_run succeeds");
+    opt = db.load_test_run(id);
+    ASSERT(opt && opt->result == "passed", "update_test_run persisted");
+    ASSERT(opt->duration_seconds == 3600, "update_test_run duration");
+
+    ok = db.update_test_run_notes(id, "Test completed successfully");
+    ASSERT(ok, "update_test_run_notes succeeds");
+    opt = db.load_test_run(id);
+    ASSERT(opt && opt->user_notes == "Test completed successfully", "update_test_run_notes persisted");
+
+    auto notfound = db.load_test_run(999999);
+    ASSERT(!notfound.has_value(), "load_test_run unknown id returns nullopt");
+
+    db.close();
+    std::remove(path.c_str());
+}
+
+static void test_database_test_telemetry() {
+    std::string path = "/tmp/limonitor_test_tel_" + std::to_string(getpid()) + ".db";
+    Database db(path);
+    ASSERT(db.open(), "Database open for telemetry");
+
+    Database::TestRunRow row;
+    row.test_type = "load_spike";
+    row.start_time = 1700000000;
+    row.end_time = 1700000012;
+    row.duration_seconds = 12;
+    row.result = "passed";
+    row.initial_soc = 90.0;
+    row.initial_voltage = 13.5;
+    int64_t id = db.insert_test_run(row);
+    ASSERT(id > 0, "insert_test_run for telemetry");
+
+    std::vector<testing::TestTelemetrySample> samples;
+    for (int i = 0; i < 3; ++i) {
+        testing::TestTelemetrySample s;
+        s.test_id = id;
+        s.timestamp = 1700000000 + i * 2;
+        s.battery_voltage = 13.5 - i * 0.1;
+        s.battery_current = 5.0;
+        s.battery_soc = 90.0 - i * 2;
+        s.load_power = 65.0;
+        s.charger_state = "Idle";
+        samples.push_back(s);
+    }
+    db.insert_test_telemetry_batch(samples);
+
+    auto loaded = db.load_test_telemetry(id, 100);
+    ASSERT(loaded.size() == 3, "load_test_telemetry returns 3 samples");
+    ASSERT(loaded[0].battery_voltage == 13.5, "load_test_telemetry first voltage");
+    ASSERT(loaded[2].battery_voltage == 13.3, "load_test_telemetry last voltage");
+
+    auto empty = db.load_test_telemetry(999999, 100);
+    ASSERT(empty.empty(), "load_test_telemetry unknown id returns empty");
+
+    db.close();
+    std::remove(path.c_str());
+}
+
+// ---------- Testing framework: TestRunner ----------
+
+static void test_test_runner_start_stop() {
+    Logger::instance().init("", false, 0);
+
+    std::string path = "/tmp/limonitor_runner_" + std::to_string(getpid()) + ".db";
+    Database db(path);
+    ASSERT(db.open(), "Database open for TestRunner");
+    db.set_setting("config_migrated", "1");
+
+    DataStore store(100);
+    Config cfg;
+    cfg.no_ble = true;
+    store.init_extensions(cfg);
+    store.set_database(&db);
+
+    BatterySnapshot bat;
+    bat.timestamp = std::chrono::system_clock::now();
+    bat.valid = true;
+    bat.total_voltage_v = 13.5;
+    bat.current_a = 0.5;
+    bat.soc_pct = 80.0;
+    bat.power_w = 6.75;
+    bat.nominal_ah = 100.0;
+    bat.remaining_ah = 80.0;
+    bat.temperatures_c = {20.0};
+    store.update(bat);
+
+    testing::TestRunner runner(store, &db);
+    ASSERT(!runner.is_running(), "TestRunner initially not running");
+
+    int64_t id = runner.start_test(testing::TestType::BATTERY_CAPACITY);
+    ASSERT(id > 0, "TestRunner start_test returns id");
+    ASSERT(runner.is_running(), "TestRunner is running after start");
+    ASSERT(runner.current_test_id() == id, "TestRunner current_test_id matches");
+
+    auto st = runner.active_stats();
+    ASSERT(st.test_id == id, "active_stats test_id");
+    ASSERT(st.test_type == "capacity", "active_stats test_type");
+    ASSERT(st.voltage_at_start == 13.5, "active_stats voltage_at_start");
+
+    runner.stop_test();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    ASSERT(!runner.is_running(), "TestRunner stopped after stop_test");
+
+    auto runs = db.load_test_runs(1);
+    ASSERT(!runs.empty(), "Test run persisted");
+    ASSERT(runs[0].result == "aborted", "Test run marked aborted (user stop)");
+
+    db.close();
+    std::remove(path.c_str());
+}
+
+static void test_test_runner_refuses_low_soc() {
+    Logger::instance().init("", false, 0);
+
+    std::string path = "/tmp/limonitor_runner_low_" + std::to_string(getpid()) + ".db";
+    Database db(path);
+    ASSERT(db.open(), "Database open for low SOC test");
+
+    DataStore store(100);
+    Config cfg;
+    cfg.no_ble = true;
+    store.init_extensions(cfg);
+
+    BatterySnapshot bat;
+    bat.timestamp = std::chrono::system_clock::now();
+    bat.valid = true;
+    bat.total_voltage_v = 13.5;
+    bat.current_a = 0.5;
+    bat.soc_pct = 10.0;  // Below floor + 5 (default 15)
+    bat.power_w = 6.75;
+    bat.temperatures_c = {20.0};
+    store.update(bat);
+
+    testing::TestRunner runner(store, &db);
+    int64_t id = runner.start_test(testing::TestType::BATTERY_CAPACITY);
+    ASSERT(id == 0, "TestRunner refuses start when SOC too low");
+
+    db.close();
+    std::remove(path.c_str());
+}
+
+static void test_test_runner_refuses_maintenance_mode() {
+    Logger::instance().init("", false, 0);
+
+    std::string path = "/tmp/limonitor_runner_maint_" + std::to_string(getpid()) + ".db";
+    Database db(path);
+    ASSERT(db.open(), "Database open for maintenance test");
+    db.set_setting("maintenance_mode", "1");
+
+    DataStore store(100);
+    Config cfg;
+    cfg.no_ble = true;
+    store.init_extensions(cfg);
+    store.set_database(&db);
+
+    BatterySnapshot bat;
+    bat.timestamp = std::chrono::system_clock::now();
+    bat.valid = true;
+    bat.total_voltage_v = 13.5;
+    bat.current_a = 0.5;
+    bat.soc_pct = 80.0;
+    bat.power_w = 6.75;
+    bat.temperatures_c = {20.0};
+    store.update(bat);
+
+    testing::TestRunner runner(store, &db);
+    int64_t id = runner.start_test(testing::TestType::BATTERY_CAPACITY);
+    ASSERT(id == 0, "TestRunner refuses start when maintenance mode active");
+
+    db.close();
+    std::remove(path.c_str());
+}
+
+static void test_test_runner_safety_limits() {
+    testing::SafetyLimits lim;
+    lim.soc_floor_pct = 20.0;
+    lim.voltage_floor_v = 12.0;
+    lim.max_duration_sec = 3600;
+
+    std::string path = "/tmp/limonitor_runner_lim_" + std::to_string(getpid()) + ".db";
+    Database db(path);
+    ASSERT(db.open(), "Database open for safety limits");
+
+    DataStore store(100);
+    Config cfg;
+    cfg.no_ble = true;
+    store.init_extensions(cfg);
+    store.set_database(&db);
+
+    testing::TestRunner runner(store, &db);
+    runner.set_safety_limits(lim);
+    ASSERT(runner.safety_limits().soc_floor_pct == 20.0, "safety_limits getter");
+    ASSERT(runner.safety_limits().voltage_floor_v == 12.0, "safety_limits voltage");
+    ASSERT(runner.safety_limits().max_duration_sec == 3600, "safety_limits max_duration");
+
+    db.close();
+    std::remove(path.c_str());
+}
+
+// ---------- Testing framework: HTTP API ----------
+
+static void test_http_tests_api() {
+    Logger::instance().init("", false, 0);
+
+    Config cfg;
+    cfg.no_ble = true;
+    cfg.solar_enabled = false;
+
+    std::string db_path = "/tmp/limonitor_http_tests_" + std::to_string(getpid()) + ".db";
+    Database db(db_path);
+    ASSERT(db.open(), "Database open for tests API");
+    db.set_setting("config_migrated", "1");
+
+    DataStore store(100);
+    store.init_extensions(cfg);
+    store.set_database(&db);
+
+    testing::TestRunner runner(store, &db);
+    HttpServer http(store, &db, "127.0.0.1", 19980, 5, &runner);
+    ASSERT(http.start(), "HttpServer start");
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    std::string resp = http_request("127.0.0.1", 19980, "GET", "/api/tests");
+    ASSERT(!resp.empty(), "GET /api/tests returns response");
+    int status = parse_http_status(resp);
+    ASSERT(status == 200, "GET /api/tests returns 200");
+    ASSERT(resp.find("\"tests\"") != std::string::npos, "GET /api/tests has tests array");
+    ASSERT(resp.find("\"running\"") != std::string::npos, "GET /api/tests has running field");
+
+    resp = http_request("127.0.0.1", 19980, "GET", "/api/tests/safety_limits");
+    ASSERT(parse_http_status(resp) == 200, "GET /api/tests/safety_limits returns 200");
+    ASSERT(resp.find("soc_floor_pct") != std::string::npos, "safety_limits has soc_floor_pct");
+    ASSERT(resp.find("voltage_floor_v") != std::string::npos, "safety_limits has voltage_floor_v");
+    ASSERT(resp.find("max_duration_sec") != std::string::npos, "safety_limits has max_duration_sec");
+
+    resp = http_request("127.0.0.1", 19980, "GET", "/api/tests/active");
+    ASSERT(parse_http_status(resp) == 200, "GET /api/tests/active returns 200");
+    ASSERT(resp.find("\"running\"") != std::string::npos, "api/tests/active has running");
+
+    resp = http_request("127.0.0.1", 19980, "GET", "/api/battery/diagnostics");
+    ASSERT(parse_http_status(resp) == 200, "GET /api/battery/diagnostics returns 200");
+    ASSERT(resp.find("estimated_capacity_pct") != std::string::npos, "diagnostics has capacity");
+    ASSERT(resp.find("health_score") != std::string::npos, "diagnostics has health_score");
+
+    resp = http_request("127.0.0.1", 19980, "POST", "/api/tests/start", "{\"test_type\":\"capacity\"}");
+    status = parse_http_status(resp);
+    ASSERT(status == 400 || status == 200, "POST /api/tests/start returns 200 or 400 (no battery)");
+    if (status == 200) {
+        ASSERT(resp.find("\"ok\":true") != std::string::npos, "tests/start ok when battery present");
+        resp = http_request("127.0.0.1", 19980, "POST", "/api/tests/stop", "{}");
+        ASSERT(parse_http_status(resp) == 200, "POST /api/tests/stop returns 200");
+    }
+
+    http.stop();
+    db.close();
+    std::remove(db_path.c_str());
+}
+
+static void test_http_tests_start_stop_with_battery() {
+    Logger::instance().init("", false, 0);
+
+    Config cfg;
+    cfg.no_ble = true;
+    cfg.solar_enabled = false;
+
+    std::string db_path = "/tmp/limonitor_http_start_" + std::to_string(getpid()) + ".db";
+    Database db(db_path);
+    ASSERT(db.open(), "Database open");
+    db.set_setting("config_migrated", "1");
+
+    DataStore store(100);
+    store.init_extensions(cfg);
+    store.set_database(&db);
+
+    BatterySnapshot bat;
+    bat.timestamp = std::chrono::system_clock::now();
+    bat.valid = true;
+    bat.total_voltage_v = 13.5;
+    bat.current_a = 0.5;
+    bat.soc_pct = 85.0;
+    bat.power_w = 6.75;
+    bat.temperatures_c = {20.0};
+    store.update(bat);
+
+    testing::TestRunner runner(store, &db);
+    HttpServer http(store, &db, "127.0.0.1", 19981, 5, &runner);
+    ASSERT(http.start(), "HttpServer start");
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    std::string resp = http_request("127.0.0.1", 19981, "POST", "/api/tests/start", "{\"test_type\":\"load_spike\"}");
+    int status = parse_http_status(resp);
+    ASSERT(status == 200, "POST /api/tests/start returns 200 with battery");
+    ASSERT(resp.find("\"ok\":true") != std::string::npos, "tests/start ok");
+    ASSERT(resp.find("test_id") != std::string::npos, "tests/start returns test_id");
+
+    resp = http_request("127.0.0.1", 19981, "GET", "/api/tests/active");
+    ASSERT(resp.find("\"running\":true") != std::string::npos, "api/tests/active shows running");
+
+    resp = http_request("127.0.0.1", 19981, "POST", "/api/tests/stop", "{}");
+    ASSERT(parse_http_status(resp) == 200, "POST /api/tests/stop returns 200");
+    ASSERT(resp.find("\"ok\":true") != std::string::npos, "tests/stop ok");
+
+    resp = http_request("127.0.0.1", 19981, "GET", "/api/tests/active");
+    ASSERT(resp.find("\"running\":false") != std::string::npos, "api/tests/active shows not running after stop");
+
+    http.stop();
+    db.close();
+    std::remove(db_path.c_str());
+}
+
+static void test_http_tests_telemetry_and_notes() {
+    Logger::instance().init("", false, 0);
+
+    std::string db_path = "/tmp/limonitor_http_tel_" + std::to_string(getpid()) + ".db";
+    Database db(db_path);
+    ASSERT(db.open(), "Database open");
+
+    Database::TestRunRow row;
+    row.test_type = "capacity";
+    row.start_time = 1700000000;
+    row.end_time = 1700003600;
+    row.duration_seconds = 3600;
+    row.result = "passed";
+    row.initial_soc = 80.0;
+    row.initial_voltage = 13.5;
+    row.metadata_json = "{\"energy_delivered_wh\":500}";
+    row.user_notes = "";
+    int64_t id = db.insert_test_run(row);
+    ASSERT(id > 0, "insert test run");
+
+    testing::TestTelemetrySample s;
+    s.test_id = id;
+    s.timestamp = 1700000000;
+    s.battery_voltage = 13.5;
+    s.battery_current = 2.0;
+    s.battery_soc = 80.0;
+    s.load_power = 27.0;
+    db.insert_test_telemetry_batch({s});
+
+    DataStore store(100);
+    Config cfg;
+    cfg.no_ble = true;
+    store.init_extensions(cfg);
+    store.set_database(&db);
+
+    testing::TestRunner runner(store, &db);
+    HttpServer http(store, &db, "127.0.0.1", 19982, 5, &runner);
+    ASSERT(http.start(), "HttpServer start");
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    std::string resp = http_request("127.0.0.1", 19982, "GET", "/api/tests/" + std::to_string(id));
+    ASSERT(parse_http_status(resp) == 200, "GET /api/tests/{id} returns 200");
+    ASSERT(resp.find("\"test_type\":\"capacity\"") != std::string::npos, "test detail has type");
+    ASSERT(resp.find("\"metadata_json\"") != std::string::npos, "test detail has metadata");
+
+    resp = http_request("127.0.0.1", 19982, "GET", "/api/tests/" + std::to_string(id) + "/telemetry");
+    ASSERT(parse_http_status(resp) == 200, "GET /api/tests/{id}/telemetry returns 200");
+    ASSERT(resp.find("\"samples\"") != std::string::npos, "telemetry has samples");
+    ASSERT(resp.find("13.5") != std::string::npos, "telemetry has voltage");
+
+    resp = http_request("127.0.0.1", 19982, "POST", "/api/tests/" + std::to_string(id) + "/notes",
+                        "{\"notes\":\"Manual test completed\"}");
+    ASSERT(parse_http_status(resp) == 200, "POST /api/tests/{id}/notes returns 200");
+    ASSERT(db.load_test_run(id)->user_notes == "Manual test completed", "notes persisted");
+
+    resp = http_request("127.0.0.1", 19982, "GET", "/api/tests/999999");
+    ASSERT(parse_http_status(resp) == 404, "GET /api/tests/unknown returns 404");
+
+    http.stop();
+    db.close();
+    std::remove(db_path.c_str());
+}
+
 int main() {
     std::fprintf(stderr, "\n=== limonitor unit tests ===\n\n");
 
@@ -1061,6 +1552,20 @@ int main() {
     test_regression_flat();
     test_runtime_nominal_voltage();
     test_daily_ci_variance_addition();
+
+    test_parse_test_type();
+    test_test_type_str();
+    test_test_result_str();
+    test_make_telemetry_sample();
+    test_database_test_runs();
+    test_database_test_telemetry();
+    test_test_runner_start_stop();
+    test_test_runner_refuses_low_soc();
+    test_test_runner_refuses_maintenance_mode();
+    test_test_runner_safety_limits();
+    test_http_tests_api();
+    test_http_tests_start_stop_with_battery();
+    test_http_tests_telemetry_and_notes();
 
     std::fprintf(stderr, "\n=== %d failure(s) ===\n", g_failures);
     return g_failures > 0 ? 1 : 0;
