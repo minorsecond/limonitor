@@ -28,8 +28,9 @@ usage() {
     echo "Clean, build, and deploy limonitor to Raspberry Pi."
     echo ""
     echo "Options:"
-    echo "  --clean     Perform a full clean before building."
-    echo "  -h, --help  Show this help message and exit."
+    echo "  --clean       Perform a full clean before building."
+    echo "  --with-tests  Build tests during deployment (default: OFF)."
+    echo "  -h, --help    Show this help message and exit."
     echo ""
     echo "Environment Variables:"
     echo "  LIMONITOR_USER  User to run the service as (default: $SVC_USER)."
@@ -37,29 +38,38 @@ usage() {
     echo ""
 }
 
-case "$1" in
-    -h|--help)
-        usage
-        exit 0
-        ;;
-    --clean)
-        echo "=== clean ==="
-        ./clean.sh
-        ;;
-    "")
-        # No arguments, proceed as normal
-        ;;
-    *)
-        echo "Unknown option: $1"
-        usage
-        exit 1
-        ;;
-esac
+BUILD_TESTS="OFF"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --clean)
+            echo "=== clean ==="
+            ./clean.sh
+            shift
+            ;;
+        --with-tests)
+            BUILD_TESTS="ON"
+            shift
+            ;;
+        *)
+            echo "Unknown option: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
 
 echo "=== build (using $BUILD_GENERATOR) ==="
 GIT_HASH=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-cmake -B build -G "$BUILD_GENERATOR" -DCMAKE_BUILD_TYPE=Release -DGIT_COMMIT_HASH="$GIT_HASH"
-cmake --build build -j$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
+cmake -B build -G "$BUILD_GENERATOR" -DCMAKE_BUILD_TYPE=Release -DGIT_COMMIT_HASH="$GIT_HASH" -DBUILD_TESTING="$BUILD_TESTS"
+cmake --build build --target limonitor -j$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
+
+if [[ "$BUILD_TESTS" == "ON" ]]; then
+    cmake --build build --target limonitor_unit_test -j$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
+fi
 
 echo "=== install ==="
 sudo cmake --install build
