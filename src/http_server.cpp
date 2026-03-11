@@ -184,6 +184,13 @@ void HttpServer::handle(int fd) {
         std::string body;
         { auto p = req.find("\r\n\r\n"); if (p != std::string::npos) body = req.substr(p + 4);
           else { p = req.find("\n\n"); if (p != std::string::npos) body = req.substr(p + 2); } }
+        std::string reason = jval_s(body, "reason");
+        while (!reason.empty() && (reason.back() == ' ' || reason.back() == '\t' || reason.back() == '\r' || reason.back() == '\n')) reason.pop_back();
+        while (!reason.empty() && (reason.front() == ' ' || reason.front() == '\t')) reason.erase(0, 1);
+        if (reason.empty()) {
+            send_response(fd, 400, "application/json", "{\"ok\":false,\"error\":\"reason required\"}\n");
+            return;
+        }
         std::string turn = "off";
         if (body.find("\"turn\":\"on\"") != std::string::npos || body.find("\"turn\": \"on\"") != std::string::npos)
             turn = "on";
@@ -230,7 +237,6 @@ void HttpServer::handle(int fd) {
         recv(sock, rbuf, sizeof(rbuf), 0);
         close(sock);
         if (sent > 0) {
-            std::string reason = jval_s(body, "reason");
             if (db_) {
                 if (turn == "off" && is_test) {
                     db_->set_setting("shelly_test_active", "1");
@@ -300,6 +306,12 @@ void HttpServer::handle(int fd) {
         else { body_start = req.find("\n\n"); if (body_start != std::string::npos) body_start += 2; }
         std::string body = (body_start != std::string::npos && body_start < req.size()) ? req.substr(body_start) : "";
         std::string reason = jval_s(body, "reason");
+        while (!reason.empty() && (reason.back() == ' ' || reason.back() == '\t' || reason.back() == '\r' || reason.back() == '\n')) reason.pop_back();
+        while (!reason.empty() && (reason.front() == ' ' || reason.front() == '\t')) reason.erase(0, 1);
+        if (reason.empty()) {
+            send_response(fd, 400, "application/json", "{\"ok\":false,\"error\":\"reason required\"}\n");
+            return;
+        }
         std::string expected = jval_s(body, "expected_duration");
         std::string notes = jval_s(body, "notes");
         auto now = std::chrono::system_clock::now();
@@ -2015,6 +2027,25 @@ html.light .grid-btn-test{background:var(--border);color:var(--text)}
 .test-banner.show{display:flex}
 .test-banner .tb-btn{background:#fff!important;color:#c2410c!important;border:none;padding:.35rem .8rem;font-weight:600;cursor:pointer;border-radius:4px}
 .test-banner .tb-btn:hover{opacity:.92}
+/* ── Power reason modal ── */
+.pwr-modal{position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;z-index:1100;animation:pwr-fadeIn .2s ease}
+@keyframes pwr-fadeIn{from{opacity:0}to{opacity:1}}
+.pwr-modal-panel{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;min-width:320px;max-width:90vw;box-shadow:0 12px 40px rgba(0,0,0,.35);animation:pwr-slideUp .25s ease}
+@keyframes pwr-slideUp{from{opacity:0;transform:translateY(-12px)}to{opacity:1;transform:translateY(0)}}
+.pwr-modal-title{font-size:1rem;font-weight:600;color:var(--text);margin-bottom:.4rem}
+.pwr-modal-desc{font-size:.85rem;color:var(--muted);line-height:1.4;margin-bottom:1rem}
+.pwr-reason-input{width:100%;padding:.6rem .75rem;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:.9rem;font-family:inherit;resize:vertical;min-height:80px;margin-bottom:.5rem;transition:border-color .15s}
+.pwr-reason-input:focus{outline:none;border-color:var(--green);box-shadow:0 0 0 2px rgba(74,222,128,.2)}
+.pwr-reason-input::placeholder{color:var(--muted);opacity:.8}
+.pwr-modal-err{font-size:.8rem;color:var(--red);margin-bottom:.5rem;display:none}
+.pwr-modal-btns{display:flex;gap:.5rem;justify-content:flex-end;margin-top:1rem}
+.pwr-modal-btn{font-family:inherit;font-size:.85rem;font-weight:600;padding:.5rem 1rem;border-radius:6px;cursor:pointer;border:none;transition:opacity .15s}
+.pwr-modal-cancel{background:var(--border);color:var(--muted)}
+.pwr-modal-cancel:hover{background:var(--border);color:var(--text);opacity:.9}
+.pwr-modal-submit{background:var(--green);color:#fff}
+html.light .pwr-modal-submit{background:#16a34a}
+.pwr-modal-submit:hover:not(:disabled){opacity:.92}
+.pwr-modal-submit:disabled{opacity:.5;cursor:not-allowed}
 </style>
 <link rel="prefetch" href="/solar">
 </head><body><div class="wrap">
@@ -2057,6 +2088,16 @@ html.light .grid-btn-test{background:var(--border);color:var(--text)}
     o += "<div id=\"test-banner\" class=\"test-banner\">"
          "<span><strong>Battery test active</strong> &middot; SoC: <span id=\"tb-soc\">—</span>% &middot; Load: <span id=\"tb-load\">—</span> W &middot; Runtime: <span id=\"tb-rt\">—</span> h</span>"
          "<button class=\"tb-btn\" onclick=\"endTestFromBanner()\">End test</button></div>\n";
+    o += "<div id=\"pwr-reason-modal\" class=\"pwr-modal\" style=\"display:none\">"
+         "<div class=\"pwr-modal-panel\" onclick=\"event.stopPropagation()\">"
+         "<div class=\"pwr-modal-title\" id=\"pwr-modal-title\">Reason required</div>"
+         "<p class=\"pwr-modal-desc\" id=\"pwr-modal-desc\">Please provide a reason for this action.</p>"
+         "<textarea id=\"pwr-reason-input\" class=\"pwr-reason-input\" placeholder=\"e.g. Starting battery capacity test\" rows=\"3\"></textarea>"
+         "<div class=\"pwr-modal-err\" id=\"pwr-modal-err\">Please enter a reason.</div>"
+         "<div class=\"pwr-modal-btns\">"
+         "<button type=\"button\" class=\"pwr-modal-btn pwr-modal-cancel\" id=\"pwr-modal-cancel\">Cancel</button>"
+         "<button type=\"button\" class=\"pwr-modal-btn pwr-modal-submit\" id=\"pwr-modal-submit\" disabled>Submit</button>"
+         "</div></div></div>\n";
 
     o += "<main class=\"main\">\n";
     o += "<div id=\"sys-status-panel\" class=\"card\" style=\"margin-bottom:.7rem\">"
@@ -2527,12 +2568,13 @@ function initAtabs(){
   })
 }
 (function(){var n=document.querySelectorAll('nav a[href^="/"]');for(var i=0;i<n.length;i++){n[i].addEventListener('click',function(e){if(e.ctrlKey||e.metaKey||e.shiftKey)return;var h=this.getAttribute('href');if(!h)return;e.preventDefault();location.href=h})}})();
-function endTestFromBanner(){fetch('/api/shelly/relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({turn:'on'})}).then(function(r){return r.json()}).then(function(d){if(d.ok){var b=$('test-banner');if(b)b.classList.remove('show');if(typeof lmSettings!=='undefined')lmSettings.shelly_test_active='0';var te=$('shelly-test-end-btn');var ts=$('shelly-test-start-btn');if(te)te.style.display='none';if(ts)ts.style.display='inline-block'}}).catch(function(){})}
+function showPowerReasonModal(opts,onConfirm){var title=opts.title||'Reason required';var desc=opts.desc||'Please provide a reason for this action.';var confirmText=opts.confirmText||'Submit';var modal=$('pwr-reason-modal');var inp=$('pwr-reason-input');var err=$('pwr-modal-err');var submitBtn=$('pwr-modal-submit');if(!modal||!inp)return;$('pwr-modal-title').textContent=title;var descEl=$('pwr-modal-desc');descEl.textContent=desc;descEl.style.display=desc?'':'none';submitBtn.textContent=confirmText;inp.value='';err.style.display='none';submitBtn.disabled=true;modal.style.display='flex';inp.focus();function close(){modal.style.display='none';}$('pwr-modal-cancel').onclick=close;submitBtn.onclick=function(){var r=inp.value.trim();if(!r){err.style.display='';err.textContent='Please enter a reason.';return;}close();onConfirm(r);};inp.oninput=function(){submitBtn.disabled=!inp.value.trim();err.style.display='none';};inp.onkeydown=function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();if(inp.value.trim())submitBtn.click();}};modal.onclick=function(e){if(e.target===modal)close();};}
+function endTestFromBanner(){showPowerReasonModal({title:'End battery test',desc:'This will turn grid back on. A reason is required.',confirmText:'End test'},function(r){fetch('/api/shelly/relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({turn:'on',reason:r})}).then(function(x){return x.json()}).then(function(d){if(d.ok){var b=$('test-banner');if(b)b.classList.remove('show');if(typeof lmSettings!=='undefined')lmSettings.shelly_test_active='0';var te=$('shelly-test-end-btn');var ts=$('shelly-test-start-btn');if(te)te.style.display='none';if(ts)ts.style.display='inline-block'}else if(d.error){var m=$('shelly-msg');if(m){m.textContent='Error: '+d.error;m.className='msg err'}}}).catch(function(){})})}
 function upTestBanner(){var b=$('test-banner');if(!b||!b.classList.contains('show'))return;fetch('/api/shelly/status').then(function(r){return r.json()}).then(function(s){if(!s.test_active){b.classList.remove('show');if(typeof lmSettings!=='undefined')lmSettings.shelly_test_active='0';return}Promise.all([fetch('/api/status').then(function(r){return r.json()}),fetch('/api/analytics').then(function(r){return r.json()})]).then(function(arr){var st=arr[0],an=arr[1];var soc=$('tb-soc'),load=$('tb-load'),rt=$('tb-rt');if(soc)soc.textContent=st.valid?fmt(st.soc_pct,1):'—';if(load)load.textContent=an.avg_discharge_24h_w>0?fmt(an.avg_discharge_24h_w,1):'—';if(rt)rt.textContent=an.runtime_from_current_h>0?fmt(an.runtime_from_current_h,1):'—'})})}
 initSettings()
 initAtabs()
 fetch('/api/shelly/status').then(function(r){return r.json()}).then(function(s){if(s.test_active){var b=$('test-banner');if(b){b.classList.add('show');upTestBanner();setInterval(upTestBanner,5000)}}}).catch(function(){})
-function initGridControl(){var gw=$('grid-control-wrap');if(!gw)return;var sh=getSetting('shelly_host',''),se=getSetting('shelly_enabled','0');if(!sh||(se!=='1'&&se!=='true'))return;gw.style.display='block';var offBtn=$('shelly-off-btn'),onBtn=$('shelly-on-btn'),testStart=$('shelly-test-start-btn'),testEnd=$('shelly-test-end-btn'),shellyMsg=$('shelly-msg');var testActive=getSetting('shelly_test_active','0')==='1';if(testActive&&testStart)testStart.style.display='none';if(testActive&&testEnd)testEnd.style.display='inline-block';function shellyReq(turn,isTest,reason){if(shellyMsg)shellyMsg.textContent='';if(shellyMsg)shellyMsg.className='msg';var body={turn:turn};if(isTest)body.test=true;if(reason)body.reason=reason;fetch('/api/shelly/relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json()}).then(function(d){if(d.ok){if(shellyMsg)shellyMsg.textContent='Done. Grid turned '+turn+'.';if(shellyMsg)shellyMsg.className='msg';if(turn==='off'){if(testStart)testStart.style.display='none';if(testEnd)testEnd.style.display='inline-block'}else{if(testStart)testStart.style.display='inline-block';if(testEnd)testEnd.style.display='none'}}else{if(shellyMsg){shellyMsg.textContent='Error: '+(d.error||'unknown');shellyMsg.className='msg err'}}}).catch(function(){if(shellyMsg){shellyMsg.textContent='Request failed.';shellyMsg.className='msg err'}})}if(offBtn)offBtn.onclick=function(){var r=prompt('Reason for turning off grid (optional):');if(r===null)return;if(confirm('Turn off grid power supply? System will run on battery only.'))shellyReq('off',false,r||'')};if(onBtn)onBtn.onclick=function(){var r=prompt('Reason for turning on grid (optional):');if(r===null)return;if(confirm('Turn on grid power supply?'))shellyReq('on',false,r||'')};if(testStart)testStart.onclick=function(){var r=prompt('Reason for starting battery test (optional):');if(r===null)return;if(confirm('Start battery test? This will turn off grid to collect discharge data. Run for a few hours, then click End test.'))shellyReq('off',true,r||'')};if(testEnd){testEnd.onclick=function(){var r=prompt('Reason for ending test (optional):');if(r===null)return;if(confirm('End battery test and turn grid back on?'))shellyReq('on',false,r||'')};testEnd.style.display='none'}}
+function initGridControl(){var gw=$('grid-control-wrap');if(!gw)return;var sh=getSetting('shelly_host',''),se=getSetting('shelly_enabled','0');if(!sh||(se!=='1'&&se!=='true'))return;gw.style.display='block';var offBtn=$('shelly-off-btn'),onBtn=$('shelly-on-btn'),testStart=$('shelly-test-start-btn'),testEnd=$('shelly-test-end-btn'),shellyMsg=$('shelly-msg');var testActive=getSetting('shelly_test_active','0')==='1';if(testActive&&testStart)testStart.style.display='none';if(testActive&&testEnd)testEnd.style.display='inline-block';function shellyReq(turn,isTest,reason){if(shellyMsg)shellyMsg.textContent='';if(shellyMsg)shellyMsg.className='msg';var body={turn:turn,reason:reason};if(isTest)body.test=true;fetch('/api/shelly/relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json()}).then(function(d){if(d.ok){if(shellyMsg)shellyMsg.textContent='Done. Grid turned '+turn+'.';if(shellyMsg)shellyMsg.className='msg';if(turn==='off'){if(testStart)testStart.style.display='none';if(testEnd)testEnd.style.display='inline-block'}else{if(testStart)testStart.style.display='inline-block';if(testEnd)testEnd.style.display='none'}}else{if(shellyMsg){shellyMsg.textContent='Error: '+(d.error||'unknown');shellyMsg.className='msg err'}}}).catch(function(){if(shellyMsg){shellyMsg.textContent='Request failed.';shellyMsg.className='msg err'}})}if(offBtn)offBtn.onclick=function(){showPowerReasonModal({title:'Turn off grid',desc:'System will run on battery only. A reason is required.'},function(r){shellyReq('off',false,r)})};if(onBtn)onBtn.onclick=function(){showPowerReasonModal({title:'Turn on grid',desc:'Restore grid power supply. A reason is required.'},function(r){shellyReq('on',false,r)})};if(testStart)testStart.onclick=function(){showPowerReasonModal({title:'Start battery test',desc:'This will turn off grid to collect discharge data. Run for a few hours, then click End test. A reason is required.'},function(r){shellyReq('off',true,r)})};if(testEnd){testEnd.onclick=function(){showPowerReasonModal({title:'End battery test',desc:'This will turn grid back on. A reason is required.'},function(r){shellyReq('on',false,r)})};testEnd.style.display='none'}}
 initGridControl()
 
 function upBat(){fetch('/api/status').then(function(r){return r.json()}).then(function(d){
@@ -3200,6 +3242,18 @@ td .rc-main{font-weight:600}
 .test-banner.show{display:flex}
 .test-banner .tb-btn{background:#fff!important;color:#c2410c!important;border:none;padding:.35rem .8rem;font-weight:600;cursor:pointer;border-radius:4px}
 .test-banner .tb-btn:hover{opacity:.92}
+.pwr-modal{position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;z-index:1100}
+.pwr-modal-panel{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;min-width:320px;max-width:90vw;box-shadow:0 12px 40px rgba(0,0,0,.35)}
+.pwr-modal-title{font-size:1rem;font-weight:600;color:var(--text);margin-bottom:.4rem}
+.pwr-modal-desc{font-size:.85rem;color:var(--muted);line-height:1.4;margin-bottom:1rem}
+.pwr-reason-input{width:100%;padding:.6rem .75rem;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:.9rem;font-family:inherit;resize:vertical;min-height:80px;margin-bottom:.5rem}
+.pwr-reason-input:focus{outline:none;border-color:var(--green)}
+.pwr-modal-err{font-size:.8rem;color:var(--red);margin-bottom:.5rem;display:none}
+.pwr-modal-btns{display:flex;gap:.5rem;justify-content:flex-end;margin-top:1rem}
+.pwr-modal-btn{font-family:inherit;font-size:.85rem;font-weight:600;padding:.5rem 1rem;border-radius:6px;cursor:pointer;border:none}
+.pwr-modal-cancel{background:var(--border);color:var(--muted)}
+.pwr-modal-submit{background:var(--green);color:#fff}
+.pwr-modal-submit:disabled{opacity:.5;cursor:not-allowed}
 </style>
 <link rel="prefetch" href="/"><link rel="prefetch" href="/settings">
 </head><body>
@@ -3219,6 +3273,16 @@ td .rc-main{font-weight:600}
     o += "<div id=\"test-banner\" class=\"test-banner\">"
          "<span><strong>Battery test active</strong> &middot; SoC: <span id=\"tb-soc\">—</span>% &middot; Load: <span id=\"tb-load\">—</span> W &middot; Runtime: <span id=\"tb-rt\">—</span> h</span>"
          "<button class=\"tb-btn\" onclick=\"endTestFromBanner()\">End test</button></div>";
+    o += "<div id=\"pwr-reason-modal\" class=\"pwr-modal\" style=\"display:none\">"
+         "<div class=\"pwr-modal-panel\" onclick=\"event.stopPropagation()\">"
+         "<div class=\"pwr-modal-title\" id=\"pwr-modal-title\">Reason required</div>"
+         "<p class=\"pwr-modal-desc\" id=\"pwr-modal-desc\">Please provide a reason for this action.</p>"
+         "<textarea id=\"pwr-reason-input\" class=\"pwr-reason-input\" placeholder=\"e.g. Ending battery test\" rows=\"3\"></textarea>"
+         "<div class=\"pwr-modal-err\" id=\"pwr-modal-err\">Please enter a reason.</div>"
+         "<div class=\"pwr-modal-btns\">"
+         "<button type=\"button\" class=\"pwr-modal-btn pwr-modal-cancel\" id=\"pwr-modal-cancel\">Cancel</button>"
+         "<button type=\"button\" class=\"pwr-modal-btn pwr-modal-submit\" id=\"pwr-modal-submit\" disabled>Submit</button>"
+         "</div></div></div>";
     o += "<h1>Solar Forecast</h1>";
     o += "<p class=\"sub\">";
     o += "<a href=\"/api/solar_forecast_week\">/api/solar_forecast_week</a> &nbsp;"
@@ -3688,7 +3752,8 @@ td .rc-main{font-weight:600}
          "function toggleTheme(){applyTheme(document.documentElement.classList.contains('light')?'dark':'light')}\n"
          "function toggleSettings(){var m=$('settings-modal');if(!m)return;m.style.display=m.style.display==='none'?'flex':'none';if(m.style.display==='flex'){var st=$('set-theme');if(st)st.value=getSetting('theme','dark');var se=$('set-time');if(se)se.value=getSetting('time','24');var sl=$('set-locale');if(sl)sl.value=getSetting('locale','auto')}}\n"
          "function applySetting(k,v){if(!lmSettings)lmSettings={};lmSettings[k]=v;fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(lmSettings)}).catch(function(){});if(k==='theme')applyTheme(v);else if(k==='time'||k==='locale')loadAll()}\n"
-         "function endTestFromBanner(){fetch('/api/shelly/relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({turn:'on'})}).then(function(r){return r.json()}).then(function(d){if(d.ok){var b=$('test-banner');if(b)b.classList.remove('show');if(typeof lmSettings!=='undefined')lmSettings.shelly_test_active='0'}}).catch(function(){})}\n"
+         "function showPowerReasonModal(opts,onConfirm){var title=opts.title||'Reason required';var desc=opts.desc||'Please provide a reason for this action.';var confirmText=opts.confirmText||'Submit';var modal=$('pwr-reason-modal');var inp=$('pwr-reason-input');var err=$('pwr-modal-err');var submitBtn=$('pwr-modal-submit');if(!modal||!inp)return;$('pwr-modal-title').textContent=title;var descEl=$('pwr-modal-desc');descEl.textContent=desc;descEl.style.display=desc?'':'none';submitBtn.textContent=confirmText;inp.value='';err.style.display='none';submitBtn.disabled=true;modal.style.display='flex';inp.focus();function close(){modal.style.display='none';}$('pwr-modal-cancel').onclick=close;submitBtn.onclick=function(){var r=inp.value.trim();if(!r){err.style.display='';err.textContent='Please enter a reason.';return;}close();onConfirm(r);};inp.oninput=function(){submitBtn.disabled=!inp.value.trim();err.style.display='none';};inp.onkeydown=function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();if(inp.value.trim())submitBtn.click();}};modal.onclick=function(e){if(e.target===modal)close();};}\n"
+         "function endTestFromBanner(){showPowerReasonModal({title:'End battery test',desc:'This will turn grid back on. A reason is required.',confirmText:'End test'},function(r){fetch('/api/shelly/relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({turn:'on',reason:r})}).then(function(x){return x.json()}).then(function(d){if(d.ok){var b=$('test-banner');if(b)b.classList.remove('show');if(typeof lmSettings!=='undefined')lmSettings.shelly_test_active='0'}}).catch(function(){})})}\n"
          "function upTestBanner(){var b=$('test-banner');if(!b||!b.classList.contains('show'))return;fetch('/api/shelly/status').then(function(r){return r.json()}).then(function(s){if(!s.test_active){b.classList.remove('show');if(typeof lmSettings!=='undefined')lmSettings.shelly_test_active='0';return}Promise.all([fetch('/api/status').then(function(r){return r.json()}),fetch('/api/analytics').then(function(r){return r.json()})]).then(function(arr){var st=arr[0],an=arr[1];var soc=$('tb-soc'),load=$('tb-load'),rt=$('tb-rt');if(soc)soc.textContent=st.valid?fmt(st.soc_pct,1):'—';if(load)load.textContent=an.avg_discharge_24h_w>0?fmt(an.avg_discharge_24h_w,1):'—';if(rt)rt.textContent=an.runtime_from_current_h>0?fmt(an.runtime_from_current_h,1):'—'})})}\n"
          "(function(){var n=document.querySelectorAll('nav a[href^=\"/\"]');for(var i=0;i<n.length;i++){n[i].addEventListener('click',function(e){if(e.ctrlKey||e.metaKey||e.shiftKey)return;var h=this.getAttribute('href');if(!h)return;e.preventDefault();location.href=h})}})();\n"
          "initSettings();loadAll();setInterval(loadAll,300000)\n"
@@ -3736,8 +3801,21 @@ h1{font-size:1.25rem;color:var(--green);margin-bottom:.75rem}
 .ops-filter button{background:var(--card);border:1px solid var(--border);color:var(--muted);padding:.25rem .5rem;font-size:.75rem;border-radius:4px;cursor:pointer}
 .ops-filter button:hover,.ops-filter button.active{border-color:var(--green);color:var(--green)}
 .maint-active{background:rgba(96,165,250,.15)!important;border:1px solid var(--blue);padding:.75rem;border-radius:6px;margin-bottom:.5rem}
+.pwr-modal{position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;z-index:1100}
+.pwr-modal-panel{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;min-width:320px;max-width:90vw;box-shadow:0 12px 40px rgba(0,0,0,.35)}
+.pwr-modal-title{font-size:1rem;font-weight:600;color:var(--text);margin-bottom:.4rem}
+.pwr-modal-desc{font-size:.85rem;color:var(--muted);line-height:1.4;margin-bottom:1rem}
+.pwr-reason-input{width:100%;padding:.6rem .75rem;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:.9rem;font-family:inherit;resize:vertical;min-height:80px;margin-bottom:.5rem}
+.pwr-reason-input:focus{outline:none;border-color:var(--green)}
+.pwr-modal-err{font-size:.8rem;color:var(--red);margin-bottom:.5rem;display:none}
+.pwr-modal-btns{display:flex;gap:.5rem;justify-content:flex-end;margin-top:1rem}
+.pwr-modal-btn{font-family:inherit;font-size:.85rem;font-weight:600;padding:.5rem 1rem;border-radius:6px;cursor:pointer;border:none}
+.pwr-modal-cancel{background:var(--border);color:var(--muted)}
+.pwr-modal-submit{background:var(--green);color:#fff}
+.pwr-modal-submit:disabled{opacity:.5;cursor:not-allowed}
 </style></head><body>
 <nav><a href="/">Dashboard</a><a href="/solar">Solar</a><a href="/settings">Settings</a><a href="/ops_log" class="active">Ops Log</a><a href="/testing">Testing</a></nav>
+<div id="pwr-reason-modal" class="pwr-modal" style="display:none"><div class="pwr-modal-panel" onclick="event.stopPropagation()"><div class="pwr-modal-title" id="pwr-modal-title">Reason required</div><p class="pwr-modal-desc" id="pwr-modal-desc">Please provide a reason for this action.</p><textarea id="pwr-reason-input" class="pwr-reason-input" placeholder="e.g. Replacing battery cells" rows="3"></textarea><div class="pwr-modal-err" id="pwr-modal-err">Please enter a reason.</div><div class="pwr-modal-btns"><button type="button" class="pwr-modal-btn pwr-modal-cancel" id="pwr-modal-cancel">Cancel</button><button type="button" class="pwr-modal-btn pwr-modal-submit" id="pwr-modal-submit" disabled>Submit</button></div></div></div>
 <h1>Ops Log</h1>
 <div class="ops-card" id="maint-card">
 <h2>Maintenance</h2>
@@ -3762,6 +3840,7 @@ h1{font-size:1.25rem;color:var(--green);margin-bottom:.75rem}
 </div>
 <script>
 function $(id){return document.getElementById(id)}
+function showPowerReasonModal(opts,onConfirm){var title=opts.title||'Reason required';var desc=opts.desc||'Please provide a reason for this action.';var confirmText=opts.confirmText||'Submit';var modal=$('pwr-reason-modal');var inp=$('pwr-reason-input');var err=$('pwr-modal-err');var submitBtn=$('pwr-modal-submit');if(!modal||!inp)return;$('pwr-modal-title').textContent=title;var descEl=$('pwr-modal-desc');descEl.textContent=desc;descEl.style.display=desc?'':'none';submitBtn.textContent=confirmText;inp.value='';err.style.display='none';submitBtn.disabled=true;modal.style.display='flex';inp.focus();function close(){modal.style.display='none';}$('pwr-modal-cancel').onclick=close;submitBtn.onclick=function(){var r=inp.value.trim();if(!r){err.style.display='';err.textContent='Please enter a reason.';return;}close();onConfirm(r);};inp.oninput=function(){submitBtn.disabled=!inp.value.trim();err.style.display='none';};inp.onkeydown=function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();if(inp.value.trim())submitBtn.click();}};modal.onclick=function(e){if(e.target===modal)close();};}
 function loadMaintStatus(){fetch('/api/maintenance_status').then(function(r){return r.json()}).then(function(d){
 var st=$('maint-status'),start=$('maint-start-btn'),end=$('maint-end-btn');
 if(d.maintenance_mode){st.innerHTML='<span class="maint-active">Maintenance window active</span>';if(start)start.style.display='none';if(end)end.style.display='inline-block'}
@@ -3779,7 +3858,7 @@ li.innerHTML='<span class="ops-time">'+time+'</span><span class="ops-msg ops-typ
 ul.appendChild(li);
 });
 })}
-$('maint-start-btn').onclick=function(){var r=prompt('Reason (optional):');fetch('/api/maintenance/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reason:r||''})}).then(function(x){return x.json()}).then(function(d){if(d.ok){loadMaintStatus();loadOpsLog()}})}
+$('maint-start-btn').onclick=function(){showPowerReasonModal({title:'Start maintenance',desc:'A reason is required for maintenance mode.'},function(r){fetch('/api/maintenance/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reason:r})}).then(function(x){return x.json()}).then(function(d){if(d.ok){loadMaintStatus();loadOpsLog()}}).catch(function(){})})}
 $('maint-end-btn').onclick=function(){fetch('/api/maintenance/end',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})}).then(function(x){return x.json()}).then(function(d){if(d.ok){loadMaintStatus();loadOpsLog()}})}
 $('note-submit').onclick=function(){var inp=$('note-input');var msg=inp.value.trim();if(!msg)return;fetch('/api/note',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})}).then(function(x){return x.json()}).then(function(d){if(d.ok){inp.value='';loadOpsLog()}})}
 $('note-input').onkeydown=function(e){if(e.key==='Enter')$('note-submit').click()}
@@ -3934,11 +4013,24 @@ h1{font-size:1.35rem;font-weight:600;color:var(--green);margin-bottom:.25rem}
 .test-banner.show{display:flex}
 .test-banner .tb-btn{background:#fff!important;color:#c2410c!important;border:none;padding:.35rem .8rem;font-weight:600;cursor:pointer;border-radius:4px}
 .test-banner .tb-btn:hover{opacity:.92}
+.pwr-modal{position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;z-index:1100}
+.pwr-modal-panel{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;min-width:320px;max-width:90vw;box-shadow:0 12px 40px rgba(0,0,0,.35)}
+.pwr-modal-title{font-size:1rem;font-weight:600;color:var(--text);margin-bottom:.4rem}
+.pwr-modal-desc{font-size:.85rem;color:var(--muted);line-height:1.4;margin-bottom:1rem}
+.pwr-reason-input{width:100%;padding:.6rem .75rem;border:1px solid var(--border);border-radius:8px;background:var(--input-bg);color:var(--text);font-size:.9rem;font-family:inherit;resize:vertical;min-height:80px;margin-bottom:.5rem}
+.pwr-reason-input:focus{outline:none;border-color:var(--green)}
+.pwr-modal-err{font-size:.8rem;color:#dc2626;margin-bottom:.5rem;display:none}
+.pwr-modal-btns{display:flex;gap:.5rem;justify-content:flex-end;margin-top:1rem}
+.pwr-modal-btn{font-family:inherit;font-size:.85rem;font-weight:600;padding:.5rem 1rem;border-radius:6px;cursor:pointer;border:none}
+.pwr-modal-cancel{background:var(--border);color:var(--muted)}
+.pwr-modal-submit{background:var(--green);color:#fff}
+.pwr-modal-submit:disabled{opacity:.5;cursor:not-allowed}
 </style></head><body>
 <nav><a href="/">Dashboard</a><a href="/solar">Solar</a><a href="/settings" class="active">Settings</a><a href="/ops_log">Ops Log</a><a href="/testing">Testing</a><span class="spacer"></span><button class="thm" id="thm-btn" onclick="toggleTheme()" title="Toggle theme">)HTML";
     o += (theme == "light") ? "&#9788;" : "&#263d;";
     o += R"HTML(</button></nav>
 <div id="test-banner" class="test-banner"><span><strong>Battery test active</strong> &middot; SoC: <span id="tb-soc">—</span>% &middot; Load: <span id="tb-load">—</span> W &middot; Runtime: <span id="tb-rt">—</span> h</span><button class="tb-btn" onclick="endTestFromBanner()">End test</button></div>
+<div id="pwr-reason-modal" class="pwr-modal" style="display:none"><div class="pwr-modal-panel" onclick="event.stopPropagation()"><div class="pwr-modal-title" id="pwr-modal-title">Reason required</div><p class="pwr-modal-desc" id="pwr-modal-desc">Please provide a reason for this action.</p><textarea id="pwr-reason-input" class="pwr-reason-input" placeholder="e.g. Ending battery test" rows="3"></textarea><div class="pwr-modal-err" id="pwr-modal-err">Please enter a reason.</div><div class="pwr-modal-btns"><button type="button" class="pwr-modal-btn pwr-modal-cancel" id="pwr-modal-cancel">Cancel</button><button type="button" class="pwr-modal-btn pwr-modal-submit" id="pwr-modal-submit" disabled>Submit</button></div></div></div>
 <h1>Settings</h1>
 <p class="sub">Application configuration. Restart limonitor after saving to apply hardware changes.</p>
 <form id="cfg-form" class="form-wrap">
@@ -4017,7 +4109,8 @@ h1{font-size:1.35rem;font-weight:600;color:var(--green);margin-bottom:.25rem}
          "function refreshWx(){var m=document.getElementById('wx-msg');if(m)m.textContent='Refreshing…';fetch('/api/weather_refresh').then(function(r){return r.json()}).then(function(d){if(m)m.textContent=d.ok?'Done! Cache cleared. Visit Solar page to see fresh data.':'Error: '+d.message;if(m)m.style.color=d.ok?'var(--green)':'#dc2626'}).catch(function(e){if(m){m.textContent='Error: '+e.message;m.style.color='#dc2626'}})}\n"
          "function $(id){return document.getElementById(id)}\n"
          "function fmt(n,p){return n==null||isNaN(n)?'—':n.toFixed(p)}\n"
-         "function endTestFromBanner(){fetch('/api/shelly/relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({turn:'on'})}).then(function(r){return r.json()}).then(function(d){if(d.ok){var b=$('test-banner');if(b)b.classList.remove('show')}}).catch(function(){})}\n"
+         "function showPowerReasonModal(opts,onConfirm){var title=opts.title||'Reason required';var desc=opts.desc||'Please provide a reason for this action.';var confirmText=opts.confirmText||'Submit';var modal=$('pwr-reason-modal');var inp=$('pwr-reason-input');var err=$('pwr-modal-err');var submitBtn=$('pwr-modal-submit');if(!modal||!inp)return;$('pwr-modal-title').textContent=title;var descEl=$('pwr-modal-desc');descEl.textContent=desc;descEl.style.display=desc?'':'none';submitBtn.textContent=confirmText;inp.value='';err.style.display='none';submitBtn.disabled=true;modal.style.display='flex';inp.focus();function close(){modal.style.display='none';}$('pwr-modal-cancel').onclick=close;submitBtn.onclick=function(){var r=inp.value.trim();if(!r){err.style.display='';err.textContent='Please enter a reason.';return;}close();onConfirm(r);};inp.oninput=function(){submitBtn.disabled=!inp.value.trim();err.style.display='none';};inp.onkeydown=function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();if(inp.value.trim())submitBtn.click();}};modal.onclick=function(e){if(e.target===modal)close();};}\n"
+         "function endTestFromBanner(){showPowerReasonModal({title:'End battery test',desc:'This will turn grid back on. A reason is required.',confirmText:'End test'},function(r){fetch('/api/shelly/relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({turn:'on',reason:r})}).then(function(x){return x.json()}).then(function(d){if(d.ok){var b=$('test-banner');if(b)b.classList.remove('show')}}).catch(function(){})})}\n"
          "function upTestBanner(){var b=$('test-banner');if(!b||!b.classList.contains('show'))return;fetch('/api/shelly/status').then(function(r){return r.json()}).then(function(s){if(!s.test_active){b.classList.remove('show');return}Promise.all([fetch('/api/status').then(function(r){return r.json()}),fetch('/api/analytics').then(function(r){return r.json()})]).then(function(arr){var st=arr[0],an=arr[1];var soc=$('tb-soc'),load=$('tb-load'),rt=$('tb-rt');if(soc)soc.textContent=st.valid?fmt(st.soc_pct,1):'—';if(load)load.textContent=an.avg_discharge_24h_w>0?fmt(an.avg_discharge_24h_w,1):'—';if(rt)rt.textContent=an.runtime_from_current_h>0?fmt(an.runtime_from_current_h,1):'—'})})}\n"
          "fetch('/api/shelly/status').then(function(r){return r.json()}).then(function(s){if(s.test_active){var b=$('test-banner');if(b){b.classList.add('show');upTestBanner();setInterval(upTestBanner,5000)}}}).catch(function(){})\n"
          "</script></body></html>";
