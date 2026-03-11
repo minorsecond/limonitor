@@ -47,8 +47,27 @@ bool Database::open() {
     }
     db_ = handle;
 
+    // Enable defensive mode to prevent accidental misuse
+    sqlite3_db_config(handle, SQLITE_DBCONFIG_DEFENSIVE, 1, nullptr);
+    // Enable extended result codes for better debugging
+    sqlite3_extended_result_codes(handle, 1);
+
+    // Run quick integrity check on startup
+    sqlite3_stmt* check_stmt = nullptr;
+    if (sqlite3_prepare_v2(handle, "PRAGMA quick_check;", -1, &check_stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(check_stmt) == SQLITE_ROW) {
+            const char* res = reinterpret_cast<const char*>(sqlite3_column_text(check_stmt, 0));
+            if (res && std::strcmp(res, "ok") != 0) {
+                LOG_ERROR("DB: INTEGRITY CHECK FAILED: %s", res);
+                // We proceed but with a loud warning. In some systems we might want to fail-stop.
+            }
+        }
+        sqlite3_finalize(check_stmt);
+    }
+
     if (!migrate()) { close(); return false; }
     LOG_INFO("DB: opened %s", path_.c_str());
+    insert_system_event({std::chrono::system_clock::now(), "Database opened: " + path_});
     return true;
 }
 
@@ -68,9 +87,12 @@ void Database::checkpoint() {
     std::lock_guard<std::mutex> lk(mu_);
     if (!db_) return;
     int rc = sqlite3_wal_checkpoint_v2(db_handle(db_), nullptr,
-                                       SQLITE_CHECKPOINT_PASSIVE, nullptr, nullptr);
-    if (rc != SQLITE_OK && rc != SQLITE_BUSY)
+                                       SQLITE_CHECKPOINT_TRUNCATE, nullptr, nullptr);
+    if (rc != SQLITE_OK && rc != SQLITE_BUSY) {
         LOG_WARN("DB: checkpoint: %s", sqlite3_errmsg(db_handle(db_)));
+    } else {
+        insert_system_event({std::chrono::system_clock::now(), "Database WAL checkpoint (TRUNCATE) completed"});
+    }
 }
 
 bool Database::is_open() const {
@@ -81,8 +103,18 @@ bool Database::is_open() const {
 bool Database::migrate() {
     // WAL mode: concurrent readers + writer, faster on flash storage
     if (!exec("PRAGMA journal_mode=WAL;")) return false;
-    // NORMAL is safe for WAL, but EXTRA/FULL ensures every commit is durable even if power is lost.
+    // EXTRA ensures every commit is durable even if power is lost.
     if (!exec("PRAGMA synchronous=EXTRA;")) return false;
+    // Use memory for temporary storage to reduce disk churn
+    if (!exec("PRAGMA temp_store=MEMORY;")) return false;
+    // Enable foreign key constraints
+    if (!exec("PRAGMA foreign_keys=ON;")) return false;
+    // Add extra internal page sanity checking
+    if (!exec("PRAGMA cell_size_check=ON;")) return false;
+    // Wait up to 5s for locks
+    if (!exec("PRAGMA busy_timeout=5000;")) return false;
+    // Hardening: disable trusted schema (prevents malicious triggers/views)
+    if (!exec("PRAGMA trusted_schema=OFF;")) return false;
 
     if (!exec(
         "CREATE TABLE IF NOT EXISTS battery_readings ("
@@ -391,6 +423,18 @@ void Database::set_setting(const std::string& key, const std::string& value) {
     write_setting_to_file(settings_file_path(path_), key, value);
 }
 
+bool Database::begin_transaction() {
+    return exec("BEGIN IMMEDIATE;");
+}
+
+bool Database::commit_transaction() {
+    return exec("COMMIT;");
+}
+
+bool Database::rollback_transaction() {
+    return exec("ROLLBACK;");
+}
+
 void Database::insert_battery(const BatterySnapshot& s) {
     if (!s.valid) return;
     std::lock_guard<std::mutex> lk(mu_);
@@ -441,6 +485,65 @@ void Database::insert_battery(const BatterySnapshot& s) {
     sqlite3_finalize(stmt);
 }
 
+void Database::insert_battery_batch(const std::vector<BatterySnapshot>& batch) {
+    if (batch.empty()) return;
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return;
+
+    if (!begin_transaction()) return;
+
+    const char* sql =
+        "INSERT INTO battery_readings"
+        " (ts,device,v,a,soc,rem_ah,nom_ah,pwr,cell_min,cell_max,cell_delta,cells,t1,t2)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+
+    sqlite3_stmt* stmt = nullptr;
+    auto* db = db_handle(db_);
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        LOG_WARN("DB: prepare battery batch: %s", sqlite3_errmsg(db));
+        rollback_transaction();
+        return;
+    }
+
+    for (const auto& s : batch) {
+        if (!s.valid) continue;
+        std::string cells;
+        cells.reserve(s.cell_voltages_v.size() * 7);
+        for (size_t i = 0; i < s.cell_voltages_v.size(); ++i) {
+            if (i) cells += ',';
+            char buf[12];
+            std::snprintf(buf, sizeof(buf), "%.3f", s.cell_voltages_v[i]);
+            cells += buf;
+        }
+
+        auto ts = static_cast<sqlite3_int64>(std::chrono::system_clock::to_time_t(s.timestamp));
+        double t1 = s.temperatures_c.size() > 0 ? s.temperatures_c[0] : 0.0;
+        double t2 = s.temperatures_c.size() > 1 ? s.temperatures_c[1] : 0.0;
+
+        sqlite3_bind_int64(stmt,  1, ts);
+        sqlite3_bind_text(stmt,   2, s.device_name.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_double(stmt, 3, s.total_voltage_v);
+        sqlite3_bind_double(stmt, 4, s.current_a);
+        sqlite3_bind_double(stmt, 5, s.soc_pct);
+        sqlite3_bind_double(stmt, 6, s.remaining_ah);
+        sqlite3_bind_double(stmt, 7, s.nominal_ah);
+        sqlite3_bind_double(stmt, 8, s.power_w);
+        sqlite3_bind_double(stmt, 9, s.cell_min_v);
+        sqlite3_bind_double(stmt,10, s.cell_max_v);
+        sqlite3_bind_double(stmt,11, s.cell_delta_v);
+        sqlite3_bind_text(stmt,  12, cells.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_double(stmt,13, t1);
+        sqlite3_bind_double(stmt,14, t2);
+
+        if (sqlite3_step(stmt) != SQLITE_DONE) {
+            LOG_WARN("DB: insert battery batch item: %s", sqlite3_errmsg(db));
+        }
+        sqlite3_reset(stmt);
+    }
+    sqlite3_finalize(stmt);
+    commit_transaction();
+}
+
 void Database::insert_charger(const PwrGateSnapshot& p) {
     if (!p.valid) return;
     std::lock_guard<std::mutex> lk(mu_);
@@ -476,6 +579,53 @@ void Database::insert_charger(const PwrGateSnapshot& p) {
     if (sqlite3_step(stmt) != SQLITE_DONE)
         LOG_WARN("DB: insert charger: %s", sqlite3_errmsg(db));
     sqlite3_finalize(stmt);
+}
+
+void Database::insert_charger_batch(const std::vector<PwrGateSnapshot>& batch) {
+    if (batch.empty()) return;
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return;
+
+    if (!begin_transaction()) return;
+
+    const char* sql =
+        "INSERT INTO charger_readings"
+        " (ts,state,ps_v,bat_v,bat_a,sol_v,tgt_v,tgt_a,stop_a,pwm,mins,temp,pss)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)";
+
+    sqlite3_stmt* stmt = nullptr;
+    auto* db = db_handle(db_);
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        LOG_WARN("DB: prepare charger batch: %s", sqlite3_errmsg(db));
+        rollback_transaction();
+        return;
+    }
+
+    for (const auto& p : batch) {
+        if (!p.valid) continue;
+        auto ts = static_cast<sqlite3_int64>(std::chrono::system_clock::to_time_t(p.timestamp));
+
+        sqlite3_bind_int64(stmt,  1, ts);
+        sqlite3_bind_text(stmt,   2, p.state.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_double(stmt, 3, p.ps_v);
+        sqlite3_bind_double(stmt, 4, p.bat_v);
+        sqlite3_bind_double(stmt, 5, p.bat_a);
+        sqlite3_bind_double(stmt, 6, p.sol_v);
+        sqlite3_bind_double(stmt, 7, p.target_v);
+        sqlite3_bind_double(stmt, 8, p.target_a);
+        sqlite3_bind_double(stmt, 9, p.stop_a);
+        sqlite3_bind_int(stmt,   10, p.pwm);
+        sqlite3_bind_int(stmt,   11, p.minutes);
+        sqlite3_bind_int(stmt,   12, p.temp);
+        sqlite3_bind_int(stmt,   13, p.pss);
+
+        if (sqlite3_step(stmt) != SQLITE_DONE) {
+            LOG_WARN("DB: insert charger batch item: %s", sqlite3_errmsg(db));
+        }
+        sqlite3_reset(stmt);
+    }
+    sqlite3_finalize(stmt);
+    commit_transaction();
 }
 
 void Database::insert_system_event(const SystemEvent& e) {
@@ -1582,6 +1732,36 @@ std::vector<std::pair<std::string, int64_t>> Database::table_sizes() const {
     return result;
 }
 
+bool Database::backup(const std::string& dest_path) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return false;
+
+    sqlite3* pDest = nullptr;
+    int rc = sqlite3_open(dest_path.c_str(), &pDest);
+    if (rc != SQLITE_OK) {
+        LOG_ERROR("DB: cannot open backup destination %s: %s", dest_path.c_str(), sqlite3_errmsg(pDest));
+        sqlite3_close(pDest);
+        return false;
+    }
+
+    sqlite3_backup* pBackup = sqlite3_backup_init(pDest, "main", db_handle(db_), "main");
+    if (pBackup) {
+        (void)sqlite3_backup_step(pBackup, -1);
+        (void)sqlite3_backup_finish(pBackup);
+    }
+    rc = sqlite3_errcode(pDest);
+
+    if (rc != SQLITE_OK) {
+        LOG_ERROR("DB: backup failed: %s", sqlite3_errmsg(pDest));
+        insert_system_event({std::chrono::system_clock::now(), "Database backup failed: " + std::string(sqlite3_errmsg(pDest))});
+    } else {
+        insert_system_event({std::chrono::system_clock::now(), "Database backup created: " + dest_path});
+    }
+    sqlite3_close(pDest);
+
+    return rc == SQLITE_OK;
+}
+
 void Database::cleanup(int max_age_days, int system_event_max_age_days, int ops_event_max_age_days) {
     if (max_age_days <= 0) return;
     std::lock_guard<std::mutex> lk(mu_);
@@ -1592,6 +1772,7 @@ void Database::cleanup(int max_age_days, int system_event_max_age_days, int ops_
     int64_t threshold = now - (static_cast<int64_t>(max_age_days) * 86400);
 
     LOG_INFO("DB: Starting cleanup (max_age_days=%d, threshold=%lld)", max_age_days, (long long)threshold);
+    insert_system_event({std::chrono::system_clock::now(), "Database cleanup started"});
 
     // List of tables and their timestamp columns to clean up
     struct CleanupTarget {
@@ -1656,4 +1837,5 @@ void Database::cleanup(int max_age_days, int system_event_max_age_days, int ops_
     // Finally, run an incremental vacuum if enabled, or just checkpoint.
     // Full VACUUM can be slow and block, so we prefer checkpoints and WAL space reuse.
     sqlite3_wal_checkpoint_v2(db, "main", SQLITE_CHECKPOINT_PASSIVE, nullptr, nullptr);
+    insert_system_event({std::chrono::system_clock::now(), "Database cleanup and WAL checkpoint finished"});
 }

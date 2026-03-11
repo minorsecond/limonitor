@@ -109,6 +109,55 @@ static void test_database() {
     std::remove(path.c_str());
 }
 
+static void test_database_event_logging() {
+    std::string path = "/tmp/limonitor_db_log_test_" + std::to_string(getpid()) + ".db";
+    Database db(path);
+    ASSERT(db.open(), "Database::open for logging test");
+
+    // 1. Database::open should have logged an event
+    auto events = db.load_system_events(10);
+    bool open_logged = false;
+    for (const auto& e : events) {
+        if (e.message.find("Database opened:") != std::string::npos) open_logged = true;
+    }
+    ASSERT(open_logged, "Event logged for database open");
+
+    // 2. Database::checkpoint should log an event
+    db.checkpoint();
+    events = db.load_system_events(10);
+    bool checkpoint_logged = false;
+    for (const auto& e : events) {
+        if (e.message.find("Database WAL checkpoint (TRUNCATE) completed") != std::string::npos) checkpoint_logged = true;
+    }
+    ASSERT(checkpoint_logged, "Event logged for database checkpoint");
+
+    // 3. Database::backup should log an event
+    std::string backup_path = path + ".bak";
+    db.backup(backup_path);
+    events = db.load_system_events(10);
+    bool backup_logged = false;
+    for (const auto& e : events) {
+        if (e.message.find("Database backup created:") != std::string::npos) backup_logged = true;
+    }
+    ASSERT(backup_logged, "Event logged for database backup");
+    std::remove(backup_path.c_str());
+
+    // 4. Database::cleanup should log start/finish events
+    db.cleanup(30, 180, 3650);
+    events = db.load_system_events(10);
+    bool cleanup_start_logged = false;
+    bool cleanup_finish_logged = false;
+    for (const auto& e : events) {
+        if (e.message.find("Database cleanup started") != std::string::npos) cleanup_start_logged = true;
+        if (e.message.find("Database cleanup and WAL checkpoint finished") != std::string::npos) cleanup_finish_logged = true;
+    }
+    ASSERT(cleanup_start_logged, "Event logged for database cleanup start");
+    ASSERT(cleanup_finish_logged, "Event logged for database cleanup finish");
+
+    db.close();
+    std::remove(path.c_str());
+}
+
 static void test_weather_forecast_empty_api_key() {
     WeatherConfig cfg;
     cfg.api_key = "";
@@ -1503,6 +1552,7 @@ int main() {
     std::fprintf(stderr, "\n=== limonitor unit tests ===\n\n");
 
     test_database();
+    test_database_event_logging();
     test_weather_forecast_empty_api_key();
     test_http_options_cors();
     test_http_post_settings();

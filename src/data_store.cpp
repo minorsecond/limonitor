@@ -126,6 +126,43 @@ void DataStore::push_system_event(const std::string& msg) {
     if (db_) db_->insert_system_event(ev);
 }
 
+void DataStore::maybe_flush_db() {
+    // Expects mu_ to be held
+    if (!db_) return;
+
+    auto now = std::chrono::steady_clock::now();
+    int interval = cfg_.db_write_interval_s;
+    bool time_to_flush = (interval <= 0) ||
+                         (std::chrono::duration_cast<std::chrono::seconds>(now - last_db_write_).count() >= interval);
+
+    if (time_to_flush) {
+        if (!battery_buffer_.empty()) {
+            db_->insert_battery_batch(battery_buffer_);
+            battery_buffer_.clear();
+        }
+        if (!charger_buffer_.empty()) {
+            db_->insert_charger_batch(charger_buffer_);
+            charger_buffer_.clear();
+        }
+        last_db_write_ = std::chrono::steady_clock::now();
+    }
+}
+
+void DataStore::flush_db() {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return;
+
+    if (!battery_buffer_.empty()) {
+        db_->insert_battery_batch(battery_buffer_);
+        battery_buffer_.clear();
+    }
+    if (!charger_buffer_.empty()) {
+        db_->insert_charger_batch(charger_buffer_);
+        charger_buffer_.clear();
+    }
+    last_db_write_ = std::chrono::steady_clock::now();
+}
+
 void DataStore::process_system_events(const BatterySnapshot& snap,
                                       const std::optional<PwrGateSnapshot>& pg,
                                       const AnalyticsSnapshot& an) {
@@ -208,6 +245,10 @@ void DataStore::update(BatterySnapshot snap) {
         last_bms_update_ = snap.timestamp;
         process_system_events(snap, latest_pwrgate_locked(), analytics_.snapshot());
         ring_.push_back(snap);
+        if (db_ && !loading_history_) {
+            battery_buffer_.push_back(snap);
+            maybe_flush_db();
+        }
         if (extensions_) {
             extensions_->update(snap, pg_opt.has_value() ? &*pg_opt : nullptr,
                                analytics_.snapshot(), ring_, tx_events_);
@@ -300,6 +341,10 @@ void DataStore::update_pwrgate(PwrGateSnapshot snap) {
     process_system_events(latest_locked().value_or(BatterySnapshot{}),
                          std::optional<PwrGateSnapshot>(snap), analytics_.snapshot());
     pwrgate_ring_.push_back(std::move(snap));
+    if (db_ && !loading_history_) {
+        charger_buffer_.push_back(pwrgate_ring_.back());
+        maybe_flush_db();
+    }
     while (pwrgate_ring_.size() > max_history_) pwrgate_ring_.pop_front();
 }
 

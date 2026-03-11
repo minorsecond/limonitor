@@ -42,7 +42,9 @@ public:
     bool is_open() const;
 
     void insert_battery(const BatterySnapshot& s);
+    void insert_battery_batch(const std::vector<BatterySnapshot>& batch);
     void insert_charger(const PwrGateSnapshot& p);
+    void insert_charger_batch(const std::vector<PwrGateSnapshot>& batch);
     void insert_system_event(const SystemEvent& e);
     std::vector<SystemEvent> load_system_events(size_t n = 200) const;
 
@@ -187,6 +189,9 @@ public:
     int64_t file_size() const;
     std::vector<std::pair<std::string, int64_t>> table_sizes() const;
 
+    // Database backup using SQLite Online Backup API
+    bool backup(const std::string& dest_path);
+
     /**
      * @brief Maintenance routine to prevent the database from growing indefinitely.
      * Deletes high-resolution telemetry (battery/charger) older than max_age_days.
@@ -216,4 +221,7 @@ private:
 
     bool migrate();
     bool exec(const char* sql);
+    bool begin_transaction();
+    bool commit_transaction();
+    bool rollback_transaction();
 };

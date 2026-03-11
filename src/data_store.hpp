@@ -61,6 +61,8 @@ public:
     void load_system_events_from_db(const std::vector<SystemEvent>& events);
     void set_loading_history(bool loading);  // when true, don't push events (used during startup load)
 
+    void flush_db();  // manually trigger telemetry flush to DB
+
     // Analytics — call after DataStore is constructed
     void set_rated_capacity(double ah);
     void update_self_monitor();
@@ -119,6 +121,11 @@ private:
     void process_system_events(const BatterySnapshot& snap,
                               const std::optional<PwrGateSnapshot>& pg,
                               const AnalyticsSnapshot& an);
+
+    void maybe_flush_db();
+    std::vector<BatterySnapshot> battery_buffer_;
+    std::vector<PwrGateSnapshot> charger_buffer_;
+    std::chrono::steady_clock::time_point last_db_write_{std::chrono::steady_clock::now()};
 
     // Analytics engine
     AnalyticsEngine analytics_;

@@ -513,26 +513,34 @@ int main(int argc, char** argv) {
         store.load_system_events_from_db(db->load_system_events(200));
         store.set_loading_history(false);
 
-        int interval = cfg.db_write_interval_s;
-        // Shelly battery test safety check (throttled to every 60s)
+        // Periodic maintenance (checkpoint) throttled in observer
         store.on_update([db, &store](const BatterySnapshot&) {
             using clock = std::chrono::steady_clock;
             static auto last_shelly_check = clock::time_point{};
+            static auto last_checkpoint = clock::time_point{};
             auto now = clock::now();
             if (std::chrono::duration_cast<std::chrono::seconds>(now - last_shelly_check).count() >= 60) {
                 shelly::check_test_conditions(db.get(), store);
                 last_shelly_check = now;
             }
-        });
-        // Battery observer — throttled by db_write_interval_s
-        store.on_update([db, interval](const BatterySnapshot& snap) {
-            using clock = std::chrono::steady_clock;
-            static auto last = clock::time_point{};
-            auto now = clock::now();
-            if (interval <= 0 ||
-                std::chrono::duration_cast<std::chrono::seconds>(now - last).count() >= interval) {
-                db->insert_battery(snap);
-                last = now;
+            // Periodic WAL checkpoint (every 1 hour)
+            if (std::chrono::duration_cast<std::chrono::hours>(now - last_checkpoint).count() >= 1) {
+                LOG_INFO("DB: periodic WAL checkpoint");
+                db->checkpoint();
+                last_checkpoint = now;
+
+                // Rolling backup every 24 hours
+                static auto last_backup = clock::time_point{};
+                if (last_backup == clock::time_point{} || 
+                    std::chrono::duration_cast<std::chrono::hours>(now - last_backup).count() >= 24) {
+                    
+                    std::string backup_path = db->path() + ".bak";
+                    LOG_INFO("DB: starting daily rolling backup to %s", backup_path.c_str());
+                    if (db->backup(backup_path)) {
+                        LOG_INFO("DB: backup completed successfully");
+                    }
+                    last_backup = now;
+                }
             }
         });
     } else {
@@ -732,6 +740,10 @@ int main(int argc, char** argv) {
 
     // Shutdown
     LOG_INFO("Shutting down");
+    store.flush_db();
+    if (db && db->is_open()) {
+        db->checkpoint();
+    }
     http.stop();
     if (serial)   serial->stop();
     if (pgclient) pgclient->stop();
