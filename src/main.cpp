@@ -6,6 +6,7 @@
 #include "database.hpp"
 #include "http_server.hpp"
 #include "ops_events.hpp"
+#include "ops_util.hpp"
 #include "litime_protocol.hpp"
 #include "logger.hpp"
 #include "pwrgate_client.hpp"
@@ -640,11 +641,14 @@ int main(int argc, char** argv) {
                             if (now_ts - start_ts >= timeout_min * 60) {
                                 db->set_setting("maintenance_mode", "0");
                                 db->set_setting("maintenance_end_time", std::to_string(static_cast<long>(now_ts)));
+                                auto snap_opt = store.latest();
+                                auto pg_opt = store.latest_pwrgate();
                                 OpsEvent ev;
                                 ev.timestamp = sys_now;
                                 ev.type = "maintenance_end";
                                 ev.subtype = "maintenance";
                                 ev.message = "Maintenance auto-ended (timeout)";
+                                ev.metadata_json = build_ops_snapshot_json(&snap_opt, &pg_opt);
                                 db->insert_ops_event(ev);
                                 LOG_INFO("Maintenance auto-ended after %d min timeout", timeout_min);
                             }

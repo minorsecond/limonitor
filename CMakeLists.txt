@@ -36,6 +36,7 @@ set(SOURCES
     src/shelly_client.cpp
     src/data_store.cpp
     src/database.cpp
+    src/ops_util.cpp
     src/http_server.cpp
     src/tui.cpp
     src/pwrgate.cpp
@@ -115,6 +116,7 @@ set(UTEST_SOURCES
     src/shelly_client.cpp
     src/data_store.cpp
     src/database.cpp
+    src/ops_util.cpp
     src/http_server.cpp
     src/pwrgate.cpp
     src/pwrgate_client.cpp

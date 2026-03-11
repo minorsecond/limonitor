@@ -1,6 +1,7 @@
 #include "http_server.hpp"
 #include "logger.hpp"
 #include "ops_events.hpp"
+#include "ops_util.hpp"
 #include "analytics/extensions.hpp"
 #include <algorithm>
 #include <arpa/inet.h>
@@ -245,13 +246,7 @@ void HttpServer::handle(int fd) {
                 ev.subtype = is_test ? "test" : "maintenance";
                 ev.message = (turn == "off") ? ("Grid turned off" + (reason.empty() ? "" : ": " + reason)) : ("Grid turned on" + (reason.empty() ? "" : ": " + reason));
                 ev.notes = reason;
-                char meta[256];
-                if (snap_opt && pg_opt) {
-                    std::snprintf(meta, sizeof(meta), "{\"soc\":%.1f,\"voltage\":%.2f,\"load\":%.1f,\"charger\":\"%s\",\"grid_v\":%.2f,\"solar_v\":%.2f}",
-                        snap_opt->soc_pct, snap_opt->total_voltage_v, std::abs(snap_opt->power_w),
-                        pg_opt->state.c_str(), pg_opt->ps_v, pg_opt->sol_v);
-                    ev.metadata_json = meta;
-                }
+                ev.metadata_json = build_ops_snapshot_json(&snap_opt, &pg_opt);
                 db_->insert_ops_event(ev);
             }
             send_response(fd, 200, "application/json", "{\"ok\":true,\"turn\":\"" + turn + "\"}\n");
@@ -318,12 +313,14 @@ void HttpServer::handle(int fd) {
         ev.subtype = "maintenance";
         ev.message = "Maintenance started" + (reason.empty() ? "" : ": " + reason);
         ev.notes = notes;
-        char meta[384];
-        if (snap_opt && pg_opt) {
-            std::snprintf(meta, sizeof(meta), "{\"soc\":%.1f,\"voltage\":%.2f,\"load\":%.1f,\"charger\":\"%s\",\"grid_v\":%.2f,\"solar_v\":%.2f,\"expected_duration\":\"%s\"}",
-                snap_opt->soc_pct, snap_opt->total_voltage_v, std::abs(snap_opt->power_w),
-                pg_opt->state.c_str(), pg_opt->ps_v, pg_opt->sol_v, expected.c_str());
-            ev.metadata_json = meta;
+        ev.metadata_json = build_ops_snapshot_json(&snap_opt, &pg_opt);
+        if (!expected.empty()) {
+            if (ev.metadata_json == "{}")
+                ev.metadata_json = "{\"expected_duration\":" + jstr(expected) + "}";
+            else {
+                ev.metadata_json.pop_back();
+                ev.metadata_json += ",\"expected_duration\":" + jstr(expected) + "}";
+            }
         }
         db_->insert_ops_event(ev);
         send_response(fd, 200, "application/json", "{\"ok\":true}\n");
@@ -342,13 +339,7 @@ void HttpServer::handle(int fd) {
         ev.type = "maintenance_end";
         ev.subtype = "maintenance";
         ev.message = "Maintenance ended";
-        if (snap_opt && pg_opt) {
-            char meta[256];
-            std::snprintf(meta, sizeof(meta), "{\"soc\":%.1f,\"voltage\":%.2f,\"load\":%.1f,\"charger\":\"%s\",\"grid_v\":%.2f,\"solar_v\":%.2f}",
-                snap_opt->soc_pct, snap_opt->total_voltage_v, std::abs(snap_opt->power_w),
-                pg_opt->state.c_str(), pg_opt->ps_v, pg_opt->sol_v);
-            ev.metadata_json = meta;
-        }
+        ev.metadata_json = build_ops_snapshot_json(&snap_opt, &pg_opt);
         db_->insert_ops_event(ev);
         send_response(fd, 200, "application/json", "{\"ok\":true}\n");
         return;
@@ -368,13 +359,7 @@ void HttpServer::handle(int fd) {
         ev.timestamp = std::chrono::system_clock::now();
         ev.type = "note";
         ev.message = message;
-        if (snap_opt && pg_opt) {
-            char meta[256];
-            std::snprintf(meta, sizeof(meta), "{\"soc\":%.1f,\"voltage\":%.2f,\"load\":%.1f,\"charger\":\"%s\",\"grid_v\":%.2f,\"solar_v\":%.2f}",
-                snap_opt->soc_pct, snap_opt->total_voltage_v, std::abs(snap_opt->power_w),
-                pg_opt->state.c_str(), pg_opt->ps_v, pg_opt->sol_v);
-            ev.metadata_json = meta;
-        }
+        ev.metadata_json = build_ops_snapshot_json(&snap_opt, &pg_opt);
         db_->insert_ops_event(ev);
         send_response(fd, 200, "application/json", "{\"ok\":true}\n");
         return;
