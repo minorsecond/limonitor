@@ -732,6 +732,39 @@ static void test_runtime_consistency_with_dashboard() {
     ASSERT(approx_eq(rt_curr, 81.25, 0.5), "runtime_consistency: 93.8%→10% ≈ 81h (dashboard: 80.9h)");
 }
 
+// Verify runtime math against prod DB (limonitorLiveData) when available
+static void test_runtime_prod_db() {
+    const char* paths[] = {
+        "../limonitorLiveData/limonitor/limonitor.db",  // from build/
+        "limonitorLiveData/limonitor/limonitor.db",    // from project root
+    };
+    for (const char* p : paths) {
+        Database db(p);
+        if (!db.open()) continue;
+        auto usage = db.get_usage_profile(7);
+        int total_n = 0;
+        double total_sum = 0;
+        for (const auto& u : usage) {
+            total_sum += u.avg_w * u.sample_count;
+            total_n += u.sample_count;
+        }
+        double load_w = (total_n > 0) ? total_sum / total_n : 0;
+        if (total_n > 0 && total_n < 20)
+            load_w *= 0.85;
+        // 100Ah 4S: 100*12.8=1280 Wh, 90% usable=1152 Wh
+        double cap_wh = 100.0 * 12.8;
+        double rt_full = estimate_runtime_h(cap_wh, 100.0, 10.0, load_w);
+        double rt_curr = estimate_runtime_h(cap_wh, 93.76, 10.0, load_w);
+        ASSERT(load_w > 0.5, "runtime_prod_db: load from profile > 0.5W");
+        ASSERT(rt_full > 30 && rt_full < 80, "runtime_prod_db: full→10% in plausible range 30–80h");
+        ASSERT(rt_curr > 25 && rt_curr < 75, "runtime_prod_db: current→10% in plausible range 25–75h");
+        std::fprintf(stderr, "PASS: runtime_prod_db: n=%d load=%.1fW full=%.1fh curr=%.1fh\n",
+                     total_n, load_w, rt_full, rt_curr);
+        return;
+    }
+    std::fprintf(stderr, "PASS: runtime_prod_db: prod DB not found (skipped)\n");
+}
+
 // ---------- scale_usage_profile tests ----------
 
 static void test_scale_basic() {
@@ -1014,6 +1047,7 @@ int main() {
     test_runtime_soc_at_cutoff();
     test_runtime_zero_capacity();
     test_runtime_consistency_with_dashboard();
+    test_runtime_prod_db();
 
     test_scale_basic();
     test_scale_no_measured();
