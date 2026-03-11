@@ -105,10 +105,38 @@ void HttpServer::serve_loop() {
 }
 
 void HttpServer::handle(int fd) {
-    char buf[4096] = {};
+    char buf[8192] = {};
     ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
     if (n <= 0) return;
     std::string req(buf, static_cast<size_t>(n));
+
+    // For POST, read full body if Content-Length exceeds what we have
+    if (req.size() >= 4 && (req.compare(0, 4, "POST") == 0 || req.compare(0, 4, "post") == 0)) {
+        size_t cl_pos = req.find("Content-Length:");
+        if (cl_pos != std::string::npos) {
+            cl_pos = req.find_first_not_of(" \t", cl_pos + 15);
+            if (cl_pos != std::string::npos) {
+                size_t cl_end = req.find_first_of("\r\n", cl_pos);
+                if (cl_end != std::string::npos) {
+                    try {
+                        size_t content_len = std::stoul(req.substr(cl_pos, cl_end - cl_pos));
+                        size_t body_start = req.find("\r\n\r\n");
+                        if (body_start != std::string::npos) body_start += 4;
+                        else { body_start = req.find("\n\n"); if (body_start != std::string::npos) body_start += 2; }
+                        size_t body_so_far = (body_start != std::string::npos && body_start < req.size())
+                            ? (req.size() - body_start) : 0;
+                        while (body_so_far < content_len && req.size() < 65536) {
+                            char extra[4096];
+                            ssize_t nr = recv(fd, extra, sizeof(extra), 0);
+                            if (nr <= 0) break;
+                            req.append(extra, static_cast<size_t>(nr));
+                            body_so_far += static_cast<size_t>(nr);
+                        }
+                    } catch (...) {}
+                }
+            }
+        }
+    }
 
     auto lf = req.find('\n');
     if (lf == std::string::npos) { send_response(fd, 400, "text/plain", "Bad Request"); return; }
