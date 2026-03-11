@@ -38,12 +38,43 @@ if(APPLE AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
 elseif(NOT APPLE AND (CMAKE_SYSTEM_PROCESSOR MATCHES "armv7" OR CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64"))
     # Raspberry Pi detection (rough check by processor and system)
     # RPi 3B+, Zero 2W use Cortex-A53
-    # Check /proc/device-tree/model first (most reliable on Pi)
-    execute_process(COMMAND cat /proc/device-tree/model ERROR_QUIET OUTPUT_VARIABLE PI_MODEL)
-    # Also check CPU part number in /proc/cpuinfo (0xd03 = Cortex-A53)
-    execute_process(COMMAND grep -qiE "Cortex-A53|0xd03" /proc/cpuinfo RESULT_VARIABLE IS_A53)
+    # RPi 4 uses Cortex-A72 (part 0xd08)
+    # RPi 5 uses Cortex-A76 (part 0xd0b)
 
-    if(PI_MODEL MATCHES "Raspberry Pi (3|Zero 2)" OR IS_A53 EQUAL 0)
+    # 1. Try 'pinout' command (if installed, usually via python3-gpiozero)
+    execute_process(COMMAND which pinout RESULT_VARIABLE HAS_PINOUT OUTPUT_QUIET ERROR_QUIET)
+    if(HAS_PINOUT EQUAL 0)
+        execute_process(COMMAND pinout ERROR_QUIET OUTPUT_VARIABLE PINOUT_RAW)
+        # Standardize for matching
+        string(TOUPPER "${PINOUT_RAW}" PINOUT_UPPER)
+    endif()
+
+    # 2. Check /proc/device-tree/model (most reliable on Pi)
+    execute_process(COMMAND cat /proc/device-tree/model ERROR_QUIET OUTPUT_VARIABLE PI_MODEL)
+    # 3. Check /proc/device-tree/compatible
+    execute_process(COMMAND cat /proc/device-tree/compatible ERROR_QUIET OUTPUT_VARIABLE PI_COMPAT)
+    # 4. Check CPU part number in /proc/cpuinfo (0xd03 = Cortex-A53, 0xd08 = Cortex-A72, 0xd0b = Cortex-A76)
+    execute_process(COMMAND grep -qiE "0xd03|Part.*0xd03" /proc/cpuinfo RESULT_VARIABLE IS_A53)
+    execute_process(COMMAND grep -qiE "Cortex-A72|0xd08|Part.*0xd08" /proc/cpuinfo RESULT_VARIABLE IS_A72)
+    execute_process(COMMAND grep -qiE "Cortex-A76|0xd0b|Part.*0xd0b" /proc/cpuinfo RESULT_VARIABLE IS_A76)
+
+    if(PINOUT_UPPER MATCHES "RASPBERRY PI 5" OR PI_MODEL MATCHES "Raspberry Pi 5" OR PI_COMPAT MATCHES "raspberrypi,5" OR IS_A76 EQUAL 0)
+        set(ARCH_NAME "Raspberry Pi 5 (Cortex-A76)")
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
+            # Cortex-A76 optimization flags
+            set(ARCH_OPT_FLAGS -march=armv8.2-a+crc+simd -mtune=cortex-a76)
+        else()
+            # 32-bit mode for Pi 5 is unlikely but possible
+            set(ARCH_OPT_FLAGS -march=armv8.2-a+crc+simd -mtune=cortex-a76 -mfpu=neon-fp-armv8 -mfloat-abi=hard)
+        endif()
+    elseif(PINOUT_UPPER MATCHES "RASPBERRY PI 4" OR PI_MODEL MATCHES "Raspberry Pi 4" OR PI_COMPAT MATCHES "raspberrypi,4-model-b" OR IS_A72 EQUAL 0)
+        set(ARCH_NAME "Raspberry Pi 4 (Cortex-A72)")
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
+            set(ARCH_OPT_FLAGS -march=armv8-a+crc+simd -mtune=cortex-a72)
+        else()
+            set(ARCH_OPT_FLAGS -march=armv8-a+crc+simd -mtune=cortex-a72 -mfpu=neon-fp-armv8 -mfloat-abi=hard)
+        endif()
+    elseif(PINOUT_UPPER MATCHES "RASPBERRY PI (3|ZERO 2)" OR PI_MODEL MATCHES "Raspberry Pi (3|Zero 2)" OR PI_COMPAT MATCHES "raspberrypi,(3|zero2)" OR IS_A53 EQUAL 0)
         set(ARCH_NAME "Raspberry Pi 3B+ / Zero 2W (Cortex-A53)")
         if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
             # 64-bit mode doesn't need -mfpu=neon as it's standard

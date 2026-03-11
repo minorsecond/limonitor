@@ -4,7 +4,11 @@ This document describes the hyper-optimizations implemented for different hardwa
 
 #### Compiler-Level Optimizations
 
-The build system (`CMakeLists.txt`) now automatically detects the target architecture and applies the best-known compiler flags for performance and stability.
+The build system (`CMakeLists.txt`) now automatically detects the target architecture and applies the best-known compiler flags for performance and stability. It uses a multi-layered detection strategy:
+1.  **`pinout` command:** If available, it's used to identify the specific Raspberry Pi model.
+2.  **`/proc/device-tree/model`:** A reliable way to identify Pi hardware on Linux.
+3.  **`/proc/device-tree/compatible`:** Provides specific hardware IDs.
+4.  **`/proc/cpuinfo`:** Checks CPU part numbers (e.g., `0xd08` for Cortex-A72).
 
 - **All Platforms (Release mode):**
   - `-O3`: Aggressive optimizations for speed.
@@ -13,6 +17,20 @@ The build system (`CMakeLists.txt`) now automatically detects the target archite
 
 - **Apple Silicon (M1/M2/M3):**
   - `-mcpu=apple-m1`: Optimizes instruction scheduling and pipeline usage specifically for Apple's high-performance cores.
+
+- **Raspberry Pi 5 (Cortex-A76):**
+  - **AArch64 (64-bit):**
+    - `-march=armv8.2-a+crc+simd`: Enables ARMv8.2-A instructions.
+    - `-mtune=cortex-a76`: Tunes code generation for the high-performance Cortex-A76 pipeline.
+
+- **Raspberry Pi 4 (Cortex-A72):**
+  - **AArch64 (64-bit):**
+    - `-march=armv8-a+crc+simd`: Enables ARMv8-A instructions including CRC32 and SIMD extensions.
+    - `-mtune=cortex-a72`: Tunes code generation for the high-performance Cortex-A72 pipeline.
+  - **ARMv7 (32-bit):**
+    - `-march=armv8-a+crc+simd -mtune=cortex-a72`
+    - `-mfpu=neon-fp-armv8`: Enables NEON SIMD and hardware floating point optimizations.
+    - `-mfloat-abi=hard`: Standard for modern Pi 32-bit OS builds.
 
 - **Raspberry Pi 3B+ / Zero 2W (Cortex-A53):**
   - **AArch64 (64-bit):**
