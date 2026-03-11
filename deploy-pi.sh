@@ -57,7 +57,8 @@ case "$1" in
 esac
 
 echo "=== build (using $BUILD_GENERATOR) ==="
-cmake -B build -G "$BUILD_GENERATOR" -DCMAKE_BUILD_TYPE=Release
+GIT_HASH=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+cmake -B build -G "$BUILD_GENERATOR" -DCMAKE_BUILD_TYPE=Release -DGIT_COMMIT_HASH="$GIT_HASH"
 cmake --build build -j$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
 
 echo "=== install ==="
@@ -124,6 +125,21 @@ fi
 
 sudo systemctl enable limonitor
 sudo systemctl restart limonitor
+
+echo "verifying service status and version..."
+sleep 3
+if systemctl is-active --quiet limonitor; then
+    if journalctl -u limonitor -n 50 | grep -q "limonitor $GIT_HASH starting"; then
+        echo "limonitor service is running successfully with commit $GIT_HASH!"
+    else
+        echo "limonitor service is running, but couldn't verify commit $GIT_HASH in logs."
+        echo "Last 10 log lines:"
+        journalctl -u limonitor -n 10 --no-pager
+    fi
+else
+    echo "limonitor service failed to start. check logs: journalctl -u limonitor -n 50"
+    exit 1
+fi
 
 echo "done. status: sudo systemctl status limonitor"
 echo "logs: sudo journalctl -u limonitor -f"

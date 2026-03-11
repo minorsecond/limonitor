@@ -140,6 +140,10 @@ else()
     pkg_check_modules(GIO REQUIRED IMPORTED_TARGET gio-2.0)
 endif()
 
+if(DEFINED GIT_COMMIT_HASH)
+    add_compile_definitions(GIT_COMMIT_HASH="${GIT_COMMIT_HASH}")
+endif()
+
 add_executable(limonitor ${SOURCES})
 target_compile_options(limonitor PRIVATE -Wall -Wextra -Wno-psabi ${COMMON_OPT_FLAGS} ${ARCH_OPT_FLAGS})
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
