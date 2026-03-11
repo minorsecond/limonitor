@@ -15,12 +15,12 @@ a Prometheus metrics endpoint.
 - **High Reliability**: Uses floating-point stability-focused optimizations for precise battery math.
 
 ### Live monitoring
-- Pack voltage, current, SoC, power, and time-remaining
+- Pack voltage, current (battery flow), SoC, system load (estimated), and time-remaining
 - Per-cell voltages with colour-coded imbalance indicator
 - BMS protection fault banner (over/undervoltage, over-temperature, overcurrent, short circuit)
 - Charger state (Charging / Float / Idle), target voltage, max current, PWM duty
 - Solar panel voltage
-- Animated Energy Flow diagram (Solar → Charger → Battery → Load)
+- Animated Energy Flow diagram (Solar → Charger → Battery → Load) with live power distribution
 - SVG history charts for battery voltage/SoC and charger voltage/current/solar
 
 ### Analytics

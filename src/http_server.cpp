@@ -2161,8 +2161,12 @@ std::string HttpServer::flow_json(const BatterySnapshot& bat, const PwrGateSnaps
     o += "  \"solar_voltage\": " + jdbl(chg.valid ? chg.sol_v : 0) + ",\n";
     o += "  \"charger_voltage\": " + jdbl(chg.valid ? chg.ps_v : 0) + ",\n";
     o += "  \"charger_state\": " + jstr(effective_charger_state(chg)) + ",\n";
-    double power_w = chg.valid ? (chg.bat_v * chg.bat_a) : (bat.valid ? bat.power_w : 0);
-    o += "  \"power_watts\": " + jdbl(std::abs(power_w)) + ",\n";
+    double bat_pwr = bat.valid ? bat.power_w : 0;
+    double chg_pwr = chg.valid ? (chg.bat_v * chg.bat_a) : 0;
+    double load_w = std::max(0.0, chg_pwr + bat_pwr);
+    o += "  \"power_watts\": " + jdbl(load_w) + ",\n";
+    o += "  \"battery_power_w\": " + jdbl(bat_pwr) + ",\n";
+    o += "  \"charger_power_w\": " + jdbl(chg_pwr) + ",\n";
     // Shelly grid stats (AC side — true wall power, upstream of PSU)
     o += "  \"grid_enabled\": " + std::string(shelly.ok ? "true" : "false") + ",\n";
     o += "  \"grid_relay_on\": " + std::string(shelly.relay_on ? "true" : "false") + ",\n";
@@ -2520,9 +2524,8 @@ html.light .pwr-modal-submit{background:#16a34a}
         s.valid ? s.cell_max_v : 0.0);
     o += buf;
 
-    // Current
     snprintf(buf, sizeof(buf),
-        "<div class=\"stat\"><div class=\"stat-lbl\">Current</div>"
+        "<div class=\"stat\" title=\"Battery current. Positive = discharging (from battery), Negative = charging (into battery).\"><div class=\"stat-lbl\">Current</div>"
         "<div class=\"%s\" id=\"sa-wrap\"><span id=\"sa\">%.2f</span><span class=\"u\">A</span></div>"
         "<div class=\"stat-sub\" id=\"sa-sub\">%s</div></div>\n",
         cur_cls, std::abs(s.valid ? s.current_a : 0.0), cur_dir);
@@ -2540,12 +2543,17 @@ html.light .pwr-modal-submit{background:#16a34a}
     o += buf;
 
     // Power
+    double load_w = 0;
+    if (s.valid) {
+        double chg_pwr = pg.valid ? (pg.bat_v * pg.bat_a) : 0;
+        load_w = std::max(0.0, chg_pwr + s.power_w);
+    }
     snprintf(buf, sizeof(buf),
-        "<div class=\"stat\"><div class=\"stat-lbl\">Power</div>"
-        "<div class=\"sv\"><span id=\"spw\">%.1f</span><span class=\"u\">W</span></div>"
-        "<div class=\"stat-sub\" id=\"spw-sub\">%.1f&nbsp;h&nbsp;%s</div></div>\n",
-        s.valid ? std::abs(s.power_w) : 0.0,
-        s.time_remaining_h, rem_dir);
+        "<div class=\"stat\" id=\"spw-panel\" title=\"Estimated total system load (Charger Output + Battery Flow). If charging, this is Charger Power minus Battery Charge Power.\">"
+        "<div class=\"stat-lbl\">System Load</div>"
+        "<div class=\"sv ok\"><span id=\"spw\">%.1f</span><span class=\"u\">W</span></div>"
+        "<div class=\"stat-sub\" id=\"spw-sub\">Battery: %.1f&nbsp;W&nbsp;%s</div></div>\n",
+        load_w, std::abs(s.valid ? s.power_w : 0.0), (s.valid && s.power_w < -0.1) ? "IN" : "OUT");
     o += buf;
 
     o += "</div>\n"; // .stats
@@ -3021,9 +3029,14 @@ function upBat(){fetch('/api/status').then(function(r){return r.json()}).then(fu
   var v=d.voltage_v||0;if(v<1)v=51.2
   var remWh=d.remaining_ah*v,nomWh=d.nominal_ah*v
   $('ssoc-sub').textContent=fmt(d.remaining_ah,2)+'\xa0/\xa0'+fmt(d.nominal_ah,2)+'\xa0Ah\xa0('+fmt(remWh,0)+'\xa0/\xa0'+fmt(nomWh,0)+'\xa0Wh)'
-  $('spw').textContent=fmt(Math.abs(d.power_w),1)
+  
+  // Power & Load calculation
+  window.lastBatV = d.voltage_v;
+  window.lastBatPwr = d.power_w;
+  window.lastBatPwrIn = (d.power_w < -0.1);
   var rd=a<-0.01?'to full':'to empty'
-  $('spw-sub').textContent=fmt(d.time_remaining_h,1)+'\xa0h\xa0'+rd
+  updatePowerStat();
+
   $('bat-cap').textContent=fmt(d.remaining_ah,2)+' / '+fmt(d.nominal_ah,2)+' Ah ('+fmt(remWh,0)+' / '+fmt(nomWh,0)+' Wh)'
   $('bat-rem').textContent=fmt(d.time_remaining_h,1)+' h '+rd
   if(d.cells&&d.cells.length){
@@ -3045,6 +3058,8 @@ function upBat(){fetch('/api/status').then(function(r){return r.json()}).then(fu
 
 function upChg(){fetch('/api/charger').then(function(r){return r.json()}).then(function(d){
   if(!d.valid)return
+  window.lastChgPwr = (d.bat_v * d.bat_a);
+  updatePowerStat();
   var sc=d.state==='Charging'||d.state==='Float'?'ok':'warn'
   if($('chg-state'))$('chg-state').innerHTML='<span class="'+sc+'">'+d.state+'</span>'
   if($('chg-ps'))$('chg-ps').textContent=fmt(d.ps_v,2)+' V'
@@ -3056,6 +3071,50 @@ function upChg(){fetch('/api/charger').then(function(r){return r.json()}).then(f
   if($('chg-min'))$('chg-min').textContent=d.minutes+' min'
   if($('chg-tmp'))$('chg-tmp').textContent=d.temp+' (raw)'
 }).catch(function(){})}
+
+window.lastBatV = 13.3;
+window.lastBatPwr = 0;
+window.lastBatPwrIn = false;
+window.lastChgPwr = 0;
+
+function updatePowerStat() {
+  var loadW = Math.max(0, (window.lastChgPwr || 0) + (window.lastBatPwr || 0));
+  var pwrEl = $('spw');
+  if (pwrEl) pwrEl.textContent = fmt(loadW, 1);
+  var subEl = $('spw-sub');
+  if (subEl) {
+    var pwr = Math.abs(window.lastBatPwr || 0);
+    var dir = window.lastBatPwrIn ? 'IN' : 'OUT';
+    subEl.textContent = 'Battery: ' + fmt(pwr, 1) + ' W ' + dir;
+  }
+  var panEl = $('spw-panel');
+  if (panEl) {
+    var chgP = window.lastChgPwr || 0;
+    var batP = window.lastBatPwr || 0;
+    var tooltip = "Estimated total system load (Charger Output + Battery Flow).\n" +
+                  "Formula: Charger (" + fmt(chgP, 1) + "W) + Battery (" + fmt(batP, 1) + "W) = " + fmt(loadW, 1) + "W\n";
+    if (window.lastBatPwrIn) {
+      tooltip += "Battery is currently CHARGING (" + fmt(Math.abs(batP), 1) + "W into battery).";
+    } else if (batP > 0.1) {
+      tooltip += "Battery is currently DISCHARGING (" + fmt(batP, 1) + "W from battery).";
+    } else {
+      tooltip += "Battery is IDLE.";
+    }
+    panEl.title = tooltip;
+  }
+  var saEl = $('sa-wrap');
+  if (saEl) {
+    var pwr = window.lastBatPwr || 0;
+    var v = window.lastBatV || 13.3;
+    var a = pwr / v;
+    var tooltip = "Battery current. Positive = discharging (from battery), Negative = charging (into battery).\n" +
+                  "Current: " + fmt(a, 2) + " A\n";
+    if (a < -0.01) tooltip += "Charging battery at " + fmt(Math.abs(a), 2) + " A";
+    else if (a > 0.01) tooltip += "Discharging battery at " + fmt(a, 2) + " A";
+    else tooltip += "Battery idle";
+    saEl.parentElement.title = tooltip;
+  }
+}
 
 setInterval(upBat,5000); setInterval(upChg,5000)
 upBat(); upChg()
