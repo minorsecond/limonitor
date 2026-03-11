@@ -192,7 +192,8 @@ void TUI::draw(const BatterySnapshot& snap, const std::string& ble_st,
         mvprintw(row, 3, "Volt hist: ");
         for (int i = start; i < (int)hist.size(); ++i) {
             int lv = static_cast<int>((hist[i].total_voltage_v - vlo) / rng * 7.0 + 0.5);
-            if (lv < 0) lv = 0; if (lv > 7) lv = 7;
+            if (lv < 0) lv = 0;
+            if (lv > 7) lv = 7;
             mvaddch(row, 14 + (i - start), spark_ch[lv]);
         }
         row++;
@@ -217,7 +218,8 @@ void TUI::draw(const BatterySnapshot& snap, const std::string& ble_st,
             int cc = is_max ? C_RED : (is_min ? C_YELLOW : C_GREEN);
             mvprintw(row, 3, "C%02zu %.3fV ", i + 1, cv);
             double frac = (cv - 2.8) / (3.65 - 2.8);
-            if (frac < 0) frac = 0; if (frac > 1) frac = 1;
+            if (frac < 0) frac = 0;
+            if (frac > 1) frac = 1;
             draw_bar(row, 13, cell_bar_w, frac, cc);
 
             size_t j = i + n_show;
@@ -228,7 +230,8 @@ void TUI::draw(const BatterySnapshot& snap, const std::string& ble_st,
                 int col2 = cols / 2;
                 mvprintw(row, col2, "C%02zu %.3fV ", j + 1, cv2);
                 double frac2 = (cv2 - 2.8) / (3.65 - 2.8);
-                if (frac2 < 0) frac2 = 0; if (frac2 > 1) frac2 = 1;
+                if (frac2 < 0) frac2 = 0;
+                if (frac2 > 1) frac2 = 1;
                 draw_bar(row, col2 + 10, cell_bar_w, frac2, cc2);
             }
             row++;

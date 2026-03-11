@@ -440,7 +440,7 @@ SolarForecastWeekResult WeatherForecast::get_forecast_week(double panel_watts, d
         time_t first_ts = static_cast<time_t>(std::get<0>(day_slots.front()));
         struct tm tm_buf{};
         localtime_r(&first_ts, &tm_buf);
-        char date_buf[16];
+        char date_buf[32];
         std::snprintf(date_buf, sizeof(date_buf), "%04d-%02d-%02d",
                       tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday);
         d.date = date_buf;
@@ -563,7 +563,7 @@ SolarForecastWeekResult WeatherForecast::get_forecast_week(double panel_watts, d
             time_t tt = static_cast<time_t>(de.dt);
             struct tm tm_buf{};
             localtime_r(&tt, &tm_buf);
-            char date_buf[16];
+            char date_buf[32];
             std::snprintf(date_buf, sizeof(date_buf), "%04d-%02d-%02d",
                           tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday);
             if (existing_dates.count(date_buf)) {
