@@ -15,6 +15,26 @@
 #include <curl/curl.h>
 #endif
 
+std::vector<double> project_battery_soc(double start_soc_pct, double capacity_wh,
+                                        const std::vector<double>& generation_wh,
+                                        const std::vector<double>& usage_wh) {
+    size_t n = std::min(generation_wh.size(), usage_wh.size());
+    std::vector<double> result;
+    result.reserve(n);
+    if (capacity_wh <= 0 || n == 0) {
+        result.resize(n, std::clamp(start_soc_pct, 0.0, 100.0));
+        return result;
+    }
+    double soc = std::clamp(start_soc_pct, 0.0, 100.0);
+    for (size_t i = 0; i < n; ++i) {
+        double net_wh = generation_wh[i] - usage_wh[i];
+        soc += (net_wh / capacity_wh) * 100.0;
+        soc = std::clamp(soc, 0.0, 100.0);
+        result.push_back(soc);
+    }
+    return result;
+}
+
 WeatherForecast::WeatherForecast(const WeatherConfig& cfg, Database* db)
     : cfg_(cfg), db_(db)
 {

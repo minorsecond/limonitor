@@ -894,10 +894,17 @@ std::string HttpServer::solar_forecast_week_json(const SolarForecastWeekResult& 
              ",\"n\":" + std::to_string(n) + "}";
     }
     o += "],\n";
-    o += "  \"slots\": [";
+    // Pre-compute per-slot generation and usage in Wh for SoC projection
+    std::vector<double> gen_wh_vec, use_wh_vec;
+    gen_wh_vec.reserve(r.slots.size());
+    use_wh_vec.reserve(r.slots.size());
+
+    struct SlotUsage { double avg; double sd; double kwh; double kwh_lo; double kwh_hi; };
+    std::vector<SlotUsage> slot_usage;
+    slot_usage.reserve(r.slots.size());
+
     for (size_t i = 0; i < r.slots.size(); ++i) {
         const auto& s = r.slots[i];
-        if (i) o += ",";
         int slot_idx = -1;
         {
             time_t tt = static_cast<time_t>(s.timestamp);
@@ -912,15 +919,29 @@ std::string HttpServer::solar_forecast_week_json(const SolarForecastWeekResult& 
         double use_kwh = use_avg * 3.0 / 1000.0;
         double use_kwh_lo = std::max(0.0, (use_avg - 1.96 * use_sd) * 3.0 / 1000.0);
         double use_kwh_hi = (use_avg + 1.96 * use_sd) * 3.0 / 1000.0;
+        slot_usage.push_back({use_avg, use_sd, use_kwh, use_kwh_lo, use_kwh_hi});
+        gen_wh_vec.push_back(s.kwh * 1000.0);
+        use_wh_vec.push_back(use_kwh * 1000.0);
+    }
+
+    double cap_wh = r.nominal_ah * r.battery_voltage;
+    auto soc_proj = project_battery_soc(r.current_soc_pct, cap_wh, gen_wh_vec, use_wh_vec);
+
+    o += "  \"slots\": [";
+    for (size_t i = 0; i < r.slots.size(); ++i) {
+        const auto& s = r.slots[i];
+        const auto& su = slot_usage[i];
+        if (i) o += ",";
         o += "{\"ts\":" + std::to_string(s.timestamp) +
              ",\"kwh\":" + jdbl(s.kwh, 4) +
              ",\"kwh_lo\":" + jdbl(s.kwh_lo, 4) +
              ",\"kwh_hi\":" + jdbl(s.kwh_hi, 4) +
              ",\"cloud\":" + jdbl(s.cloud_cover, 2) +
              ",\"day\":" + std::string(s.daytime ? "true" : "false") +
-             ",\"use_kwh\":" + jdbl(use_kwh, 4) +
-             ",\"use_lo\":" + jdbl(use_kwh_lo, 4) +
-             ",\"use_hi\":" + jdbl(use_kwh_hi, 4) + "}";
+             ",\"use_kwh\":" + jdbl(su.kwh, 4) +
+             ",\"use_lo\":" + jdbl(su.kwh_lo, 4) +
+             ",\"use_hi\":" + jdbl(su.kwh_hi, 4) +
+             ",\"soc_pct\":" + jdbl(i < soc_proj.size() ? soc_proj[i] : 0, 1) + "}";
     }
     o += "],\n";
     o += "  \"solar_perf_coeff\": " + jdbl(ext_cache->avg_coeff, 3) + ",\n";
@@ -2815,13 +2836,10 @@ td .rc-main{font-weight:600}
          "var ca=niceAxis(cumMax);\n"
          "var socArr=[];\n"
          "if(showSoc&&capWh>0){\n"
-         "var initSoc=lastDailyData.current_soc_pct||0;\n"
-         "var soc=initSoc;\n"
+         "var lastSoc=lastDailyData.current_soc_pct||0;\n"
          "slots.forEach(function(s){\n"
-         "var netWh=(s.kwh-(s.use_kwh||0))*1000;\n"
-         "soc+=netWh/capWh*100;\n"
-         "soc=Math.max(0,Math.min(100,soc));\n"
-         "socArr.push(soc);\n"
+         "if(typeof s.soc_pct==='number'){lastSoc=s.soc_pct;socArr.push(lastSoc);}\n"
+         "else{var netWh=(s.kwh-(s.use_kwh||0))*1000;lastSoc+=(netWh/capWh)*100;lastSoc=Math.max(0,Math.min(100,lastSoc));socArr.push(lastSoc);}\n"
          "});}\n"
          "function ypSoc(pct){return PT+CH-(pct/100)*CH;}\n"
          "function xp(ts){return PL+((ts*1000-t0)/tspan)*CW;}\n"

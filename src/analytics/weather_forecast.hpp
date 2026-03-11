@@ -66,6 +66,12 @@ struct SolarForecastWeekResult {
     bool realistic_from_history{false};
 };
 
+// Compute per-slot projected battery SoC (%) given solar generation and usage per slot.
+// Returns one SoC value per slot. Clamped to [0, 100].
+std::vector<double> project_battery_soc(double start_soc_pct, double capacity_wh,
+                                        const std::vector<double>& generation_wh,
+                                        const std::vector<double>& usage_wh);
+
 class WeatherForecast {
 public:
     explicit WeatherForecast(const WeatherConfig& cfg, Database* db = nullptr);

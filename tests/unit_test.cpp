@@ -520,6 +520,187 @@ static void test_parse_daily_entries_empty() {
     ASSERT(entries2.empty(), "empty list returns empty entries");
 }
 
+// ---------- project_battery_soc tests ----------
+
+static bool approx_eq(double a, double b, double tol = 0.01) {
+    return std::fabs(a - b) < tol;
+}
+
+static void test_soc_basic_solar_charge() {
+    // 50% start, 5000 Wh capacity, 500 Wh solar per slot, no usage
+    // Each slot adds (500/5000)*100 = 10%
+    std::vector<double> gen = {500, 500, 500};
+    std::vector<double> use = {0, 0, 0};
+    auto soc = project_battery_soc(50.0, 5000.0, gen, use);
+    ASSERT(soc.size() == 3, "soc_basic_charge: 3 slots returned");
+    ASSERT(approx_eq(soc[0], 60.0), "soc_basic_charge: slot 0 = 60%");
+    ASSERT(approx_eq(soc[1], 70.0), "soc_basic_charge: slot 1 = 70%");
+    ASSERT(approx_eq(soc[2], 80.0), "soc_basic_charge: slot 2 = 80%");
+}
+
+static void test_soc_basic_drain() {
+    // 80% start, 5000 Wh cap, no solar, 250 Wh usage per slot
+    // Each slot drains (250/5000)*100 = 5%
+    std::vector<double> gen = {0, 0, 0, 0};
+    std::vector<double> use = {250, 250, 250, 250};
+    auto soc = project_battery_soc(80.0, 5000.0, gen, use);
+    ASSERT(soc.size() == 4, "soc_basic_drain: 4 slots returned");
+    ASSERT(approx_eq(soc[0], 75.0), "soc_basic_drain: slot 0 = 75%");
+    ASSERT(approx_eq(soc[1], 70.0), "soc_basic_drain: slot 1 = 70%");
+    ASSERT(approx_eq(soc[2], 65.0), "soc_basic_drain: slot 2 = 65%");
+    ASSERT(approx_eq(soc[3], 60.0), "soc_basic_drain: slot 3 = 60%");
+}
+
+static void test_soc_clamped_at_100() {
+    // 95% start, big solar push should clamp at 100
+    std::vector<double> gen = {1000, 1000};
+    std::vector<double> use = {0, 0};
+    auto soc = project_battery_soc(95.0, 5000.0, gen, use);
+    ASSERT(soc.size() == 2, "soc_clamp_100: 2 slots");
+    ASSERT(approx_eq(soc[0], 100.0), "soc_clamp_100: slot 0 clamped at 100%");
+    ASSERT(approx_eq(soc[1], 100.0), "soc_clamp_100: slot 1 stays at 100%");
+}
+
+static void test_soc_clamped_at_0() {
+    // 5% start, heavy usage drains past 0
+    std::vector<double> gen = {0, 0, 0};
+    std::vector<double> use = {500, 500, 500};
+    auto soc = project_battery_soc(5.0, 5000.0, gen, use);
+    ASSERT(soc.size() == 3, "soc_clamp_0: 3 slots");
+    ASSERT(approx_eq(soc[0], 0.0), "soc_clamp_0: slot 0 clamped at 0%");
+    ASSERT(approx_eq(soc[1], 0.0), "soc_clamp_0: slot 1 stays at 0%");
+    ASSERT(approx_eq(soc[2], 0.0), "soc_clamp_0: slot 2 stays at 0%");
+}
+
+static void test_soc_net_zero() {
+    // Generation exactly equals usage — SoC stays flat
+    std::vector<double> gen = {200, 200, 200};
+    std::vector<double> use = {200, 200, 200};
+    auto soc = project_battery_soc(60.0, 5000.0, gen, use);
+    ASSERT(soc.size() == 3, "soc_net_zero: 3 slots");
+    ASSERT(approx_eq(soc[0], 60.0), "soc_net_zero: slot 0 unchanged");
+    ASSERT(approx_eq(soc[1], 60.0), "soc_net_zero: slot 1 unchanged");
+    ASSERT(approx_eq(soc[2], 60.0), "soc_net_zero: slot 2 unchanged");
+}
+
+static void test_soc_day_night_cycle() {
+    // Simulate: night drain, day charge, night drain
+    // 5120 Wh capacity (100Ah * 51.2V)
+    double cap = 5120.0;
+    // Night: 80 Wh usage per 3h slot, no solar (4 slots = 12h)
+    // Day: 400 Wh solar, 80 Wh usage per slot (4 slots = 12h)
+    // Night: 80 Wh usage per slot (4 slots)
+    std::vector<double> gen = {0, 0, 0, 0,  400, 400, 400, 400,  0, 0, 0, 0};
+    std::vector<double> use = {80, 80, 80, 80,  80, 80, 80, 80,  80, 80, 80, 80};
+    auto soc = project_battery_soc(100.0, cap, gen, use);
+    ASSERT(soc.size() == 12, "soc_day_night: 12 slots");
+    // After 4 night slots: 100 - 4*(80/5120)*100 = 100 - 6.25 = 93.75
+    ASSERT(approx_eq(soc[3], 93.75), "soc_day_night: end of night 1 ~93.75%");
+    // After 4 day slots: +4*(320/5120)*100 = +25
+    ASSERT(approx_eq(soc[7], 100.0), "soc_day_night: end of day clamped at 100%");
+    // After 4 more night slots: 100 - 6.25 = 93.75
+    ASSERT(approx_eq(soc[11], 93.75), "soc_day_night: end of night 2 ~93.75%");
+}
+
+static void test_soc_empty_inputs() {
+    std::vector<double> gen, use;
+    auto soc = project_battery_soc(50.0, 5000.0, gen, use);
+    ASSERT(soc.empty(), "soc_empty: no slots returns empty");
+}
+
+static void test_soc_zero_capacity() {
+    // Zero capacity should return flat start_soc
+    std::vector<double> gen = {500, 500};
+    std::vector<double> use = {100, 100};
+    auto soc = project_battery_soc(50.0, 0.0, gen, use);
+    ASSERT(soc.size() == 2, "soc_zero_cap: 2 slots");
+    ASSERT(approx_eq(soc[0], 50.0), "soc_zero_cap: slot 0 = start SoC");
+    ASSERT(approx_eq(soc[1], 50.0), "soc_zero_cap: slot 1 = start SoC");
+}
+
+static void test_soc_negative_capacity() {
+    std::vector<double> gen = {500};
+    std::vector<double> use = {100};
+    auto soc = project_battery_soc(50.0, -100.0, gen, use);
+    ASSERT(soc.size() == 1, "soc_neg_cap: 1 slot");
+    ASSERT(approx_eq(soc[0], 50.0), "soc_neg_cap: returns clamped start SoC");
+}
+
+static void test_soc_start_above_100() {
+    // Invalid start SoC above 100 should be clamped
+    std::vector<double> gen = {0};
+    std::vector<double> use = {0};
+    auto soc = project_battery_soc(150.0, 5000.0, gen, use);
+    ASSERT(soc.size() == 1, "soc_start_gt100: 1 slot");
+    ASSERT(approx_eq(soc[0], 100.0), "soc_start_gt100: clamped to 100%");
+}
+
+static void test_soc_start_below_0() {
+    // Invalid start SoC below 0 should be clamped
+    std::vector<double> gen = {500};
+    std::vector<double> use = {0};
+    auto soc = project_battery_soc(-10.0, 5000.0, gen, use);
+    ASSERT(soc.size() == 1, "soc_start_lt0: 1 slot");
+    ASSERT(approx_eq(soc[0], 10.0), "soc_start_lt0: starts at 0, gains 10%");
+}
+
+static void test_soc_mismatched_lengths() {
+    // gen has more elements than use — truncates to shorter
+    std::vector<double> gen = {500, 500, 500};
+    std::vector<double> use = {100, 100};
+    auto soc = project_battery_soc(50.0, 5000.0, gen, use);
+    ASSERT(soc.size() == 2, "soc_mismatch: uses min(3,2) = 2 slots");
+}
+
+static void test_soc_realistic_scenario() {
+    // Real-world LiFePO4 system: 100Ah * 51.2V = 5120 Wh
+    // Start at 45%, 7 day forecast with day/night cycles
+    // Usage: ~27W continuous = 81 Wh per 3h slot
+    // Solar: varies by cloud cover
+    double cap = 5120.0;
+    // 2 full days (16 slots): 8 night + 4 day + 4 night (simplified)
+    // Day 1: slots 0-3 night, 4-7 day (clear), 8-11 night
+    // Day 2: slots 12-15 day (cloudy)
+    std::vector<double> gen, use;
+    for (int i = 0; i < 16; ++i) {
+        use.push_back(81.0);
+        bool daytime = (i >= 4 && i <= 7) || (i >= 12 && i <= 15);
+        if (daytime && i <= 7) gen.push_back(400.0);      // clear day
+        else if (daytime) gen.push_back(100.0);             // cloudy day
+        else gen.push_back(0.0);
+    }
+    auto soc = project_battery_soc(45.0, cap, gen, use);
+    ASSERT(soc.size() == 16, "soc_realistic: 16 slots");
+    // All values should be between 0 and 100
+    bool all_valid = true;
+    for (double v : soc) {
+        if (v < 0.0 || v > 100.0) { all_valid = false; break; }
+    }
+    ASSERT(all_valid, "soc_realistic: all values in [0, 100]");
+    // After first night (4 slots of -81Wh each): 45 - 4*(81/5120)*100 = 45 - 6.33 = 38.67
+    ASSERT(approx_eq(soc[3], 38.67, 0.1), "soc_realistic: end of night 1 ~38.7%");
+    // After clear day (4 slots of +319Wh each): 38.67 + 4*(319/5120)*100 = 38.67 + 24.92 = 63.59
+    ASSERT(approx_eq(soc[7], 63.59, 0.1), "soc_realistic: end of clear day ~63.6%");
+    // After second night + cloudy day, should still be > 0
+    ASSERT(soc[15] > 0.0, "soc_realistic: doesn't hit 0 in 2 days");
+}
+
+static void test_soc_full_drain_recovery() {
+    // Battery drains to 0, then solar brings it back
+    double cap = 5000.0;
+    std::vector<double> gen = {0, 0, 0, 0, 1000, 1000, 1000};
+    std::vector<double> use = {500, 500, 500, 500, 0, 0, 0};
+    auto soc = project_battery_soc(30.0, cap, gen, use);
+    ASSERT(soc.size() == 7, "soc_drain_recover: 7 slots");
+    // After 3 slots: 30 - 3*10 = 0 (clamped)
+    ASSERT(approx_eq(soc[2], 0.0), "soc_drain_recover: hits 0% at slot 2");
+    ASSERT(approx_eq(soc[3], 0.0), "soc_drain_recover: stays 0% at slot 3");
+    // Recovery: each slot adds 20%
+    ASSERT(approx_eq(soc[4], 20.0), "soc_drain_recover: slot 4 recovers to 20%");
+    ASSERT(approx_eq(soc[5], 40.0), "soc_drain_recover: slot 5 = 40%");
+    ASSERT(approx_eq(soc[6], 60.0), "soc_drain_recover: slot 6 = 60%");
+}
+
 int main() {
     std::fprintf(stderr, "\n=== limonitor unit tests ===\n\n");
 
@@ -536,6 +717,21 @@ int main() {
     test_parse_daily_entries_nested_clouds();
     test_parse_daily_entries_empty();
     test_forecast_week_extended_cloud_values();
+
+    test_soc_basic_solar_charge();
+    test_soc_basic_drain();
+    test_soc_clamped_at_100();
+    test_soc_clamped_at_0();
+    test_soc_net_zero();
+    test_soc_day_night_cycle();
+    test_soc_empty_inputs();
+    test_soc_zero_capacity();
+    test_soc_negative_capacity();
+    test_soc_start_above_100();
+    test_soc_start_below_0();
+    test_soc_mismatched_lengths();
+    test_soc_realistic_scenario();
+    test_soc_full_drain_recovery();
 
     std::fprintf(stderr, "\n=== %d failure(s) ===\n", g_failures);
     return g_failures > 0 ? 1 : 0;
