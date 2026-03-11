@@ -54,7 +54,8 @@ private:
     static std::string charger_json(const PwrGateSnapshot& pg);
     static std::string charger_history_json(const std::vector<PwrGateSnapshot>& snaps);
     static std::string flow_json(const BatterySnapshot& bat, const PwrGateSnapshot& chg,
-                                  const shelly::Status& shelly = {});
+                                  const shelly::Status& shelly, const DataStore& store,
+                                  const AnalyticsSnapshot& an);
     shelly::Status fetch_shelly_status();  // reads from cache — zero latency
     void shelly_poll_loop();               // background thread — polls Shelly every N seconds
     static std::string grid_event_banner_js();

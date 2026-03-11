@@ -734,7 +734,7 @@ void HttpServer::handle(int fd) {
         send_response(fd, 200, "application/json",
                       charger_history_json(store_.pwrgate_history(count)));
     } else if (path == "/api/flow") {
-        send_response(fd, 200, "application/json", flow_json(snap, pg, fetch_shelly_status()));
+        send_response(fd, 200, "application/json", flow_json(snap, pg, fetch_shelly_status(), store_, store_.analytics()));
     } else if (path == "/api/tx_events") {
         size_t count = 100;
         auto ni = query.find("n=");
@@ -2153,7 +2153,8 @@ void HttpServer::shelly_poll_loop() {
 }
 
 std::string HttpServer::flow_json(const BatterySnapshot& bat, const PwrGateSnapshot& chg,
-                                   const shelly::Status& shelly) {
+                                  const shelly::Status& shelly, const DataStore& /*store*/,
+                                  const AnalyticsSnapshot& an) {
     std::string o = "{\n";
     o += "  \"battery_voltage\": " + jdbl(bat.valid ? bat.total_voltage_v : 0) + ",\n";
     o += "  \"battery_current\": " + jdbl(bat.valid ? bat.current_a : 0) + ",\n";
@@ -2163,7 +2164,26 @@ std::string HttpServer::flow_json(const BatterySnapshot& bat, const PwrGateSnaps
     o += "  \"charger_state\": " + jstr(effective_charger_state(chg)) + ",\n";
     double bat_pwr = bat.valid ? bat.power_w : 0;
     double chg_pwr = chg.valid ? (chg.bat_v * chg.bat_a) : 0;
-    double load_w = std::max(0.0, chg_pwr + bat_pwr);
+    
+    // System load estimation logic:
+    // 1) Direct DC load (Charger Output + Battery Discharge)
+    double load_w = chg_pwr + bat_pwr;
+    
+    // 2) If Shelly grid power is available, we can estimate DC load from AC side
+    //    assuming ~85% PSU efficiency and subtracting battery charge power.
+    if (load_w < 0.1 && shelly.ok && shelly.power_w > 5.0) {
+        double dc_from_ac = std::max(0.0, shelly.power_w * 0.85);
+        // If battery is charging, subtract that power from the DC total to find the system load.
+        // If battery current is negative (charging), bat_pwr is negative.
+        double net_load = dc_from_ac + (bat_pwr < 0 ? bat_pwr : 0);
+        if (net_load > 0.1) load_w = net_load;
+    } else if (load_w < 0.1) {
+        // Fallback to historical average from analytics if available
+        if (an.avg_load_watts > 0.1) load_w = an.avg_load_watts;
+    }
+    
+    load_w = std::max(0.0, load_w);
+
     o += "  \"power_watts\": " + jdbl(load_w) + ",\n";
     o += "  \"battery_power_w\": " + jdbl(bat_pwr) + ",\n";
     o += "  \"charger_power_w\": " + jdbl(chg_pwr) + ",\n";
@@ -2544,16 +2564,34 @@ html.light .pwr-modal-submit{background:#16a34a}
 
     // Power
     double load_w = 0;
+    bool load_estimated = false;
     if (s.valid) {
         double chg_pwr = pg.valid ? (pg.bat_v * pg.bat_a) : 0;
-        load_w = std::max(0.0, chg_pwr + s.power_w);
+        load_w = chg_pwr + s.power_w;
+        
+    // Improve load visibility when running on grid with full battery.
+    // If direct DC measurements show 0 load but we have historical data or grid power, use it.
+    if (load_w < 0.1) {
+        // We can't easily fetch shelly status here because it's a static method, 
+        // but we can check the historical average from analytics since we have 'a'.
+        if (a.avg_load_watts > 0.1) {
+            // Fallback to historical average if we know the system is likely 'on'
+            load_w = a.avg_load_watts;
+            load_estimated = true;
+        }
     }
+        load_w = std::max(0.0, load_w);
+    }
+    
+    std::string tooltip = "Estimated total system load (Charger Output + Battery Flow).";
+    if (load_estimated) tooltip += " (Estimated from historical or grid data)";
+
     snprintf(buf, sizeof(buf),
-        "<div class=\"stat\" id=\"spw-panel\" title=\"Estimated total system load (Charger Output + Battery Flow). If charging, this is Charger Power minus Battery Charge Power.\">"
+        "<div class=\"stat\" id=\"spw-panel\" title=\"%s\">"
         "<div class=\"stat-lbl\">System Load</div>"
         "<div class=\"sv ok\"><span id=\"spw\">%.1f</span><span class=\"u\">W</span></div>"
         "<div class=\"stat-sub\" id=\"spw-sub\">Battery: %.1f&nbsp;W&nbsp;%s</div></div>\n",
-        load_w, std::abs(s.valid ? s.power_w : 0.0), (s.valid && s.power_w < -0.1) ? "IN" : "OUT");
+        tooltip.c_str(), load_w, std::abs(s.valid ? s.power_w : 0.0), (s.valid && s.power_w < -0.1) ? "IN" : "OUT");
     o += buf;
 
     o += "</div>\n"; // .stats
@@ -3078,7 +3116,24 @@ window.lastBatPwrIn = false;
 window.lastChgPwr = 0;
 
 function updatePowerStat() {
-  var loadW = Math.max(0, (window.lastChgPwr || 0) + (window.lastBatPwr || 0));
+  var loadW = (window.lastChgPwr || 0) + (window.lastBatPwr || 0);
+  
+  // Client-side estimation matching server logic
+  var isEstimated = false;
+  if (window.lastGridPwr !== undefined) {
+    if (loadW < 0.1) {
+        var gridW = window.lastGridPwr || 0;
+        if (gridW > 5.0) {
+            loadW = Math.max(0, gridW * 0.85 + (window.lastBatPwrIn ? window.lastBatPwr : 0));
+            isEstimated = true;
+        } else if (window.avgLoadWatts > 0.1) {
+            loadW = window.avgLoadWatts;
+            isEstimated = true;
+        }
+    }
+  }
+  loadW = Math.max(0, loadW);
+
   var pwrEl = $('spw');
   if (pwrEl) pwrEl.textContent = fmt(loadW, 1);
   var subEl = $('spw-sub');
@@ -3092,7 +3147,10 @@ function updatePowerStat() {
     var chgP = window.lastChgPwr || 0;
     var batP = window.lastBatPwr || 0;
     var tooltip = "Estimated total system load (Charger Output + Battery Flow).\n" +
-                  "Formula: Charger (" + fmt(chgP, 1) + "W) + Battery (" + fmt(batP, 1) + "W) = " + fmt(loadW, 1) + "W\n";
+                  "Formula: Charger (" + fmt(chgP, 1) + "W) + Battery (" + fmt(batP, 1) + "W) = " + fmt(chgP+batP, 1) + "W\n";
+    if (isEstimated) {
+      tooltip += "Current value is ESTIMATED (Real-time sensors reporting 0 while on grid or based on history).\n";
+    }
     if (window.lastBatPwrIn) {
       tooltip += "Battery is currently CHARGING (" + fmt(Math.abs(batP), 1) + "W into battery).";
     } else if (batP > 0.1) {
@@ -3121,6 +3179,14 @@ upBat(); upChg()
 
 function upFlow(){fetch('/api/flow').then(function(r){return r.json()}).then(function(d){
   lastFlowData=d;renderFlowDiagram(d)
+  if(d.battery_current !== undefined) {
+    window.lastBatV = d.battery_voltage;
+    window.lastBatPwr = d.battery_power_w;
+    window.lastBatPwrIn = d.battery_current < -0.1;
+    window.lastChgPwr = d.charger_power_w;
+    window.lastGridPwr = d.grid_power_w;
+    updatePowerStat();
+  }
 }).catch(function(){})}
 var lastFlowData=null
 setInterval(upFlow,3000); upFlow()
@@ -3204,6 +3270,8 @@ function upAnalytics(){fetch('/api/analytics').then(function(r){return r.json()}
       ts==='Warning'?'T1 '+d.temp1_c.toFixed(1)+'°C, T2 '+d.temp2_c.toFixed(1)+'°C (≥50)':''
     sct('an-temp-status', ts==='Normal'?'ok':ts==='Warm'?'warn':'err', ts, tsTip)
   }
+  window.avgLoadWatts = d.avg_load_watts || 0;
+  updatePowerStat();
   if(d.efficiency_valid&&d.charger_efficiency>=0){
     var eff=d.charger_efficiency*100
     var effTip=eff<80?eff.toFixed(1)+'% — check for losses':eff.toFixed(1)+'% output/input'
