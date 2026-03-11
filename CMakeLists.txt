@@ -38,10 +38,19 @@ if(APPLE AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
 elseif(NOT APPLE AND (CMAKE_SYSTEM_PROCESSOR MATCHES "armv7" OR CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64"))
     # Raspberry Pi detection (rough check by processor and system)
     # RPi 3B+, Zero 2W use Cortex-A53
-    execute_process(COMMAND grep -q "Cortex-A53" /proc/cpuinfo RESULT_VARIABLE IS_A53)
-    if(IS_A53 EQUAL 0)
+    # Check /proc/device-tree/model first (most reliable on Pi)
+    execute_process(COMMAND cat /proc/device-tree/model ERROR_QUIET OUTPUT_VARIABLE PI_MODEL)
+    # Also check CPU part number in /proc/cpuinfo (0xd03 = Cortex-A53)
+    execute_process(COMMAND grep -qiE "Cortex-A53|0xd03" /proc/cpuinfo RESULT_VARIABLE IS_A53)
+
+    if(PI_MODEL MATCHES "Raspberry Pi (3|Zero 2)" OR IS_A53 EQUAL 0)
         set(ARCH_NAME "Raspberry Pi 3B+ / Zero 2W (Cortex-A53)")
-        set(ARCH_OPT_FLAGS -march=armv8-a+crc -mtune=cortex-a53 -mfpu=neon-fp-armv8)
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
+            # 64-bit mode doesn't need -mfpu=neon as it's standard
+            set(ARCH_OPT_FLAGS -march=armv8-a+crc -mtune=cortex-a53)
+        else()
+            set(ARCH_OPT_FLAGS -march=armv8-a+crc -mtune=cortex-a53 -mfpu=neon-fp-armv8 -mfloat-abi=hard)
+        endif()
     else()
         # Fallback for other ARM/RPi
         set(ARCH_NAME "Native ARM")

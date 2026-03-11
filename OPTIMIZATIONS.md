@@ -14,10 +14,14 @@ The build system (`CMakeLists.txt`) now automatically detects the target archite
 - **Apple Silicon (M1/M2/M3):**
   - `-mcpu=apple-m1`: Optimizes instruction scheduling and pipeline usage specifically for Apple's high-performance cores.
 
-- **Raspberry Pi 3B+ / Zero 2W:**
-  - `-march=armv8-a+crc`: Enables ARMv8-A instructions including CRC32 extensions.
-  - `-mtune=cortex-a53`: Tunes code generation for the specific pipeline of the Cortex-A53 processor.
-  - `-mfpu=neon-fp-armv8`: Enables NEON SIMD and hardware floating point optimizations.
+- **Raspberry Pi 3B+ / Zero 2W (Cortex-A53):**
+  - **AArch64 (64-bit):**
+    - `-march=armv8-a+crc`: Enables ARMv8-A instructions including CRC32 extensions.
+    - `-mtune=cortex-a53`: Tunes code generation for the specific pipeline of the Cortex-A53 processor.
+  - **ARMv7 (32-bit):**
+    - `-march=armv8-a+crc -mtune=cortex-a53`
+    - `-mfpu=neon-fp-armv8`: Enables NEON SIMD and hardware floating point optimizations.
+    - `-mfloat-abi=hard`: Standard for modern Pi 32-bit OS builds.
 
 - **Generic ARM / Native:**
   - `-march=native`: When building on the target device, the compiler will use all features available on that specific CPU.
