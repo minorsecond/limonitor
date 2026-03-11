@@ -61,8 +61,9 @@ struct SolarForecastWeekResult {
     std::string best_day;       // date with highest kWh
     double nominal_ah{0};
     double battery_voltage{0};
-    bool realistic{false};       // true if charge acceptance taper was applied
-    bool realistic_from_history{false}; // true if taper came from measured data
+    double current_soc_pct{0};
+    bool realistic{false};
+    bool realistic_from_history{false};
 };
 
 class WeatherForecast {

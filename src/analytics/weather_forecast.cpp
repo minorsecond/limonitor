@@ -333,6 +333,7 @@ SolarForecastWeekResult WeatherForecast::get_forecast_week(double panel_watts, d
 
     r.nominal_ah = cap_ah;
     r.battery_voltage = v;
+    r.current_soc_pct = current_soc_pct;
 
     double cap_wh_total = cap_ah * v;
     double projected_soc = current_soc_pct;

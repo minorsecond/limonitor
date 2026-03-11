@@ -834,6 +834,7 @@ std::string HttpServer::solar_forecast_week_json(const SolarForecastWeekResult& 
     o += "  \"realistic_from_history\": " + jbool(r.realistic_from_history) + ",\n";
     o += "  \"week_total_kwh\": " + jdbl(r.week_total_kwh, 2) + ",\n";
     o += "  \"recovery_wh\": " + jdbl(r.recovery_wh, 0) + ",\n";
+    o += "  \"current_soc_pct\": " + jdbl(r.current_soc_pct, 1) + ",\n";
     o += "  \"days_to_full\": " + std::to_string(r.days_to_full) + ",\n";
     o += "  \"best_day\": " + jstr(r.best_day) + ",\n";
     if (!r.error.empty())
@@ -1329,7 +1330,7 @@ std::string HttpServer::html_dashboard(const BatterySnapshot& s, const std::stri
 :root{
   --bg:#0d0d11;--card:#16161c;--border:#2e2e3a;
   --text:#e0e0ea;--muted:#9090a8;--sub:#686880;
-  --green:#4ade80;--orange:#fb923c;--blue:#60a5fa;--cyan:#22d3ee;--red:#f87171;
+  --green:#4ade80;--orange:#fb923c;--blue:#60a5fa;--cyan:#22d3ee;--red:#f87171;--violet:#a78bfa;
   --soc-track:#22222c;--cell-bg:#0f0f16;--alert-bg:#1c0a0a;
   --chart-bg:#0f0f14;--chart-grid:#252530;--chart-tick:#a0a0b8;
   --cv:#4caf50;--ca:#ff9800;--csoc:#4080ff;--csol:#00bcd4
@@ -1338,7 +1339,7 @@ std::string HttpServer::html_dashboard(const BatterySnapshot& s, const std::stri
 html.light{
   --bg:#f2f3f7;--card:#ffffff;--border:#d4d4e0;
   --text:#1a1a2c;--muted:#5a5a72;
-  --green:#16a34a;--orange:#c2410c;--blue:#1d4ed8;--cyan:#0891b2;--red:#dc2626;
+  --green:#16a34a;--orange:#c2410c;--blue:#1d4ed8;--cyan:#0891b2;--red:#dc2626;--violet:#7c3aed;
   --soc-track:#dcdce8;--cell-bg:#f8f8fc;--alert-bg:#fff0f0;
   --chart-bg:#f5f5fa;--chart-grid:#dcdce8;--chart-tick:#4a4a64;
   --cv:#16a34a;--ca:#c2410c;--csoc:#1d4ed8;--csol:#0891b2
@@ -2704,8 +2705,9 @@ td .rc-main{font-weight:600}
          "<button class=\"chart-tab\" data-unit=\"ah\" onclick=\"switchChartUnit('ah')\" title=\"Amp-hours at nominal voltage\">Ah</button>"
          "<button class=\"chart-tab\" data-unit=\"pct\" onclick=\"switchChartUnit('pct')\" title=\"Equivalent battery state-of-charge\">Battery %</button></div>"
          "<span style=\"flex:1\"></span>"
-         "<label style=\"font-size:.72rem;color:var(--muted);cursor:pointer\" title=\"Show running total of energy over the forecast period\"><input type=\"checkbox\" id=\"show-cumul\" onchange=\"renderActiveChart()\" checked> Cumulative</label>"
-         "<label style=\"font-size:.72rem;color:var(--muted);cursor:pointer\" title=\"Overlay estimated daily consumption from historical usage data\"><input type=\"checkbox\" id=\"show-usage\" onchange=\"renderActiveChart()\" checked> Est. usage</label></div>"
+         "<label style=\"font-size:.72rem;color:var(--muted);cursor:pointer\" title=\"Show running total of energy over the forecast period\"><input type=\"checkbox\" id=\"show-cumul\" onchange=\"renderActiveChart()\"> Cumulative</label>"
+         "<label style=\"font-size:.72rem;color:var(--muted);cursor:pointer\" title=\"Overlay estimated daily consumption from historical usage data\"><input type=\"checkbox\" id=\"show-usage\" onchange=\"renderActiveChart()\" checked> Est. usage</label>"
+         "<label style=\"font-size:.72rem;color:var(--muted);cursor:pointer\" title=\"Project battery state of charge over time based on solar generation minus estimated usage\"><input type=\"checkbox\" id=\"show-soc\" onchange=\"renderActiveChart()\" checked> Projected SoC</label></div>"
          "<div class=\"chart-wrap\" id=\"solar-chart-wrap\">"
          "<svg id=\"solar-chart\" class=\"chart-svg\" viewBox=\"0 0 900 340\">"
          "<text x=\"50%\" y=\"50%\" fill=\"var(--muted)\" font-size=\"12\" font-family=\"monospace\""
@@ -2781,9 +2783,11 @@ td .rc-main{font-weight:600}
          "var bv=lastDailyData?lastDailyData.battery_voltage:13;\n"
          "var capWh=ah*bv;\n"
          "var showCumul=$('show-cumul')&&$('show-cumul').checked;\n"
+         "var showSoc=$('show-soc')&&$('show-soc').checked;\n"
          "var showExt=!!($('show-extended')&&$('show-extended').checked);\n"
          "var isLight=document.documentElement.classList.contains('light');\n"
-         "var W=900,H=340,PL=64,PR=showCumul?64:20,PT=16,PB=52;\n"
+         "var needRightAxis=showCumul||showSoc;\n"
+         "var W=900,H=340,PL=64,PR=needRightAxis?64:20,PT=16,PB=52;\n"
          "var CW=W-PL-PR,CH=H-PT-PB;\n"
          "var baseSlots=lastSlots.map(function(s){var o={};for(var k in s)o[k]=s[k];o.ext=false;return o;});\n"
          "var slots=baseSlots;\n"
@@ -2809,6 +2813,17 @@ td .rc-main{font-weight:600}
          "slots.forEach(function(s){cumSum+=conv(s.kwh);cumArr.push(cumSum);});\n"
          "var cumMax=cumArr.length?cumArr[cumArr.length-1]*1.1:1;\n"
          "var ca=niceAxis(cumMax);\n"
+         "var socArr=[];\n"
+         "if(showSoc&&capWh>0){\n"
+         "var initSoc=lastDailyData.current_soc_pct||0;\n"
+         "var soc=initSoc;\n"
+         "slots.forEach(function(s){\n"
+         "var netWh=(s.kwh-(s.use_kwh||0))*1000;\n"
+         "soc+=netWh/capWh*100;\n"
+         "soc=Math.max(0,Math.min(100,soc));\n"
+         "socArr.push(soc);\n"
+         "});}\n"
+         "function ypSoc(pct){return PT+CH-(pct/100)*CH;}\n"
          "function xp(ts){return PL+((ts*1000-t0)/tspan)*CW;}\n"
          "function xpM(ts){return xp(ts+5400);}\n"
          "function yp(v){return PT+CH-Math.min(1,v/ya.max)*CH;}\n"
@@ -2866,6 +2881,18 @@ td .rc-main{font-weight:600}
          "s+=\"<polygon points='\"+cumPts+\"' fill='url(#cumg)'/>\";\n"
          "var cumLine='';slots.forEach(function(sl,i){cumLine+=xpM(sl.ts).toFixed(1)+','+yp2(cumArr[i]).toFixed(1)+' ';});\n"
          "s+=\"<polyline fill='none' stroke='var(--cyan)' stroke-width='1.5' stroke-dasharray='6,3' stroke-linecap='round' points='\"+cumLine+\"'/>\";}\n"
+         "if(showSoc&&socArr.length){\n"
+         "s+=\"<line x1='\"+PL+\"' y1='\"+ypSoc(20).toFixed(1)+\"' x2='\"+(PL+CW)+\"' y2='\"+ypSoc(20).toFixed(1)+\"' stroke='var(--red)' stroke-width='0.5' stroke-dasharray='3,4' opacity='.3'/>\";\n"
+         "s+=\"<line x1='\"+PL+\"' y1='\"+ypSoc(80).toFixed(1)+\"' x2='\"+(PL+CW)+\"' y2='\"+ypSoc(80).toFixed(1)+\"' stroke='var(--green)' stroke-width='0.5' stroke-dasharray='3,4' opacity='.3'/>\";\n"
+         "var socFill=PL.toFixed(1)+','+(PT+CH).toFixed(1)+' ';\n"
+         "slots.forEach(function(sl,i){socFill+=xpM(sl.ts).toFixed(1)+','+ypSoc(socArr[i]).toFixed(1)+' ';});\n"
+         "socFill+=(PL+CW).toFixed(1)+','+(PT+CH).toFixed(1);\n"
+         "s+=\"<polygon points='\"+socFill+\"' fill='var(--violet)' opacity='.08'/>\";\n"
+         "var socLine='';slots.forEach(function(sl,i){socLine+=xpM(sl.ts).toFixed(1)+','+ypSoc(socArr[i]).toFixed(1)+' ';});\n"
+         "s+=\"<polyline fill='none' stroke='var(--violet)' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' points='\"+socLine+\"'/>\";\n"
+         "var startX=xpM(slots[0].ts),startY=ypSoc(socArr[0]);\n"
+         "s+=\"<circle cx='\"+startX.toFixed(1)+\"' cy='\"+startY.toFixed(1)+\"' r='4' fill='var(--violet)' stroke='var(--bg)' stroke-width='1.5'/>\";\n"
+         "s+=\"<text x='\"+(startX+6).toFixed(1)+\"' y='\"+(startY-4).toFixed(1)+\"' font-size='8' font-family='monospace' fill='var(--violet)' font-weight='600'>\"+Math.round(socArr[0])+'%</text>';}\n"
          "var linePts='';slots.forEach(function(sl){linePts+=xpM(sl.ts).toFixed(1)+','+yp(conv(sl.kwh)).toFixed(1)+' ';});\n"
          "s+=\"<polyline fill='none' stroke='var(--green)' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' points='\"+linePts+\"'/>\";\n"
          "slots.forEach(function(sl,i){\n"
@@ -2887,13 +2914,18 @@ td .rc-main{font-weight:600}
          "});}\n"
          "s+=\"<line x1='\"+PL+\"' y1='\"+PT+\"' x2='\"+PL+\"' y2='\"+(PT+CH)+\"' stroke='var(--muted)' stroke-width='1'/>\";\n"
          "s+=\"<line x1='\"+PL+\"' y1='\"+(PT+CH)+\"' x2='\"+(PL+CW)+\"' y2='\"+(PT+CH)+\"' stroke='var(--muted)' stroke-width='1'/>\";\n"
-         "if(showCumul)s+=\"<line x1='\"+(PL+CW)+\"' y1='\"+PT+\"' x2='\"+(PL+CW)+\"' y2='\"+(PT+CH)+\"' stroke='var(--cyan)' stroke-width='0.5' opacity='.4'/>\";\n"
+         "if(needRightAxis){var rc=showSoc?'var(--violet)':'var(--cyan)';s+=\"<line x1='\"+(PL+CW)+\"' y1='\"+PT+\"' x2='\"+(PL+CW)+\"' y2='\"+(PT+CH)+\"' stroke='\"+rc+\"' stroke-width='0.5' opacity='.4'/>\";}\n"
          "s+=\"<g font-size='9' font-family='monospace' fill='var(--muted)'>\";\n"
          "for(var yv=0;yv<=ya.max;yv+=ya.step){var gy=yp(yv);\n"
          "s+=\"<line x1='\"+(PL-3)+\"' y1='\"+gy.toFixed(1)+\"' x2='\"+PL+\"' y2='\"+gy.toFixed(1)+\"' stroke='var(--muted)' stroke-width='0.5'/>\";\n"
          "s+=\"<text x='\"+(PL-5)+\"' y='\"+(gy+3).toFixed(1)+\"' text-anchor='end'>\"+fmt(yv,ya.dec)+\"</text>\";}\n"
          "s+=\"</g>\";\n"
-         "if(showCumul){s+=\"<g font-size='9' font-family='monospace' fill='var(--cyan)'>\";\n"
+         "if(showSoc){s+=\"<g font-size='9' font-family='monospace' fill='var(--violet)'>\";\n"
+         "for(var pv=0;pv<=100;pv+=20){var gy=ypSoc(pv);\n"
+         "s+=\"<line x1='\"+(PL+CW)+\"' y1='\"+gy.toFixed(1)+\"' x2='\"+(PL+CW+3)+\"' y2='\"+gy.toFixed(1)+\"' stroke='var(--violet)' stroke-width='0.5'/>\";\n"
+         "s+=\"<text x='\"+(PL+CW+5)+\"' y='\"+(gy+3).toFixed(1)+\"' text-anchor='start'>\"+pv+\"%</text>\";}\n"
+         "s+=\"</g>\";}\n"
+         "else if(showCumul){s+=\"<g font-size='9' font-family='monospace' fill='var(--cyan)'>\";\n"
          "for(var yv=0;yv<=ca.max;yv+=ca.step){var gy=yp2(yv);\n"
          "s+=\"<line x1='\"+(PL+CW)+\"' y1='\"+gy.toFixed(1)+\"' x2='\"+(PL+CW+3)+\"' y2='\"+gy.toFixed(1)+\"' stroke='var(--cyan)' stroke-width='0.5'/>\";\n"
          "s+=\"<text x='\"+(PL+CW+5)+\"' y='\"+(gy+3).toFixed(1)+\"' text-anchor='start'>\"+fmt(yv,ca.dec)+\"</text>\";}\n"
@@ -2923,7 +2955,8 @@ td .rc-main{font-weight:600}
          "s+=\"<text x='\"+x.toFixed(1)+\"' y='\"+(H-4)+\"' text-anchor='middle' font-size='\"+(nDays>10?'7.5':'9')+\"' font-weight='600'>\"+d.toLocaleDateString(getLocale(),dfOpts)+\"</text>\";});\n"
          "s+=\"</g>\";\n"
          "s+=\"<text x='\"+(PL/2)+\"' y='\"+(PT+CH/2)+\"' text-anchor='middle' font-size='9' font-family='monospace' fill='var(--muted)' transform='rotate(-90 \"+(PL/2)+\" \"+(PT+CH/2)+\")'>\"+unitLbl+\" per 3h slot</text>\";\n"
-         "if(showCumul)s+=\"<text x='\"+(W-PR/2)+\"' y='\"+(PT+CH/2)+\"' text-anchor='middle' font-size='9' font-family='monospace' fill='var(--cyan)' transform='rotate(90 \"+(W-PR/2)+\" \"+(PT+CH/2)+\")'>\"+cumulLbl+\"</text>\";\n"
+         "if(showSoc)s+=\"<text x='\"+(W-PR/2)+\"' y='\"+(PT+CH/2)+\"' text-anchor='middle' font-size='9' font-family='monospace' fill='var(--violet)' transform='rotate(90 \"+(W-PR/2)+\" \"+(PT+CH/2)+\")'>Battery SoC %</text>\";\n"
+         "else if(showCumul)s+=\"<text x='\"+(W-PR/2)+\"' y='\"+(PT+CH/2)+\"' text-anchor='middle' font-size='9' font-family='monospace' fill='var(--cyan)' transform='rotate(90 \"+(W-PR/2)+\" \"+(PT+CH/2)+\")'>\"+cumulLbl+\"</text>\";\n"
          "var isReal=lastDailyData&&lastDailyData.realistic;\n"
          "var isHist=isReal&&lastDailyData.realistic_from_history;\n"
          "var lg=$('chart-legend');if(lg){var lh='';\n"
@@ -2932,6 +2965,7 @@ td .rc-main{font-weight:600}
          "lh+='<span class=lg><span class=\"swatch-band\" style=\"background:linear-gradient(var(--green),transparent);opacity:.08\"></span>99% CI<span class=tip>Outer band: 99% confidence interval (\\u00b12.576\\u03c3). Very unlikely the actual yield falls outside this range\\u2014only ~1% of the time if the cloud model is well-calibrated.</span></span>';\n"
          "if(showUse)lh+='<span class=lg><span class=swatch style=\"background:var(--orange);border-top:1.5px dashed var(--orange)\"></span><span class=dot style=\"background:var(--orange)\"></span>Est. usage (7d)<span class=tip>Average power consumption per 3-hour time-of-day slot, computed from the last 7 days of battery discharge history. Shaded band shows the 95% CI from observed variability across days.</span></span>';\n"
          "if(showCumul)lh+='<span class=lg><span class=swatch style=\"border-top:1.5px dashed var(--cyan)\"></span>Cumulative<span class=tip>Running total of solar energy generated over the forecast period. Useful for projecting total harvest and comparing against battery capacity or load.</span></span>';\n"
+         "if(showSoc)lh+='<span class=lg><span class=swatch style=\"background:var(--violet)\"></span>Projected SoC<span class=tip>Projected battery state of charge over time. Starts at current SoC ('+Math.round(lastDailyData.current_soc_pct||0)+'%) and adds solar generation while subtracting estimated usage each slot. Dashed lines mark 20% (low) and 80% (absorption taper) thresholds.</span></span>';\n"
          "lg.innerHTML=lh;}\n"
          "s+=\"<rect id='solar-overlay' x='\"+PL+\"' y='\"+PT+\"' width='\"+CW+\"' height='\"+CH+\"' fill='transparent' style='cursor:crosshair'/>\";\n"
          "el.setAttribute('viewBox','0 0 '+W+' '+H);el.innerHTML=s;\n"
@@ -2960,6 +2994,7 @@ td .rc-main{font-weight:600}
          "htm+='<div class=tt-row>Cloud: '+Math.round(sl.cloud*100)+'%</div>';\n"
          "if(showUse&&(sl.use_kwh||0)>0)htm+='<div class=tt-row style=\"color:var(--orange)\">Usage: '+fmt(conv(sl.use_kwh),2)+' '+unitShort+' ('+fmt(conv(sl.use_lo),2)+'\\u2013'+fmt(conv(sl.use_hi),2)+')</div>';\n"
          "if(showCumul)htm+='<div class=tt-row style=\"color:var(--cyan)\">Cumul: '+fmt(cumArr[best],2)+' '+unitShort+'</div>';\n"
+         "if(showSoc&&socArr.length>best)htm+='<div class=tt-row style=\"color:var(--violet)\">SoC: '+Math.round(socArr[best])+'%</div>';\n"
          "tt.innerHTML=htm;\n"
          "var px=e.clientX-wrap.getBoundingClientRect().left;\n"
          "var py=e.clientY-wrap.getBoundingClientRect().top;\n"
