@@ -56,6 +56,41 @@ static std::string jval_s(const std::string& body, const std::string& key) {
     if (q == std::string::npos) return "";
     return body.substr(p + 1, q - p - 1);
 }
+static int jval_i(const std::string& body, const std::string& key, int def) {
+    std::string pat = "\"" + key + "\"";
+    auto p = body.find(pat);
+    if (p == std::string::npos) return def;
+    p = body.find(':', p);
+    if (p == std::string::npos) return def;
+    p++;
+    while (p < body.size() && (body[p] == ' ' || body[p] == '\t')) p++;
+    if (p >= body.size()) return def;
+    return std::atoi(body.c_str() + p);
+}
+static int64_t compute_next_schedule_run(const std::string& freq, int hour, int min, int day) {
+    std::time_t now = std::time(nullptr);
+    struct tm t{};
+    localtime_r(&now, &t);
+    t.tm_sec = 0; t.tm_min = min; t.tm_hour = hour;
+    if (freq == "daily") {
+        std::time_t cand = std::mktime(&t);
+        return cand <= now ? cand + 86400 : cand;
+    }
+    if (freq == "weekly") {
+        int wday = (day >= 0 && day <= 6) ? day : 0;
+        int delta = (wday - t.tm_wday + 7) % 7;
+        if (delta == 0) { t.tm_mday += 7; }
+        else { t.tm_mday += delta; }
+        return std::mktime(&t);
+    }
+    if (freq == "monthly") {
+        t.tm_mday = (day >= 1 && day <= 28) ? day : 1;
+        std::time_t cand = std::mktime(&t);
+        if (cand <= now) { t.tm_mon += 1; cand = std::mktime(&t); }
+        return cand;
+    }
+    return now + 86400;
+}
 
 HttpServer::HttpServer(DataStore& store, Database* db, const std::string& bind_addr, uint16_t port,
                        int poll_interval_s, testing::TestRunner* test_runner)
@@ -449,6 +484,47 @@ void HttpServer::handle(int fd) {
         }
     }
 
+    if (method == "POST" && path == "/api/tests/schedules") {
+        if (!db_) { send_response(fd, 503, "application/json", "{\"ok\":false,\"error\":\"Database unavailable\"}\n"); return; }
+        auto body_start = req.find("\r\n\r\n");
+        if (body_start != std::string::npos) body_start += 4;
+        else { body_start = req.find("\n\n"); if (body_start != std::string::npos) body_start += 2; }
+        std::string body = (body_start != std::string::npos && body_start < req.size()) ? req.substr(body_start) : "";
+        std::string test_type = jval_s(body, "test_type");
+        std::string freq = jval_s(body, "frequency");
+        if (freq.empty()) freq = "monthly";
+        int hour = jval_i(body, "run_hour", 2);
+        int min = jval_i(body, "run_minute", 0);
+        int dom = jval_i(body, "day_of_month", 1);
+        if (test_type.empty()) { send_response(fd, 400, "application/json", "{\"ok\":false,\"error\":\"test_type required\"}\n"); return; }
+        int64_t next = compute_next_schedule_run(freq, hour, min, dom);
+        Database::TestScheduleRow row;
+        row.test_type = test_type;
+        row.frequency = freq;
+        row.run_hour = hour;
+        row.run_minute = min;
+        row.day_of_month = dom;
+        row.next_run_ts = next;
+        row.enabled = true;
+        int64_t id = db_->insert_test_schedule(row);
+        if (id > 0)
+            send_response(fd, 200, "application/json", "{\"ok\":true,\"id\":" + std::to_string(id) + "}\n");
+        else
+            send_response(fd, 500, "application/json", "{\"ok\":false,\"error\":\"insert failed\"}\n");
+        return;
+    }
+
+    if (method == "DELETE" && path.compare(0, 20, "/api/tests/schedules/") == 0 && path.size() > 20) {
+        std::string id_part = path.substr(20);
+        int64_t id = 0;
+        try { id = std::stoll(id_part); } catch (...) {}
+        if (id > 0 && db_ && db_->delete_test_schedule(id))
+            send_response(fd, 200, "application/json", "{\"ok\":true}\n");
+        else
+            send_response(fd, 404, "application/json", "{\"ok\":false,\"error\":\"not found\"}\n");
+        return;
+    }
+
     if (method != "GET") { send_response(fd, 405, "text/plain", "Method Not Allowed"); return; }
 
     auto snap_opt = store_.latest();
@@ -668,13 +744,14 @@ void HttpServer::handle(int fd) {
     } else if (path == "/api/tests/safety_limits") {
         if (!test_runner_) {
             send_response(fd, 200, "application/json",
-                "{\"soc_floor_pct\":10,\"voltage_floor_v\":11,\"max_duration_sec\":7200}\n");
+                "{\"soc_floor_pct\":10,\"voltage_floor_v\":11,\"max_duration_sec\":7200,\"abort_on_overtemp\":true}\n");
         } else {
             const auto& lim = test_runner_->safety_limits();
-            char buf[128];
+            char buf[192];
             std::snprintf(buf, sizeof(buf),
-                "{\"soc_floor_pct\":%.1f,\"voltage_floor_v\":%.1f,\"max_duration_sec\":%d}\n",
-                lim.soc_floor_pct, lim.voltage_floor_v, lim.max_duration_sec);
+                "{\"soc_floor_pct\":%.1f,\"voltage_floor_v\":%.1f,\"max_duration_sec\":%d,\"abort_on_overtemp\":%s}\n",
+                lim.soc_floor_pct, lim.voltage_floor_v, lim.max_duration_sec,
+                lim.abort_on_overtemp ? "true" : "false");
             send_response(fd, 200, "application/json", buf);
         }
     } else if (path == "/api/tests/active") {
@@ -709,7 +786,7 @@ void HttpServer::handle(int fd) {
             (void)chg;
             send_response(fd, 200, "application/json", buf);
         }
-    } else if (path == "/api/battery/diagnostics") {
+    } else if (path == "/api/battery/health" || path == "/api/battery/diagnostics") {
         double capacity_pct = -1;
         double resistance_mohm = 0;
         double avg_sag = -1;
@@ -742,6 +819,27 @@ void HttpServer::handle(int fd) {
             "\"charge_efficiency_pct\":%.1f,\"health_score\":%d}\n",
             capacity_pct, resistance_mohm, avg_sag, charge_eff, health_score);
         send_response(fd, 200, "application/json", buf);
+    } else if (path == "/api/tests/schedules") {
+        if (!db_) {
+            send_response(fd, 200, "application/json", "{\"schedules\":[]}\n");
+        } else {
+            auto scheds = db_->load_test_schedules();
+            std::string out = "{\"schedules\":[";
+            for (size_t i = 0; i < scheds.size(); ++i) {
+                if (i) out += ",";
+                const auto& s = scheds[i];
+                out += "{\"id\":" + std::to_string(s.id) +
+                    ",\"test_type\":" + jstr(s.test_type) +
+                    ",\"frequency\":" + jstr(s.frequency) +
+                    ",\"run_hour\":" + std::to_string(s.run_hour) +
+                    ",\"run_minute\":" + std::to_string(s.run_minute) +
+                    ",\"day_of_month\":" + std::to_string(s.day_of_month) +
+                    ",\"next_run_ts\":" + std::to_string(s.next_run_ts) +
+                    ",\"enabled\":" + std::string(s.enabled ? "true" : "false") + "}";
+            }
+            out += "]}\n";
+            send_response(fd, 200, "application/json", out);
+        }
     } else if (path == "/api/tests") {
         if (!db_) {
             send_response(fd, 200, "application/json", "{\"tests\":[],\"running\":false}\n");
@@ -3990,6 +4088,7 @@ html.light .active-monitor{background:linear-gradient(135deg,rgba(22,163,74,.06)
 .diag-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:.5rem;margin-bottom:.5rem}
 .diag-item{background:var(--bg);border-radius:6px;padding:.5rem;font-size:.8rem}
 .diag-item .val{font-weight:700;font-size:1rem;color:var(--green)}
+.active-inline{margin-bottom:.5rem}
 .sched-item{display:flex;justify-content:space-between;align-items:center;padding:.4rem 0;font-size:.85rem}
 .sched-placeholder{color:var(--muted);font-size:.85rem;font-style:italic}
 .detail-chart{height:140px;background:var(--bg);border-radius:6px;margin-bottom:.5rem}
@@ -4042,20 +4141,21 @@ html.light .active-monitor{background:linear-gradient(135deg,rgba(22,163,74,.06)
 </div>
 <script>
 function $(id){return document.getElementById(id)}
-var TEST_TYPES=[{id:'ups_failover',name:'UPS Failover Test',desc:'Verify grid to battery transition',dur:'~5m',impact:'Brief discharge'},{id:'load_spike',name:'Load Spike Test',desc:'Measure voltage sag under load',dur:'~12s',impact:'Minimal'},{id:'capacity',name:'Capacity Test',desc:'Estimate battery capacity',dur:'2-6h',impact:'Significant discharge'},{id:'charger_recovery',name:'Charger Recovery Test',desc:'Verify charging ramp after outage',dur:'~15m',impact:'Charge cycle'},{id:'simulated_outage',name:'Simulated Outage',desc:'Predict runtime without cutting power',dur:'~5m',impact:'Simulation only'}]
+var TEST_TYPES=[{id:'capacity',name:'Capacity Test',desc:'Estimate battery capacity by controlled discharge',dur:'2–3 h',impact:'Moderate discharge'},{id:'ups_failover',name:'UPS Failover Test',desc:'Verify grid to battery transition',dur:'~5m',impact:'Brief discharge'},{id:'load_spike',name:'Load Spike Test',desc:'Measure voltage sag during high load',dur:'~12s',impact:'Minimal'},{id:'charger_recovery',name:'Charger Recovery Test',desc:'Verify charging ramp after outage',dur:'~15m',impact:'Charge cycle'},{id:'simulated_outage',name:'Simulated Outage',desc:'Estimate runtime without disconnecting power',dur:'~5m',impact:'Simulation only'}]
 var lastStoppedTestId=null
 function fmtDate(ts){if(!ts)return'—';var d=new Date(ts*1000);return d.toLocaleDateString()+' '+d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}
 function fmtDateShort(ts){if(!ts)return'—';var d=new Date(ts*1000);return d.toLocaleDateString()}
 function fmtDur(s){if(!s)return'—';if(s<60)return s+'s';if(s<3600)return Math.floor(s/60)+'m';return Math.floor(s/3600)+'h '+(Math.floor((s%3600)/60))+'m'}
 function fmtType(t){var x=TEST_TYPES.find(function(p){return p.id===t});return x?x.name:t}
-function renderTestList(running){var wrap=$('test-list');wrap.innerHTML='';TEST_TYPES.forEach(function(t){var div=document.createElement('div');div.className='test-item';div.innerHTML='<div><strong>'+t.name+'</strong><div class="test-item-desc">'+t.desc+'</div><div class="test-item-meta">'+t.dur+' &middot; '+t.impact+'</div></div><button type="button" class="test-btn test-btn-start test-item-btn" data-type="'+t.id+'">Run</button>';div.querySelector('button').onclick=function(){if(running)return;fetch('/api/tests/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({test_type:t.id})}).then(function(r){return r.json()}).then(function(d){if(d.ok){loadTests();loadActive();setInterval(loadTests,3000)}})};wrap.appendChild(div)})}
-function loadBatteryHealth(){fetch('/api/battery/diagnostics').then(function(r){return r.json()}).then(function(d){var wrap=$('battery-health');wrap.innerHTML='<div class="diag-item"><span class="val">'+(d.estimated_capacity_pct>=0?d.estimated_capacity_pct.toFixed(0)+'%':'—')+'</span><div>Est. Capacity</div></div><div class="diag-item"><span class="val">'+(d.internal_resistance_mohm>0?(d.internal_resistance_mohm/1000).toFixed(3)+' Ω':'—')+'</span><div>Resistance</div></div><div class="diag-item"><span class="val">'+(d.avg_voltage_sag_v>=0?d.avg_voltage_sag_v.toFixed(2)+' V':'—')+'</span><div>Avg Sag</div></div><div class="diag-item"><span class="val">'+(d.charge_efficiency_pct>=0?d.charge_efficiency_pct.toFixed(0)+'%':'—')+'</span><div>Charge Eff.</div></div><div class="diag-item"><span class="val">'+(d.health_score||0)+'/100</span><div>Health Score</div></div>'})}
-function loadSafetyLimits(){fetch('/api/tests/safety_limits').then(function(r){return r.json()}).then(function(d){$('safety-limits').innerHTML='Min SOC: '+d.soc_floor_pct+'% &middot; Min Voltage: '+d.voltage_floor_v+' V &middot; Max Duration: '+fmtDur(d.max_duration_sec)})}
-function loadActive(){fetch('/api/tests/active').then(function(r){return r.json()}).then(function(d){var mon=$('active-monitor');if(!d.running){mon.style.display='none';return}mon.style.display='block';var start=new Date(d.start_time*1000);$('active-content').innerHTML='<div><strong>'+fmtType(d.test_type)+'</strong><div class="test-item-meta">Started: '+start.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})+'</div></div><div class="diag-grid"><div class="diag-item">Battery: <span class="val">'+d.battery_voltage.toFixed(2)+' V</span></div><div class="diag-item">Current: <span class="val">'+d.battery_current.toFixed(1)+' A</span></div><div class="diag-item">Load: <span class="val">'+d.load_power.toFixed(0)+' W</span></div><div class="diag-item">SOC: <span class="val">'+d.battery_soc.toFixed(0)+'%</span></div><div class="diag-item">Energy: <span class="val">'+d.energy_delivered_wh.toFixed(0)+' Wh</span></div><div class="diag-item">Sag: <span class="val">'+d.voltage_sag.toFixed(2)+' V</span></div></div>';fetch('/api/tests/'+d.test_id+'/telemetry').then(function(x){return x.json()}).then(function(tel){var s=tel.samples||[];if(s.length<2)return;var w=400,h=100,pad=25;var svg='<svg width="100%" height="100" viewBox="0 0 400 100"><path d="M';var minV=999,maxV=0;s.forEach(function(x){if(x.v>0){minV=Math.min(minV,x.v);maxV=Math.max(maxV,x.v)}});if(maxV<=minV)maxV=minV+1;var xf=function(i){return pad+(w-pad*2)*(i/(s.length-1||1))};var yf=function(v){return h-pad-(h-pad*2)*(v-minV)/(maxV-minV)};s.forEach(function(x,i){svg+=(i?'L':'')+xf(i)+','+yf(x.v)});svg+='" fill="none" stroke="var(--green)" stroke-width="1"/></svg>';$('active-charts').innerHTML='<div class="detail-chart">Voltage</div>'+svg})})})}
+function renderTestList(running,activeData){var wrap=$('test-list');wrap.innerHTML='';if(running&&activeData){var start=new Date(activeData.start_time*1000);var elapsed=activeData.duration_seconds||0;var m=Math.floor(elapsed/60),s=elapsed%60;var elapsedStr=(m>0?m+'m ':'')+s+'s';wrap.innerHTML='<div class="active-inline"><strong>'+fmtType(activeData.test_type)+'</strong><div class="test-item-meta">Started: '+start.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})+' &middot; Elapsed: '+elapsedStr+'</div><div class="diag-grid" style="margin-top:.5rem"><div class="diag-item">Battery: <span class="val">'+(activeData.battery_voltage||0).toFixed(2)+' V</span></div><div class="diag-item">Current: <span class="val">'+(activeData.battery_current||0).toFixed(1)+' A</span></div><div class="diag-item">Load: <span class="val">'+(activeData.load_power||0).toFixed(0)+' W</span></div><div class="diag-item">SOC: <span class="val">'+(activeData.battery_soc||0).toFixed(0)+'%</span></div><div class="diag-item">Energy: <span class="val">'+(activeData.energy_delivered_wh||0).toFixed(0)+' Wh</span></div><div class="diag-item">Sag: <span class="val">'+(activeData.voltage_sag||0).toFixed(2)+' V</span></div></div></div>';return}TEST_TYPES.forEach(function(t){var div=document.createElement('div');div.className='test-item';div.innerHTML='<div><strong>'+t.name+'</strong><div class="test-item-desc">'+t.desc+'</div><div class="test-item-meta">Duration: '+t.dur+' &middot; Battery impact: '+t.impact+'</div></div><button type="button" class="test-btn test-btn-start test-item-btn" data-type="'+t.id+'">Run</button>';div.querySelector('button').onclick=function(){if(running)return;fetch('/api/tests/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({test_type:t.id})}).then(function(r){return r.json()}).then(function(d){if(d.ok){loadTests();loadActive()}})};wrap.appendChild(div)})}
+function loadBatteryHealth(){fetch('/api/battery/diagnostics').then(function(r){return r.json()}).then(function(d){var wrap=$('battery-health');var capVal=d.estimated_capacity_pct>=0?d.estimated_capacity_pct.toFixed(0)+'%':'unknown';var resVal=d.internal_resistance_mohm>0?(d.internal_resistance_mohm/1000).toFixed(3)+' Ω':'estimating';var sagVal=d.avg_voltage_sag_v>=0?d.avg_voltage_sag_v.toFixed(2)+' V':'unknown';var effVal=d.charge_efficiency_pct>=0?d.charge_efficiency_pct.toFixed(0)+'%':'unknown';var healthVal=(d.health_score||0)>0?(d.health_score||0)+'/100':'pending tests';wrap.innerHTML='<div class="diag-item"><span class="val">'+capVal+'</span><div>Estimated Capacity</div></div><div class="diag-item"><span class="val">'+resVal+'</span><div>Internal Resistance</div></div><div class="diag-item"><span class="val">'+sagVal+'</span><div>Average Voltage Sag</div></div><div class="diag-item"><span class="val">'+effVal+'</span><div>Charge Efficiency</div></div><div class="diag-item"><span class="val">'+healthVal+'</span><div>Health Score</div></div>'})}
+function loadSafetyLimits(){fetch('/api/tests/safety_limits').then(function(r){return r.json()}).then(function(d){var ot='Abort on Overtemperature: '+(d.abort_on_overtemp?'enabled':'disabled');$('safety-limits').innerHTML='<div class="diag-grid" style="margin:0"><div class="diag-item">Minimum SOC: <span class="val">'+d.soc_floor_pct+'%</span></div><div class="diag-item">Minimum Voltage: <span class="val">'+d.voltage_floor_v+' V</span></div><div class="diag-item">Maximum Duration: <span class="val">'+fmtDur(d.max_duration_sec)+'</span></div><div class="diag-item">'+ot+'</div></div>'})}
+function loadActive(){fetch('/api/tests/active').then(function(r){return r.json()}).then(function(d){var mon=$('active-monitor');if(!d.running){mon.style.display='none';renderRunTestState(false,null);return}mon.style.display='block';var start=new Date(d.start_time*1000);var elapsed=d.duration_seconds||0;var m=Math.floor(elapsed/60),s=elapsed%60;var elapsedStr=(m>0?m+'m ':'')+s+'s';$('active-content').innerHTML='<div><strong>'+fmtType(d.test_type)+'</strong><div class="test-item-meta">Started: '+start.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})+' &middot; Elapsed: '+elapsedStr+'</div></div><div class="diag-grid"><div class="diag-item">Battery Voltage: <span class="val">'+d.battery_voltage.toFixed(2)+' V</span></div><div class="diag-item">Battery Current: <span class="val">'+d.battery_current.toFixed(1)+' A</span></div><div class="diag-item">Load Power: <span class="val">'+d.load_power.toFixed(0)+' W</span></div><div class="diag-item">SOC: <span class="val">'+d.battery_soc.toFixed(0)+'%</span></div><div class="diag-item">Energy Delivered: <span class="val">'+d.energy_delivered_wh.toFixed(0)+' Wh</span></div><div class="diag-item">Voltage Sag: <span class="val">'+d.voltage_sag.toFixed(2)+' V</span></div></div>';renderRunTestState(true,d);fetch('/api/tests/'+d.test_id+'/telemetry').then(function(x){return x.json()}).then(function(tel){var s=tel.samples||[];if(s.length<2){$('active-charts').innerHTML='';return}var w=400,h=80,pad=25;var svg=function(key,label,color){var min=999,max=-999;s.forEach(function(x){var v=x[key];if(v!=null&&!isNaN(v)){min=Math.min(min,v);max=Math.max(max,v)}});if(max<min)max=min+1;var xf=function(i){return pad+(w-pad*2)*(i/(s.length-1||1))};var yf=function(v){return h-pad-(h-pad*2)*(v-min)/(max-min)};var path='M';s.forEach(function(x,i){var v=x[key]!=null?x[key]:min;path+=(i?'L':'')+xf(i)+','+yf(v)});return'<div class="detail-chart">'+label+'</div><svg width="100%" height="80" viewBox="0 0 400 80"><path d="'+path+'" fill="none" stroke="'+color+'" stroke-width="1"/></svg>'};$('active-charts').innerHTML=svg('v','Voltage (V)','var(--green)')+svg('a','Current (A)','var(--blue)')+svg('load','Load (W)','var(--orange)')})})})}
+function renderRunTestState(running,activeData){renderTestList(running,activeData);var stopBtn=$('stop-test');if(stopBtn)stopBtn.disabled=!running}
 function loadTests(){fetch('/api/tests').then(function(r){return r.json()}).then(function(d){
 var tbody=$('test-tbody');tbody.innerHTML='';
 var tests=d.tests||[];
-if(!tests.length){tbody.innerHTML='<tr><td colspan=5 style="color:var(--muted)">No tests yet</td></tr>';return}
+if(!tests.length){tbody.innerHTML='<tr><td colspan=5 style="color:var(--muted);padding:1rem;text-align:center">No tests yet.<br><span style="font-size:.8rem">Run a test to begin collecting battery diagnostics.</span></td></tr>';renderRunTestState(d.running,null);if(d.running)window._lastTestId=d.current_test_id;else window._lastTestId=null;return}
 tests.forEach(function(t){
 var tr=document.createElement('tr');tr.className='test-row';
 var resCls='';if(t.result==='running')resCls='running';else if(t.result==='passed')resCls='passed';else if(t.result==='failed')resCls='failed';else if(t.result==='aborted')resCls='aborted';
@@ -4064,20 +4164,19 @@ tr.innerHTML='<td>'+fmtDateShort(t.start_time)+'</td><td>'+fmtType(t.test_type)+
 tr.dataset.id=t.id;tr.onclick=function(){loadDetail(parseInt(tr.dataset.id,10))};
 tbody.appendChild(tr);
 });
-var run=$('stop-test');if(run)run.disabled=!d.running;
 var st=$('test-status');if(st)st.textContent=d.running?'Test running':'';
-if(d.running)window._lastTestId=d.current_test_id;else window._lastTestId=null;
-renderTestList(d.running);
+if(d.running){window._lastTestId=d.current_test_id;fetch('/api/tests/active').then(function(r){return r.json()}).then(function(ad){if(ad.running)renderRunTestState(true,ad)})}else{window._lastTestId=null;renderRunTestState(false,null)}
 })}
-function loadDetail(id){$('detail-card').style.display='block';$('detail-id').textContent='#'+id;window._detailId=id;fetch('/api/tests/'+id).then(function(r){return r.json()}).then(function(t){var meta={};try{meta=(t.metadata_json&&t.metadata_json.length)?JSON.parse(t.metadata_json):{}}catch(e){}var html='<div class="diag-grid">';if(meta.energy_delivered_wh)html+='<div class="diag-item">Energy: <span class="val">'+meta.energy_delivered_wh.toFixed(0)+' Wh</span></div>';if(meta.health_percent>=0)html+='<div class="diag-item">Health: <span class="val">'+meta.health_percent.toFixed(1)+'%</span></div>';html+='<div class="diag-item">Duration: <span class="val">'+fmtDur(t.duration_seconds)+'</span></div><div class="diag-item">Result: <span class="val">'+t.result+'</span></div></div>';$('detail-metrics').innerHTML=html;$('detail-notes').value=t.user_notes||''});fetch('/api/tests/'+id+'/telemetry').then(function(r){return r.json()}).then(function(d){var s=d.samples||[];if(!s.length){$('detail-charts').innerHTML='<div style="color:var(--muted);padding:1rem">No telemetry</div>';return}var w=400,h=120,pad=30;var charts=[];var series=[{key:'v',label:'Voltage (V)',color:'var(--green)'},{key:'a',label:'Current (A)',color:'var(--blue)'},{key:'load',label:'Load (W)',color:'var(--orange)'},{key:'chg_a',label:'Charger (A)',color:'var(--muted)'}];series.forEach(function(ser){var min=999,max=-999;s.forEach(function(x){var v=x[ser.key];if(v!=null&&!isNaN(v)){min=Math.min(min,v);max=Math.max(max,v)}});if(max<min)max=min+1;var xf=function(i){return pad+(w-pad*2)*(i/(s.length-1||1))};var yf=function(v){return h-pad-(h-pad*2)*(v-min)/(max-min)};var path='M';s.forEach(function(x,i){var v=x[ser.key]!=null?x[ser.key]:min;path+=(i?'L':'')+xf(i)+','+yf(v)});charts.push('<div class="detail-chart"><div class="test-item-meta">'+ser.label+'</div><svg width="100%" height="120" viewBox="0 0 400 120"><path d="'+path+'" fill="none" stroke="'+ser.color+'" stroke-width="1"/></svg></div>')});$('detail-charts').innerHTML=charts.join('')})}
+function loadDetail(id){$('detail-card').style.display='block';$('detail-id').textContent='#'+id;window._detailId=id;fetch('/api/tests/'+id).then(function(r){return r.json()}).then(function(t){var meta={};try{meta=(t.metadata_json&&t.metadata_json.length)?JSON.parse(t.metadata_json):{}}catch(e){}var html='<div class="diag-grid">';if(meta.energy_delivered_wh)html+='<div class="diag-item">Energy Delivered: <span class="val">'+meta.energy_delivered_wh.toFixed(0)+' Wh</span></div>';if(meta.health_percent>=0)html+='<div class="diag-item">Health: <span class="val">'+meta.health_percent.toFixed(1)+'%</span></div>';html+='<div class="diag-item">Duration: <span class="val">'+fmtDur(t.duration_seconds)+'</span></div><div class="diag-item">Result: <span class="val">'+t.result+'</span></div></div>';$('detail-metrics').innerHTML=html;$('detail-notes').value=t.user_notes||''});fetch('/api/tests/'+id+'/telemetry').then(function(r){return r.json()}).then(function(d){var s=d.samples||[];if(!s.length){$('detail-charts').innerHTML='<div style="color:var(--muted);padding:1rem">No telemetry</div>';return}var minV=999,maxLoad=0,energyWh=0,vStart=0,vMin=999,chgRecovSec=-1,lastChgA=0;for(var i=0;i<s.length;i++){var x=s[i];if(x.v!=null&&x.v>0){minV=Math.min(minV,x.v);if(i===0)vStart=x.v}if(x.load!=null&&x.load>0)maxLoad=Math.max(maxLoad,x.load);if(i>0&&(x.load||0)>0){var dt=(x.ts-s[i-1].ts)||2;energyWh+=(x.load||0)*(dt/3600)}}for(var i=0;i<s.length;i++){var x=s[i];if(x.chg_a!=null&&x.chg_a>0.5){if(lastChgA<0.1&&i>0)chgRecovSec=Math.round((x.ts-s[0].ts));lastChgA=x.chg_a}else lastChgA=0}vMin=minV;var sag=(vStart>0&&vMin>0&&vStart>vMin)?(vStart-vMin).toFixed(2):'0';var computed='<div class="diag-grid" style="margin-bottom:.75rem"><div class="diag-item">Min Voltage: <span class="val">'+(minV<999?minV.toFixed(2):'—')+' V</span></div><div class="diag-item">Max Load: <span class="val">'+(maxLoad>0?maxLoad.toFixed(0):'—')+' W</span></div><div class="diag-item">Voltage Sag: <span class="val">'+sag+' V</span></div><div class="diag-item">Charger Recovery: <span class="val">'+(chgRecovSec>=0?chgRecovSec+'s':'—')+'</span></div></div>';var w=400,h=120,pad=30;var charts=[];var series=[{key:'v',label:'Voltage (V)',color:'var(--green)'},{key:'a',label:'Current (A)',color:'var(--blue)'},{key:'load',label:'Load (W)',color:'var(--orange)'},{key:'chg_a',label:'Charger (A)',color:'var(--muted)'}];series.forEach(function(ser){var min=999,max=-999;s.forEach(function(x){var v=x[ser.key];if(v!=null&&!isNaN(v)){min=Math.min(min,v);max=Math.max(max,v)}});if(max<min)max=min+1;var xf=function(i){return pad+(w-pad*2)*(i/(s.length-1||1))};var yf=function(v){return h-pad-(h-pad*2)*(v-min)/(max-min)};var path='M';s.forEach(function(x,i){var v=x[ser.key]!=null?x[ser.key]:min;path+=(i?'L':'')+xf(i)+','+yf(v)});charts.push('<div class="detail-chart"><div class="test-item-meta">'+ser.label+'</div><svg width="100%" height="120" viewBox="0 0 400 120"><path d="'+path+'" fill="none" stroke="'+ser.color+'" stroke-width="1"/></svg></div>')});$('detail-charts').innerHTML=computed+charts.join('')})})}
 function exportTest(id,fmt){fetch('/api/tests/'+id+'/telemetry').then(function(r){return r.json()}).then(function(d){var s=d.samples||[];if(fmt==='csv'){var h='timestamp,voltage_v,current_a,soc_pct,load_w,charger_a\n';var rows=s.map(function(x){return x.ts+','+(x.v||'')+','+(x.a||'')+','+(x.soc||'')+','+(x.load||'')+','+(x.chg_a||'')});var blob=new Blob([h+rows.join('\n')],{type:'text/csv'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='test-'+id+'.csv';a.click()}else{var blob=new Blob([JSON.stringify(d)],{type:'application/json'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='test-'+id+'.json';a.click()}})}
 $('stop-test').onclick=function(){var tid=window._lastTestId;fetch('/api/tests/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})}).then(function(r){return r.json()}).then(function(d){if(d.ok){loadTests();loadActive();if(tid){lastStoppedTestId=tid;$('notes-prompt-card').style.display='block';$('finish-notes').value=''}}})}
 $('export-csv').onclick=function(){if(window._detailId)exportTest(window._detailId,'csv')}
 $('export-json').onclick=function(){if(window._detailId)exportTest(window._detailId,'json')}
 $('save-notes').onclick=function(){if(!window._detailId)return;var n=$('detail-notes').value;fetch('/api/tests/'+window._detailId+'/notes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({notes:n})}).then(function(r){return r.json()}).then(function(d){if(d.ok)loadTests()})}
 $('finish-notes-ok').onclick=function(){if(lastStoppedTestId&&$('finish-notes').value.trim()){fetch('/api/tests/'+lastStoppedTestId+'/notes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({notes:$('finish-notes').value.trim()})}).then(function(r){return r.json()})}$('notes-prompt-card').style.display='none';lastStoppedTestId=null}
-loadTests();loadBatteryHealth();loadSafetyLimits();loadActive();
-setInterval(function(){loadTests();loadActive()},5000);
+function loadSchedules(){fetch('/api/tests/schedules').then(function(r){return r.json()}).then(function(d){var wrap=$('sched-list');var s=d.schedules||[];if(!s.length){wrap.className='sched-placeholder';wrap.innerHTML='No scheduled tests. Add schedules in Settings.';return}wrap.className='';var html='';s.forEach(function(x){if(!x.enabled)return;var next=new Date(x.next_run_ts*1000);var freq=x.frequency||'monthly';var freqStr=freq.charAt(0).toUpperCase()+freq.slice(1);html+='<div class="sched-item"><span>'+fmtType(x.test_type)+'</span><span style="color:var(--muted);font-size:.85rem">Frequency: '+freqStr+' &middot; Next: '+next.toLocaleDateString()+' '+next.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})+'</span></div>'})wrap.innerHTML=html||'<div class="sched-placeholder">No enabled schedules</div>'})}
+loadTests();loadBatteryHealth();loadSafetyLimits();loadActive();loadSchedules();
+setInterval(function(){loadTests();loadActive()},3000);
 setInterval(loadBatteryHealth,60000);
 </script></body></html>)HTML";
     return o;
@@ -4220,6 +4319,16 @@ h1{font-size:1.35rem;font-weight:600;color:var(--green);margin-bottom:.25rem}
     o += "\"></div><div class=\"row\"><label>Refresh weather cache</label>"
          "<button type=\"button\" class=\"btn\" style=\"padding:.35rem .8rem;font-size:.8rem\" onclick=\"refreshWx()\">&#8635; Fetch fresh data</button>"
          " <span id=\"wx-msg\" style=\"font-size:.8rem;color:var(--muted)\"></span></div>"
+         "<div class=\"section-title\">Scheduled Tests</div>"
+         "<div class=\"row\"><label>Add scheduled test</label>"
+         "<div style=\"display:flex;flex-wrap:wrap;gap:.5rem;align-items:flex-end\">"
+         "<select id=\"sched-type\" style=\"width:auto\"><option value=\"ups_failover\">UPS Failover</option><option value=\"load_spike\">Load Spike</option><option value=\"capacity\">Capacity</option><option value=\"charger_recovery\">Charger Recovery</option><option value=\"simulated_outage\">Simulated Outage</option></select>"
+         "<select id=\"sched-freq\" style=\"width:auto\"><option value=\"daily\">Daily</option><option value=\"weekly\">Weekly</option><option value=\"monthly\" selected>Monthly</option></select>"
+         "<input type=\"number\" id=\"sched-hour\" min=\"0\" max=\"23\" value=\"2\" placeholder=\"Hour\" style=\"width:4rem\">"
+         "<input type=\"number\" id=\"sched-min\" min=\"0\" max=\"59\" value=\"0\" placeholder=\"Min\" style=\"width:4rem\">"
+         "<input type=\"number\" id=\"sched-dom\" min=\"1\" max=\"28\" value=\"1\" placeholder=\"Day\" style=\"width:4rem\" title=\"Day of month (monthly)\">"
+         "<button type=\"button\" class=\"btn\" style=\"padding:.35rem .8rem\" onclick=\"addSchedule()\">Add</button>"
+         "</div><div id=\"sched-list-settings\" style=\"margin-top:.5rem;font-size:.85rem;color:var(--muted)\"></div></div>"
          "<div class=\"row\"><label>Daemon mode</label><input type=\"checkbox\" name=\"daemon\" ";
     o += (g("daemon", "0") == "1" || g("daemon", "0") == "true") ? "checked" : "";
     o += "></div><button type=\"submit\" class=\"btn\">Save</button><div id=\"msg\" class=\"msg\"></div></form><script>\n"
@@ -4239,6 +4348,10 @@ h1{font-size:1.35rem;font-weight:600;color:var(--green);margin-bottom:.25rem}
          "function endTestFromBanner(){showPowerReasonModal({title:'End battery test',desc:'This will turn grid back on. A reason is required.',confirmText:'End test'},function(r){fetch('/api/shelly/relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({turn:'on',reason:r})}).then(function(x){return x.json()}).then(function(d){if(d.ok){var b=$('test-banner');if(b)b.classList.remove('show')}}).catch(function(){})})}\n"
          "function upTestBanner(){var b=$('test-banner');if(!b||!b.classList.contains('show'))return;fetch('/api/shelly/status').then(function(r){return r.json()}).then(function(s){if(!s.test_active){b.classList.remove('show');return}Promise.all([fetch('/api/status').then(function(r){return r.json()}),fetch('/api/analytics').then(function(r){return r.json()})]).then(function(arr){var st=arr[0],an=arr[1];var soc=$('tb-soc'),load=$('tb-load'),rt=$('tb-rt');if(soc)soc.textContent=st.valid?fmt(st.soc_pct,1):'—';if(load)load.textContent=an.avg_discharge_24h_w>0?fmt(an.avg_discharge_24h_w,1):'—';if(rt)rt.textContent=an.runtime_from_current_h>0?fmt(an.runtime_from_current_h,1):'—'})})}\n"
          "fetch('/api/shelly/status').then(function(r){return r.json()}).then(function(s){if(s.test_active){var b=$('test-banner');if(b){b.classList.add('show');upTestBanner();setInterval(upTestBanner,5000)}}}).catch(function(){})\n"
+         "function addSchedule(){var t=$('sched-type').value,f=$('sched-freq').value,h=parseInt($('sched-hour').value,10)||2,m=parseInt($('sched-min').value,10)||0,d=parseInt($('sched-dom').value,10)||1;fetch('/api/tests/schedules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({test_type:t,frequency:f,run_hour:h,run_minute:m,day_of_month:d})}).then(function(r){return r.json()}).then(function(x){if(x.ok){loadSchedSettings();$('msg').textContent='Schedule added. Runs in daemon mode.';$('msg').className='msg'}else{$('msg').textContent='Error: '+(x.error||'failed');$('msg').className='msg err'}}).catch(function(){$('msg').textContent='Failed to add schedule';$('msg').className='msg err'})}\n"
+         "function loadSchedSettings(){fetch('/api/tests/schedules').then(function(r){return r.json()}).then(function(d){var s=d.schedules||[];var el=$('sched-list-settings');if(!el)return;if(!s.length){el.innerHTML='No scheduled tests. Add above.';return}el.innerHTML=s.map(function(x){var n=new Date(x.next_run_ts*1000);return x.test_type+' ('+x.frequency+') &middot; Next: '+n.toLocaleDateString()+' '+n.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})+' <a href=\"#\" onclick=\"delSchedule('+x.id+');return false\" style=\"color:var(--muted);margin-left:.5rem\">Remove</a>'}).join('<br>')})}\n"
+         "function delSchedule(id){fetch('/api/tests/schedules/'+id,{method:'DELETE'}).then(function(r){if(r.ok)loadSchedSettings()})}\n"
+         "loadSchedSettings();\n"
          "</script></body></html>";
     return o;
 }

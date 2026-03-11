@@ -125,6 +125,25 @@ public:
     std::vector<testing::TestTelemetrySample> load_test_telemetry(int64_t test_id,
                                                                   size_t limit = 10000) const;
 
+    // Test schedules (automated tests)
+    struct TestScheduleRow {
+        int64_t id{0};
+        std::string test_type;
+        std::string frequency;   // "daily", "weekly", "monthly"
+        int run_hour{2};
+        int run_minute{0};
+        int day_of_month{1};     // for monthly
+        int64_t next_run_ts{0};
+        bool enabled{true};
+        int64_t last_skip_ts{0};
+        std::string last_skip_reason;
+    };
+    std::vector<TestScheduleRow> load_test_schedules() const;
+    int64_t insert_test_schedule(const TestScheduleRow& row);
+    bool update_test_schedule_next_run(int64_t id, int64_t next_run_ts);
+    bool update_test_schedule_skip(int64_t id, int64_t ts, const std::string& reason);
+    bool delete_test_schedule(int64_t id);
+
     // Battery analytics persistence
     void insert_battery_resistance(int64_t ts, double resistance_ohms, double load_current,
                                    double voltage_drop, int64_t test_id, const std::string& source);

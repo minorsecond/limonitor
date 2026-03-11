@@ -79,4 +79,7 @@ private:
     void finish_test(const std::string& result, const std::string& metadata_json);
 };
 
+// Called from main loop (e.g. every 60s) to run due scheduled tests
+void check_scheduled_tests(Database* db, DataStore& store, TestRunner* runner);
+
 } // namespace testing

@@ -34,6 +34,7 @@ struct SafetyLimits {
     double soc_floor_pct{10.0};       // Abort if SOC drops below
     double voltage_floor_v{11.0};     // Abort if pack voltage drops below (12V system)
     int max_duration_sec{7200};       // Max 2 hours per test
+    bool abort_on_overtemp{true};     // Abort if temperature exceeds limit
 };
 
 // High-resolution telemetry sample (1–2 second interval during tests)

@@ -631,6 +631,7 @@ int main(int argc, char** argv) {
             if (db && db->is_open()) {
                 auto now = std::chrono::steady_clock::now();
                 shelly::check_test_conditions(db.get(), store);
+                testing::check_scheduled_tests(db.get(), store, &test_runner);
                 std::string mm = db->get_setting("maintenance_mode");
                 if (mm == "1") {
                     std::string start_s = db->get_setting("maintenance_start_time");

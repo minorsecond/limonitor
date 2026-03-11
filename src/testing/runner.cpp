@@ -173,6 +173,12 @@ void TestRunner::flush_telemetry() {
 bool TestRunner::check_safety_limits(const BatterySnapshot& bat) const {
     if (bat.soc_pct < limits_.soc_floor_pct) return true;
     if (bat.total_voltage_v < limits_.voltage_floor_v) return true;
+    auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    if (limits_.max_duration_sec > 0 && (now - test_start_ts_) >= limits_.max_duration_sec)
+        return true;
+    if (limits_.abort_on_overtemp &&
+        (bat.protection.charge_overtemp || bat.protection.discharge_overtemp))
+        return true;
     return false;
 }
 
@@ -226,6 +232,65 @@ void TestRunner::finish_test(const std::string& result, const std::string& metad
     running_ = false;
     current_test_id_ = 0;
     stop_requested_ = false;
+}
+
+static int64_t compute_next_run(const std::string& freq, int hour, int min, int day) {
+    std::time_t now = std::time(nullptr);
+    struct tm t{};
+    localtime_r(&now, &t);
+    t.tm_sec = 0; t.tm_min = min; t.tm_hour = hour;
+    if (freq == "daily") {
+        std::time_t cand = std::mktime(&t);
+        return cand <= now ? cand + 86400 : cand;
+    }
+    if (freq == "weekly") {
+        int wday = (day >= 0 && day <= 6) ? day : 0;
+        int delta = (wday - t.tm_wday + 7) % 7;
+        if (delta == 0) t.tm_mday += 7;
+        else t.tm_mday += delta;
+        return std::mktime(&t);
+    }
+    if (freq == "monthly") {
+        t.tm_mday = (day >= 1 && day <= 28) ? day : 1;
+        std::time_t cand = std::mktime(&t);
+        if (cand <= now) { t.tm_mon += 1; cand = std::mktime(&t); }
+        return cand;
+    }
+    return now + 86400;
+}
+
+void check_scheduled_tests(Database* db, DataStore& store, TestRunner* runner) {
+    if (!db || !db->is_open() || !runner || runner->is_running()) return;
+    auto scheds = db->load_test_schedules();
+    std::time_t now = std::time(nullptr);
+    auto bat = store.latest();
+    if (!bat || !bat->valid) return;
+    const auto& lim = runner->safety_limits();
+    for (const auto& s : scheds) {
+        if (!s.enabled || s.next_run_ts > now) continue;
+        TestType type = parse_test_type(s.test_type.c_str());
+        std::string reason;
+        if (bat->soc_pct < lim.soc_floor_pct + 5.0)
+            reason = "SOC too low (" + std::to_string(static_cast<int>(bat->soc_pct)) + "%)";
+        else if (bat->total_voltage_v < lim.voltage_floor_v + 0.5)
+            reason = "Voltage too low (" + std::to_string(static_cast<int>(bat->total_voltage_v * 10) / 10.0) + "V)";
+        else if (db->get_setting("maintenance_mode") == "1")
+            reason = "Maintenance mode active";
+        if (!reason.empty()) {
+            db->update_test_schedule_skip(s.id, now, reason);
+            db->update_test_schedule_next_run(s.id, compute_next_run(s.frequency, s.run_hour, s.run_minute, s.day_of_month));
+            LOG_WARN("Scheduled test %s skipped: %s", s.test_type.c_str(), reason.c_str());
+            continue;
+        }
+        int64_t id = runner->start_test(type);
+        if (id > 0) {
+            db->update_test_schedule_next_run(s.id, compute_next_run(s.frequency, s.run_hour, s.run_minute, s.day_of_month));
+            LOG_INFO("Scheduled test %s started (id=%lld)", s.test_type.c_str(), (long long)id);
+            return;
+        }
+        db->update_test_schedule_skip(s.id, now, "start_test failed");
+        db->update_test_schedule_next_run(s.id, compute_next_run(s.frequency, s.run_hour, s.run_minute, s.day_of_month));
+    }
 }
 
 } // namespace testing

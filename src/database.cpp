@@ -266,6 +266,22 @@ bool Database::migrate() {
         "CREATE INDEX IF NOT EXISTS ces_ts ON charger_efficiency_samples(timestamp);"
     )) return false;
 
+    if (!exec(
+        "CREATE TABLE IF NOT EXISTS test_schedules ("
+        "  id            INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  test_type     TEXT NOT NULL,"
+        "  frequency     TEXT NOT NULL DEFAULT 'monthly',"
+        "  run_hour      INTEGER NOT NULL DEFAULT 2,"
+        "  run_minute    INTEGER NOT NULL DEFAULT 0,"
+        "  day_of_month  INTEGER DEFAULT 1,"
+        "  next_run_ts   INTEGER NOT NULL,"
+        "  enabled       INTEGER NOT NULL DEFAULT 1,"
+        "  last_skip_ts   INTEGER,"
+        "  last_skip_reason TEXT"
+        ");"
+        "CREATE INDEX IF NOT EXISTS ts_next ON test_schedules(next_run_ts);"
+    )) return false;
+
     return true;
 }
 
@@ -1105,6 +1121,97 @@ std::vector<testing::TestTelemetrySample> Database::load_test_telemetry(int64_t 
     }
     sqlite3_finalize(stmt);
     return result;
+}
+
+std::vector<Database::TestScheduleRow> Database::load_test_schedules() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<TestScheduleRow> result;
+    if (!db_) return result;
+    auto* db = db_handle(db_);
+    const char* sql = "SELECT id, test_type, frequency, run_hour, run_minute, day_of_month, next_run_ts, enabled, last_skip_ts, last_skip_reason FROM test_schedules ORDER BY next_run_ts";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return result;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        TestScheduleRow r;
+        r.id = sqlite3_column_int64(stmt, 0);
+        if (auto* t = sqlite3_column_text(stmt, 1)) r.test_type = reinterpret_cast<const char*>(t);
+        if (auto* t = sqlite3_column_text(stmt, 2)) r.frequency = reinterpret_cast<const char*>(t);
+        r.run_hour = sqlite3_column_int(stmt, 3);
+        r.run_minute = sqlite3_column_int(stmt, 4);
+        r.day_of_month = sqlite3_column_int(stmt, 5);
+        r.next_run_ts = sqlite3_column_int64(stmt, 6);
+        r.enabled = sqlite3_column_int(stmt, 7) != 0;
+        r.last_skip_ts = sqlite3_column_int64(stmt, 8);
+        if (auto* t = sqlite3_column_text(stmt, 9)) r.last_skip_reason = reinterpret_cast<const char*>(t);
+        result.push_back(r);
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+int64_t Database::insert_test_schedule(const TestScheduleRow& row) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return 0;
+    auto* db = db_handle(db_);
+    const char* sql = "INSERT INTO test_schedules (test_type, frequency, run_hour, run_minute, day_of_month, next_run_ts, enabled) VALUES (?, ?, ?, ?, ?, ?, ?)";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return 0;
+    sqlite3_bind_text(stmt, 1, row.test_type.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, row.frequency.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 3, row.run_hour);
+    sqlite3_bind_int(stmt, 4, row.run_minute);
+    sqlite3_bind_int(stmt, 5, row.day_of_month);
+    sqlite3_bind_int64(stmt, 6, row.next_run_ts);
+    sqlite3_bind_int(stmt, 7, row.enabled ? 1 : 0);
+    sqlite3_step(stmt);
+    int64_t id = sqlite3_last_insert_rowid(db);
+    sqlite3_finalize(stmt);
+    return id;
+}
+
+bool Database::update_test_schedule_next_run(int64_t id, int64_t next_run_ts) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return false;
+    auto* db = db_handle(db_);
+    const char* sql = "UPDATE test_schedules SET next_run_ts=? WHERE id=?";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_int64(stmt, 1, next_run_ts);
+    sqlite3_bind_int64(stmt, 2, id);
+    sqlite3_step(stmt);
+    bool ok = sqlite3_changes(db) > 0;
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+bool Database::update_test_schedule_skip(int64_t id, int64_t ts, const std::string& reason) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return false;
+    auto* db = db_handle(db_);
+    const char* sql = "UPDATE test_schedules SET last_skip_ts=?, last_skip_reason=? WHERE id=?";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_int64(stmt, 1, ts);
+    sqlite3_bind_text(stmt, 2, reason.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 3, id);
+    sqlite3_step(stmt);
+    bool ok = sqlite3_changes(db) > 0;
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+bool Database::delete_test_schedule(int64_t id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return false;
+    auto* db = db_handle(db_);
+    const char* sql = "DELETE FROM test_schedules WHERE id=?";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_int64(stmt, 1, id);
+    sqlite3_step(stmt);
+    bool ok = sqlite3_changes(db) > 0;
+    sqlite3_finalize(stmt);
+    return ok;
 }
 
 void Database::insert_battery_resistance(int64_t ts, double resistance_ohms, double load_current,
