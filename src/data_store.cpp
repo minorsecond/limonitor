@@ -97,6 +97,13 @@ void DataStore::set_database(Database* db) {
     db_ = db;
 }
 
+void DataStore::set_config(const Config& cfg) {
+    std::lock_guard<std::mutex> lk(mu_);
+    cfg_ = cfg;
+    tx_threshold_ = cfg.tx_threshold_a;
+    analytics_.set_rated_capacity(cfg.rated_capacity_ah);
+}
+
 void DataStore::load_system_events_from_db(const std::vector<SystemEvent>& events) {
     std::lock_guard<std::mutex> lk(mu_);
     for (const auto& e : events) {
@@ -353,6 +360,14 @@ void DataStore::set_rated_capacity(double ah) {
 void DataStore::update_self_monitor() {
     std::lock_guard<std::mutex> lk(mu_);
     analytics_.update_self_monitor(db_);
+
+    // Run database cleanup once per day
+    static auto last_db_cleanup = std::chrono::steady_clock::now();
+    auto now = std::chrono::steady_clock::now();
+    if (db_ && std::chrono::duration_cast<std::chrono::hours>(now - last_db_cleanup).count() >= 24) {
+        db_->cleanup(cfg_.data_retention_days, cfg_.event_retention_days);
+        last_db_cleanup = now;
+    }
 }
 
 AnalyticsSnapshot DataStore::analytics() const {

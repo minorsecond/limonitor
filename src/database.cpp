@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <map>
 #include <sqlite3.h>
+#include <ctime>
 
 static inline sqlite3* db_handle(void* p) { return static_cast<sqlite3*>(p); }
 
@@ -1579,4 +1580,74 @@ std::vector<std::pair<std::string, int64_t>> Database::table_sizes() const {
         }
     }
     return result;
+}
+
+void Database::cleanup(int max_age_days, int event_max_age_days) {
+    if (max_age_days <= 0) return;
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return;
+    auto* db = db_handle(db_);
+
+    int64_t now = static_cast<int64_t>(std::time(nullptr));
+    int64_t threshold = now - (static_cast<int64_t>(max_age_days) * 86400);
+
+    LOG_INFO("DB: Starting cleanup (max_age_days=%d, threshold=%lld)", max_age_days, (long long)threshold);
+
+    // List of tables and their timestamp columns to clean up
+    struct CleanupTarget {
+        const char* table;
+        const char* ts_col;
+    };
+
+    std::vector<CleanupTarget> targets = {
+        {"battery_readings", "ts"},
+        {"charger_readings", "ts"},
+        {"solar_performance", "ts"},
+        {"test_telemetry", "ts"}
+    };
+
+    for (const auto& target : targets) {
+        char sql[256];
+        std::snprintf(sql, sizeof(sql), "DELETE FROM %s WHERE %s < %lld", target.table, target.ts_col, (long long)threshold);
+        char* zErrMsg = nullptr;
+        int rc = sqlite3_exec(db, sql, nullptr, nullptr, &zErrMsg);
+        if (rc != SQLITE_OK) {
+            LOG_WARN("DB: Cleanup failed for table %s: %s", target.table, zErrMsg ? zErrMsg : "unknown error");
+            if (zErrMsg) sqlite3_free(zErrMsg);
+        } else {
+            int changes = sqlite3_changes(db);
+            if (changes > 0) {
+                LOG_INFO("DB: Cleaned up %d rows from %s", changes, target.table);
+            }
+        }
+    }
+
+    // Keep events for much longer (e.g. event_max_age_days) to maintain historical context for years.
+    if (event_max_age_days > 0) {
+        int64_t event_threshold = now - (static_cast<int64_t>(event_max_age_days) * 86400);
+        LOG_INFO("DB: Event cleanup (event_max_age_days=%d, threshold=%lld)", event_max_age_days, (long long)event_threshold);
+
+        std::vector<CleanupTarget> event_targets = {
+            {"system_events", "ts"},
+            {"ops_events", "ts"}
+        };
+        for (const auto& target : event_targets) {
+            char sql[256];
+            std::snprintf(sql, sizeof(sql), "DELETE FROM %s WHERE %s < %lld", target.table, target.ts_col, (long long)event_threshold);
+            char* zErrMsg = nullptr;
+            int rc = sqlite3_exec(db, sql, nullptr, nullptr, &zErrMsg);
+            if (rc == SQLITE_OK) {
+                int changes = sqlite3_changes(db);
+                if (changes > 0) {
+                    LOG_INFO("DB: Cleaned up %d rows from event table %s", changes, target.table);
+                }
+            } else {
+                LOG_WARN("DB: Failed to cleanup event table %s", target.table);
+            }
+        }
+    }
+
+    // Finally, run an incremental vacuum if enabled, or just checkpoint.
+    // Full VACUUM can be slow and block, so we prefer checkpoints and WAL space reuse.
+    sqlite3_wal_checkpoint_v2(db, "main", SQLITE_CHECKPOINT_PASSIVE, nullptr, nullptr);
 }

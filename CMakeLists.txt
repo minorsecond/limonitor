@@ -140,10 +140,8 @@ else()
     pkg_check_modules(GIO REQUIRED IMPORTED_TARGET gio-2.0)
 endif()
 
-if(DEFINED GIT_COMMIT_HASH)
-    configure_file(src/version.h.in "${CMAKE_BINARY_DIR}/version.h" @ONLY)
-    include_directories("${CMAKE_BINARY_DIR}")
-endif()
+configure_file(src/version.h.in "${CMAKE_BINARY_DIR}/version.h" @ONLY)
+include_directories("${CMAKE_BINARY_DIR}")
 
 add_executable(limonitor ${SOURCES})
 target_compile_options(limonitor PRIVATE -Wall -Wextra -Wno-psabi ${COMMON_OPT_FLAGS} ${ARCH_OPT_FLAGS})

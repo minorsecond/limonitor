@@ -54,6 +54,8 @@ struct Config {
     // Battery metadata
     std::string battery_purchased;      // e.g. "2024-03-15" — stored as-is
     double rated_capacity_ah = 0.0;     // 0 = auto-detect from BMS nominal_ah
+    int    data_retention_days = 90;    // Number of days to keep high-res telemetry
+    int    event_retention_days = 3650;  // Number of days to keep system/ops events (10 years)
 
     // Solar simulation (config.toml [solar] equivalent via key=value)
     bool solar_enabled = false;

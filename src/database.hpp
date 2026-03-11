@@ -187,6 +187,14 @@ public:
     int64_t file_size() const;
     std::vector<std::pair<std::string, int64_t>> table_sizes() const;
 
+    /**
+     * @brief Maintenance routine to prevent the database from growing indefinitely.
+     * Deletes high-resolution telemetry (battery/charger) older than max_age_days.
+     * Keeps events and test runs for longer.
+     * @param max_age_days - Delete telemetry data older than this many days.
+     */
+    void cleanup(int max_age_days, int event_max_age_days);
+
     // Platform default:
     //   macOS: ~/Library/Application Support/limonitor/limonitor.db
     //   Linux: $XDG_DATA_HOME/limonitor/limonitor.db  (or ~/.local/share/...)

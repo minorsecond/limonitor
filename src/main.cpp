@@ -92,6 +92,8 @@ static void migrate_and_load_config(Database* db, Config& cfg) {
         set_if_missing("battery_purchased", cfg.battery_purchased);
         set_if_missing("rated_capacity_ah", std::to_string(cfg.rated_capacity_ah));
         set_if_missing("tx_threshold", std::to_string(cfg.tx_threshold_a));
+        set_if_missing("data_retention", std::to_string(cfg.data_retention_days));
+        set_if_missing("event_retention", std::to_string(cfg.event_retention_days));
         set_if_missing("solar_enabled", cfg.solar_enabled ? "1" : "0");
         set_if_missing("solar_panel_watts", std::to_string(cfg.solar_panel_watts));
         set_if_missing("solar_system_efficiency", std::to_string(cfg.solar_system_efficiency));
@@ -125,6 +127,8 @@ static void migrate_and_load_config(Database* db, Config& cfg) {
         cfg.battery_purchased = v("battery_purchased");
         if (!(s = v("rated_capacity_ah")).empty()) { try { cfg.rated_capacity_ah = std::stod(s); } catch (...) {} }
         if (!(s = v("tx_threshold")).empty()) { try { cfg.tx_threshold_a = std::stod(s); } catch (...) {} }
+        if (!(s = v("data_retention")).empty()) { try { cfg.data_retention_days = std::stoi(s); } catch (...) {} }
+        if (!(s = v("event_retention")).empty()) { try { cfg.event_retention_days = std::stoi(s); } catch (...) {} }
         cfg.solar_enabled = (v("solar_enabled") == "1" || v("solar_enabled") == "true");
         if (!(s = v("solar_panel_watts")).empty()) { try { cfg.solar_panel_watts = std::stod(s); } catch (...) {} }
         if (!(s = v("solar_system_efficiency")).empty()) { try { cfg.solar_system_efficiency = std::stod(s); } catch (...) {} }
@@ -183,6 +187,8 @@ static void run_tui_settings(Database* db, Config& cfg) {
     v = prompt("Battery purchase date (YYYY-MM-DD)", cfg.battery_purchased); save_str("battery_purchased", v, cfg.battery_purchased);
     v = prompt("Rated capacity Ah (0=auto)", std::to_string(cfg.rated_capacity_ah)); save_dbl("rated_capacity_ah", v, cfg.rated_capacity_ah);
     v = prompt("TX threshold (amps)", std::to_string(cfg.tx_threshold_a)); save_dbl("tx_threshold", v, cfg.tx_threshold_a);
+    v = prompt("Data retention (days)", std::to_string(cfg.data_retention_days)); save_int("data_retention", v, cfg.data_retention_days);
+    v = prompt("Event retention (days)", std::to_string(cfg.event_retention_days)); save_int("event_retention", v, cfg.event_retention_days);
     v = prompt("Solar enabled (1/0)", cfg.solar_enabled ? "1" : "0"); save_bool("solar_enabled", v, cfg.solar_enabled);
     v = prompt("Solar panel watts", std::to_string(cfg.solar_panel_watts)); save_dbl("solar_panel_watts", v, cfg.solar_panel_watts);
     v = prompt("Solar system efficiency (0-1)", std::to_string(cfg.solar_system_efficiency)); save_dbl("solar_system_efficiency", v, cfg.solar_system_efficiency);
@@ -245,6 +251,8 @@ static void load_config_file(const std::string& path, Config& cfg) {
             else if (key == "daemon")              cfg.daemon_mode        = strtobool(val);
             else if (key == "battery_purchased")   cfg.battery_purchased  = val;
             else if (key == "tx_threshold")        cfg.tx_threshold_a     = std::stod(val);
+            else if (key == "data_retention")       cfg.data_retention_days = std::stoi(val);
+            else if (key == "event_retention")      cfg.event_retention_days = std::stoi(val);
             else if (key == "rated_capacity_ah")   cfg.rated_capacity_ah  = std::stod(val);
             else if (key == "solar_enabled")       cfg.solar_enabled      = strtobool(val);
             else if (key == "solar_panel_watts")   cfg.solar_panel_watts  = std::stod(val);
@@ -291,6 +299,8 @@ static void print_usage(const char* prog) {
         "  --pwrgate-remote HOST:PORT  Poll remote limonitor for charger data\n"
         "  --db PATH      SQLite database path             [platform default]\n"
         "  --db-interval N  DB write throttle seconds      [60]\n"
+        "  --retention DAYS High-res data retention days    [90]\n"
+        "  --event-retention DAYS Event data retention days [3650]\n"
         "  --daemon       Run headless (no TUI) — for background/service use\n"
         "  --purchase-date DATE  Record battery purchase date (e.g. 2024-03-15)\n"
         "  --rated-capacity N    Rated battery capacity in Ah (default: auto from BMS)\n"
@@ -343,6 +353,8 @@ static Config parse_args(int argc, char** argv, Config cfg = {}) {
         else if (arg == "--pwrgate-remote") cfg.pwrgate_remote = next();
         else if (arg == "--db")      cfg.db_path = next();
         else if (arg == "--db-interval") cfg.db_write_interval_s = std::stoi(next());
+        else if (arg == "--retention")   cfg.data_retention_days = std::stoi(next());
+        else if (arg == "--event-retention") cfg.event_retention_days = std::stoi(next());
         else if (arg == "--daemon")         cfg.daemon_mode       = true;
         else if (arg == "--purchase-date")  cfg.battery_purchased = next();
         else if (arg == "--rated-capacity") cfg.rated_capacity_ah = std::stod(next());
@@ -468,7 +480,8 @@ int main(int argc, char** argv) {
 
     // Data store
     DataStore store(cfg.history_size);
-    store.set_tx_threshold(cfg.tx_threshold_a);
+    store.set_config(cfg);
+    store.set_database(db->is_open() ? db.get() : nullptr);
     store.init_extensions(cfg, db->is_open() ? db.get() : nullptr);
     LOG_INFO("TX detection threshold: %.2f A (net positive battery discharge)", cfg.tx_threshold_a);
     if (cfg.solar_enabled)

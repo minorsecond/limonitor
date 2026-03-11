@@ -57,6 +57,7 @@ public:
     std::string purchase_date() const;
 
     void set_database(Database* db);
+    void set_config(const Config& cfg);
     void load_system_events_from_db(const std::vector<SystemEvent>& events);
     void set_loading_history(bool loading);  // when true, don't push events (used during startup load)
 
@@ -121,6 +122,7 @@ private:
 
     // Analytics engine
     AnalyticsEngine analytics_;
+    Config cfg_;
 
     // Analytics extensions (optional)
     std::unique_ptr<AnalyticsExtensions> extensions_;
