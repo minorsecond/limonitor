@@ -1,11 +1,22 @@
 #include "analytics.hpp"
 #include "battery_data.hpp"
+#include "database.hpp"
 #include "pwrgate.hpp"
+#include "logger.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <ctime>
+#include <fstream>
+
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <sys/resource.h>
+#else
+#include <sys/resource.h>
+#include <unistd.h>
+#endif
 
 int AnalyticsEngine::unix_day(double ts) {
     time_t tt = static_cast<time_t>(ts);
@@ -581,6 +592,54 @@ void AnalyticsEngine::compute_system_status(const BatterySnapshot& bat,
     status += " · Cell balance: " + snap_.cell_balance_status;
     status += " · Temperature: " + snap_.temp_status;
     snap_.system_status = status;
+}
+
+void AnalyticsEngine::update_self_monitor(Database* db) {
+    // 1. Memory usage
+#ifdef __APPLE__
+    task_basic_info_data_t info;
+    mach_msg_type_number_t count = TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_BASIC_INFO, (task_info_t)&info, &count) == KERN_SUCCESS) {
+        snap_.process_rss_kb = info.resident_size / 1024;
+        snap_.process_vsz_kb = info.virtual_size / 1024;
+    }
+#else
+    std::ifstream statm("/proc/self/statm");
+    if (statm) {
+        long vpages, rpages;
+        if (statm >> vpages >> rpages) {
+            long page_size = sysconf(_SC_PAGESIZE);
+            snap_.process_vsz_kb = (vpages * page_size) / 1024;
+            snap_.process_rss_kb = (rpages * page_size) / 1024;
+        }
+    }
+#endif
+
+    // 2. CPU usage (simplified average over uptime)
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+        double utime = usage.ru_utime.tv_sec + usage.ru_utime.tv_usec / 1000000.0;
+        double stime = usage.ru_stime.tv_sec + usage.ru_stime.tv_usec / 1000000.0;
+        double total_cpu_time = utime + stime;
+
+        static double last_cpu_time = 0;
+        static double last_ts = 0;
+        double now = static_cast<double>(std::time(nullptr));
+
+        if (last_ts > 0 && now > last_ts) {
+            double delta_cpu = total_cpu_time - last_cpu_time;
+            double delta_wall = now - last_ts;
+            snap_.process_cpu_pct = (delta_cpu / delta_wall) * 100.0;
+        }
+        last_cpu_time = total_cpu_time;
+        last_ts = now;
+    }
+
+    // 3. Database size
+    if (db) {
+        snap_.db_size_bytes = db->file_size();
+        snap_.db_table_sizes = db->table_sizes();
+    }
 }
 
 void AnalyticsEngine::on_battery(const BatterySnapshot& snap, const PwrGateSnapshot* chg) {

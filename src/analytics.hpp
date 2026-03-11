@@ -66,9 +66,17 @@ struct AnalyticsSnapshot {
     bool   runtime_from_historical{false}; // true when load from 7d DB profile (on grid)
     double avg_discharge_24h_w{0};      // 24h average discharge (W), 0 = insufficient data
     std::vector<std::string> health_alerts;
+
+    // Self-monitoring
+    int64_t process_rss_kb{0};
+    int64_t process_vsz_kb{0};
+    double  process_cpu_pct{0};
+    int64_t db_size_bytes{0};
+    std::vector<std::pair<std::string, int64_t>> db_table_sizes;
 };
 
 // Forward declarations (avoid pulling in full headers)
+class Database;
 struct BatterySnapshot;
 struct PwrGateSnapshot;
 
@@ -83,6 +91,7 @@ public:
     void on_charger(const PwrGateSnapshot& snap, const BatterySnapshot* bat = nullptr);
 
     const AnalyticsSnapshot& snapshot() const { return snap_; }
+    void update_self_monitor(Database* db);
 
 private:
     AnalyticsSnapshot snap_;

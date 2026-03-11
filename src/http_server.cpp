@@ -614,8 +614,9 @@ void HttpServer::handle(int fd) {
                     ",\"shelly_test_active\":" + jstr(db_->get_setting("shelly_test_active")) + "}";
             }
             std::string theme = db_ ? db_->get_setting("theme") : "";
+            auto an = store_.analytics();
             send_response(fd, 200, "text/html",
-                          html_dashboard(snap, ble_st, pg,
+                          html_dashboard(snap, ble_st, pg, an, store_,
                                          store_.purchase_date(), h, poll_interval_s_, init_settings, theme));
         }
     } else if (path == "/solar" || path == "/solar.html") {
@@ -1447,6 +1448,16 @@ std::string HttpServer::analytics_json(const AnalyticsSnapshot& a,
         o += jstr(a.health_alerts[i]);
     }
     o += "]";
+    o += ",\n  \"process_rss_kb\": " + std::to_string(a.process_rss_kb);
+    o += ",\n  \"process_vsz_kb\": " + std::to_string(a.process_vsz_kb);
+    o += ",\n  \"process_cpu_pct\": " + jdbl(a.process_cpu_pct, 1);
+    o += ",\n  \"db_size_bytes\": " + std::to_string(a.db_size_bytes);
+    o += ",\n  \"db_table_sizes\": {";
+    for (size_t i = 0; i < a.db_table_sizes.size(); ++i) {
+        if (i) o += ",";
+        o += jstr(a.db_table_sizes[i].first) + ":" + std::to_string(a.db_table_sizes[i].second);
+    }
+    o += "}";
     if (store) {
         auto now_s = std::chrono::steady_clock::now();
         auto uptime = std::chrono::duration_cast<std::chrono::seconds>(
@@ -2201,6 +2212,8 @@ std::string HttpServer::charger_json(const PwrGateSnapshot& pg) {
 
 std::string HttpServer::html_dashboard(const BatterySnapshot& s, const std::string& ble_st,
                                        const PwrGateSnapshot& pg,
+                                       const AnalyticsSnapshot& a,
+                                       const DataStore& store,
                                        const std::string& purchase_date,
                                        double hours,
                                        int poll_interval_s,
@@ -2643,6 +2656,34 @@ html.light .pwr-modal-submit{background:#16a34a}
          "<tr><td>Peak TX power</td><td id=\"tx-peak-pwr\">—</td></tr>"
          "<tr><td>Avg TX current</td><td id=\"tx-avg-cur\">—</td></tr>"
          "</table></div>\n";
+
+    // Performance monitoring (Self-monitor)
+    o += "<div class=\"card\"><div class=\"card-title\">Application Performance</div><table class=\"dt\">\n";
+    snprintf(buf, sizeof(buf), "<tr><td>Memory (RSS / VSZ)</td><td id=\"sys-mem\">%.1f / %.1f MB</td></tr>\n", a.process_rss_kb / 1024.0, a.process_vsz_kb / 1024.0);
+    o += buf;
+    snprintf(buf, sizeof(buf), "<tr><td>CPU Usage</td><td id=\"sys-cpu\">%.1f%%</td></tr>\n", a.process_cpu_pct);
+    o += buf;
+    {
+        auto uptime = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - store.startup_time()).count();
+        int days = static_cast<int>(uptime / 86400);
+        int hours = static_cast<int>((uptime % 86400) / 3600);
+        int mins = static_cast<int>((uptime % 3600) / 60);
+        snprintf(buf, sizeof(buf), "<tr><td>Uptime</td><td>%dd %dh %dm</td></tr>\n", days, hours, mins);
+        o += buf;
+    }
+    o += "</table></div>\n";
+
+    // Database statistics
+    o += "<div class=\"card\"><div class=\"card-title\">Database Integrity</div><table class=\"dt\">\n";
+    snprintf(buf, sizeof(buf), "<tr><td>Database File</td><td id=\"sys-db-size\">%.2f MB</td></tr>\n", a.db_size_bytes / 1024.0 / 1024.0);
+    o += buf;
+    o += "<tr><td>Table Row Counts</td><td><div id=\"sys-db-tables\" style=\"font-size:0.8rem; line-height:1.4;\">";
+    for (size_t i = 0; i < a.db_table_sizes.size(); ++i) {
+        if (i) o += "<br/>";
+        o += "<b>" + a.db_table_sizes[i].first + ":</b> " + std::to_string(a.db_table_sizes[i].second);
+    }
+    o += "</div></td></tr>\n";
+    o += "</table></div>\n";
 
     o += "</div>\n"; // .col2
 
@@ -3158,6 +3199,14 @@ function upAnalytics(){fetch('/api/analytics').then(function(r){return r.json()}
       compEl.textContent=fmt(rec,2)+' vs '+fmt(base,2)+' %/h'
       compEl.title='Recent (last ~2 min) vs earlier (~4 min ago). Declining may indicate PSU limit or load.'
     }else compEl.textContent='—'
+  }
+  sv('sys-mem', (d.process_rss_kb/1024).toFixed(1) + ' / ' + (d.process_vsz_kb/1024).toFixed(1) + ' MB')
+  sv('sys-cpu', (d.process_cpu_pct||0).toFixed(1) + '%')
+  sv('sys-db-size', (d.db_size_bytes/1024/1024).toFixed(2) + ' MB')
+  var dbt=$('sys-db-tables');if(dbt&&d.db_table_sizes){
+    var h=''; Object.keys(d.db_table_sizes).forEach(function(k){
+      if(h)h+='<br/>'; h+='<b>'+k+':</b> '+d.db_table_sizes[k]
+    }); dbt.innerHTML=h
   }
   var psuW=d.psu_limited_warning||''
   var slowW=d.charge_slowdown_warning||''

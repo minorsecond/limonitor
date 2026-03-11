@@ -184,6 +184,8 @@ public:
     std::vector<std::pair<int64_t, double>> load_charger_efficiency_history(int days_back = 90) const;
 
     const std::string& path() const { return path_; }
+    int64_t file_size() const;
+    std::vector<std::pair<std::string, int64_t>> table_sizes() const;
 
     // Platform default:
     //   macOS: ~/Library/Application Support/limonitor/limonitor.db

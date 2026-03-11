@@ -61,7 +61,8 @@ public:
     void set_loading_history(bool loading);  // when true, don't push events (used during startup load)
 
     // Analytics — call after DataStore is constructed
-    void              set_rated_capacity(double ah);
+    void set_rated_capacity(double ah);
+    void update_self_monitor();
     AnalyticsSnapshot analytics() const;
 
     // Analytics extensions (anomaly, resistance, solar, weather, health)

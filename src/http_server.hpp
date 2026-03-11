@@ -87,6 +87,8 @@ private:
     static std::string system_health_json(const HealthScoreResult& r);
     static std::string html_dashboard(const BatterySnapshot& s, const std::string& ble_state,
                                       const PwrGateSnapshot& pg,
+                                      const AnalyticsSnapshot& an,
+                                      const DataStore& store,
                                       const std::string& purchase_date,
                                       double hours,
                                       int poll_interval_s,

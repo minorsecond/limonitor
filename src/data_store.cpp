@@ -190,6 +190,14 @@ void DataStore::update(BatterySnapshot snap) {
         process_tx_detection(snap);
         auto pg_opt = latest_pwrgate_locked();
         analytics_.on_battery(snap, pg_opt.has_value() ? &*pg_opt : nullptr);
+        
+        static auto last_self_monitor = std::chrono::steady_clock::now();
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - last_self_monitor).count() >= 60) {
+            analytics_.update_self_monitor(db_);
+            last_self_monitor = now;
+        }
+
         last_bms_update_ = snap.timestamp;
         process_system_events(snap, latest_pwrgate_locked(), analytics_.snapshot());
         ring_.push_back(snap);
@@ -340,6 +348,11 @@ std::chrono::system_clock::time_point DataStore::last_charger_update() const {
 void DataStore::set_rated_capacity(double ah) {
     std::lock_guard<std::mutex> lk(mu_);
     analytics_.set_rated_capacity(ah);
+}
+
+void DataStore::update_self_monitor() {
+    std::lock_guard<std::mutex> lk(mu_);
+    analytics_.update_self_monitor(db_);
 }
 
 AnalyticsSnapshot DataStore::analytics() const {
