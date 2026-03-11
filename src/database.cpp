@@ -1545,14 +1545,6 @@ std::vector<std::pair<std::string, int64_t>> Database::table_sizes() const {
     if (!db_) return result;
     auto* db = db_handle(db_);
 
-    // Get page size
-    int64_t page_size = 4096;
-    sqlite3_stmt* ps_stmt = nullptr;
-    if (sqlite3_prepare_v2(db, "PRAGMA page_size", -1, &ps_stmt, nullptr) == SQLITE_OK) {
-        if (sqlite3_step(ps_stmt) == SQLITE_ROW) page_size = sqlite3_column_int64(ps_stmt, 0);
-        sqlite3_finalize(ps_stmt);
-    }
-
     // Get table names
     const char* sql = "SELECT name FROM sqlite_master WHERE type='table'";
     sqlite3_stmt* stmt = nullptr;
