@@ -12,15 +12,24 @@ SVC_USER="${LIMONITOR_USER:-${SUDO_USER:-$USER}}"
 HTTP_PORT="${LIMONITOR_PORT:-8080}"
 CONFIG_PATH="/etc/limonitor/limonitor.conf"
 
-echo "=== clean ==="
-./clean.sh
+# Fast builds: check for ccache and ninja
+if command -v ccache >/dev/null 2>&1; then
+    export CMAKE_CXX_COMPILER_LAUNCHER=ccache
+fi
 
-echo "=== build ==="
-mkdir -p build
-cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
-cd ..
+BUILD_GENERATOR="Unix Makefiles"
+if command -v ninja >/dev/null 2>&1; then
+    BUILD_GENERATOR="Ninja"
+fi
+
+if [[ "$1" == "--clean" ]]; then
+    echo "=== clean ==="
+    ./clean.sh
+fi
+
+echo "=== build (using $BUILD_GENERATOR) ==="
+cmake -B build -G "$BUILD_GENERATOR" -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
 
 echo "=== install ==="
 sudo cmake --install build
@@ -32,6 +41,7 @@ if [[ "$(uname -s)" != "Linux" ]]; then
   exit 0
 fi
 sudo mkdir -p /etc/limonitor
+# Only update config if it doesn't exist
 if [[ ! -f "$CONFIG_PATH" ]]; then
   DB_PATH="/home/$SVC_USER/.local/share/limonitor/limonitor.db"
   sudo tee "$CONFIG_PATH" > /dev/null << EOF
@@ -57,7 +67,9 @@ EOF
   echo "created $CONFIG_PATH — edit and add device_name or device_address"
 fi
 
-sudo tee /etc/systemd/system/limonitor.service > /dev/null << EOF
+# Only update systemd unit and reload if it has changed
+TEMP_UNIT="/tmp/limonitor.service.tmp"
+cat > "$TEMP_UNIT" << EOF
 [Unit]
 Description=limonitor battery monitor
 After=network.target bluetooth.target
@@ -73,7 +85,14 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-sudo systemctl daemon-reload
+if ! diff -q "$TEMP_UNIT" /etc/systemd/system/limonitor.service > /dev/null 2>&1; then
+    sudo mv "$TEMP_UNIT" /etc/systemd/system/limonitor.service
+    sudo systemctl daemon-reload
+    echo "updated systemd service unit"
+else
+    rm "$TEMP_UNIT"
+fi
+
 sudo systemctl enable limonitor
 sudo systemctl start limonitor
 
