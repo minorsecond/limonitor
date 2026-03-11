@@ -112,6 +112,7 @@ private:
     double load_ring_[LOAD_N]{};
     size_t load_head_{0};
     size_t load_count_{0};
+    double last_load_push_ts_{-1};
 
     // Discharge capacity tracking (for health estimation)
     bool   was_discharging_{false};
@@ -141,7 +142,7 @@ private:
 
     // Charger behavior (for abnormal detection)
     double prev_chg_bat_v_{-1};
-    double chg_bat_v_variance_{0};
+    double chg_bat_v_delta_ema_{0};
     size_t chg_low_current_count_{0};
 
     // PSU limitation heuristic
@@ -187,10 +188,10 @@ private:
     void compute_system_status(const BatterySnapshot& bat,
                               const PwrGateSnapshot* chg);
 
-    // Helpers
+    // Helpers (use local time for day/hour boundaries)
     static int unix_day(double ts);
-    void reset_daily_if_needed(int day);
-    void push_load_sample(double watts);
+    void reset_daily_if_needed(int day, double ts);
+    void push_load_sample(double ts, double watts);
     void recompute_load_stats();
     void push_charger_power_sample(double watts);
     double avg_charger_power_w() const;

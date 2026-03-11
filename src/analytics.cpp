@@ -8,14 +8,21 @@
 #include <ctime>
 
 int AnalyticsEngine::unix_day(double ts) {
-    return static_cast<int>(ts / 86400.0);
+    time_t tt = static_cast<time_t>(ts);
+    struct tm tm_buf {};
+    localtime_r(&tt, &tm_buf);
+    return tm_buf.tm_year * 1000 + tm_buf.tm_yday;
 }
 
-static int unix_hour(double ts) {
-    return static_cast<int>(ts / 3600.0);
+static int local_hour_id(double ts) {
+    time_t tt = static_cast<time_t>(ts);
+    struct tm tm_buf {};
+    localtime_r(&tt, &tm_buf);
+    int day = tm_buf.tm_year * 1000 + tm_buf.tm_yday;
+    return day * 24 + tm_buf.tm_hour;
 }
 
-void AnalyticsEngine::reset_daily_if_needed(int day) {
+void AnalyticsEngine::reset_daily_if_needed(int day, double ts) {
     if (current_day_ == day) return;
     // Archive completed day's energy for weekly rollup
     if (current_day_ >= 0) {
@@ -43,7 +50,7 @@ void AnalyticsEngine::reset_daily_if_needed(int day) {
     charger_runtime_sec_  = 0;
     charger_runtime_day_  = day;
     prev_chg_minutes_     = -1;
-    last_discharge_integration_ts_ = -1;
+    last_discharge_integration_ts_ = ts;
 }
 
 void AnalyticsEngine::push_charger_power_sample(double watts) {
@@ -70,7 +77,11 @@ void AnalyticsEngine::integrate_discharge_wh(double ts, double power_w) {
     last_discharge_integration_ts_ = ts;
 }
 
-void AnalyticsEngine::push_load_sample(double watts) {
+void AnalyticsEngine::push_load_sample(double ts, double watts) {
+    constexpr double MIN_LOAD_INTERVAL = 2.5;
+    if (last_load_push_ts_ >= 0 && (ts - last_load_push_ts_) < MIN_LOAD_INTERVAL)
+        return;
+    last_load_push_ts_ = ts;
     load_ring_[load_head_] = watts;
     load_head_ = (load_head_ + 1) % LOAD_N;
     if (load_count_ < LOAD_N) ++load_count_;
@@ -416,14 +427,14 @@ void AnalyticsEngine::compute_extended_analytics(const BatterySnapshot& bat,
         }
         if (prev_chg_bat_v_ >= 0 && charging) {
             double delta = std::abs(chg->bat_v - prev_chg_bat_v_);
-            chg_bat_v_variance_ = chg_bat_v_variance_ * 0.8 + delta * 0.2;
-            if (chg_bat_v_variance_ > 0.5)
+            chg_bat_v_delta_ema_ = chg_bat_v_delta_ema_ * 0.8 + delta * 0.2;
+            if (chg_bat_v_delta_ema_ > 0.5)
                 snap_.charger_abnormal_warning = "Voltage unstable";
         }
         prev_chg_bat_v_ = chg->bat_v;
     } else {
         prev_chg_bat_v_ = -1;
-        chg_bat_v_variance_ = 0;
+        chg_bat_v_delta_ema_ = 0;
     }
 
     // PSU limitation heuristic: charger maxed but voltage won't rise toward target
@@ -495,8 +506,6 @@ void AnalyticsEngine::compute_extended_analytics(const BatterySnapshot& bat,
     constexpr double LIFEPO4_CUTOFF_PCT = 10.0;
     constexpr double MIN_LOAD_W = 0.01;   // avoid div-by-zero
     constexpr size_t MIN_LOAD_SAMPLES = 36;
-    constexpr size_t MIN_CHG_PWR_SAMPLES = 12;  // ~1 min at 1s charger polls
-    constexpr double MIN_CHG_PWR_W = 0.5;
     constexpr double MAX_RUNTIME_H = 1000.0;
     snap_.runtime_from_full_h = 0;
     snap_.runtime_from_current_h = 0;
@@ -507,18 +516,17 @@ void AnalyticsEngine::compute_extended_analytics(const BatterySnapshot& bat,
         double sum_wh = 0;
         for (size_t i = 0; i < discharge_hour_count_; ++i)
             sum_wh += discharge_wh_per_hour_[i];
-        load_w = sum_wh / static_cast<double>(discharge_hour_count_);
+        int span = discharge_hour_count_;
+        if (discharge_hour_count_ > 1) {
+            int first_h = discharge_hour_ts_[0];
+            int last_h = discharge_hour_ts_[discharge_hour_count_ - 1];
+            span = std::max(1, last_h - first_h + 1);
+        }
+        load_w = sum_wh / static_cast<double>(span);
         snap_.avg_discharge_24h_w = load_w;
     }
-    // Prefer charger power when charging (more relevant than sparse discharge samples)
-    if (load_w < MIN_LOAD_W && chg_pwr_count_ >= MIN_CHG_PWR_SAMPLES) {
-        double chg_avg = avg_charger_power_w();
-        if (chg_avg >= MIN_CHG_PWR_W) {
-            load_w = chg_avg;  // fallback: charger power when charging (est. load when grid drops)
-            snap_.avg_discharge_24h_w = load_w;
-            snap_.runtime_from_charger = true;
-        }
-    }
+    // Do not use charger power as load proxy — it measures power into the battery,
+    // not system load. Fall back to 1h load profile when discharge data is sparse.
     if (load_w < MIN_LOAD_W && load_count_ >= MIN_LOAD_SAMPLES && snap_.avg_load_watts >= MIN_LOAD_W) {
         load_w = snap_.avg_load_watts;  // fallback: 1h load profile (BMS + charger discharge)
         snap_.avg_discharge_24h_w = load_w;
@@ -593,7 +601,7 @@ void AnalyticsEngine::on_battery(const BatterySnapshot& snap, const PwrGateSnaps
     double ts = static_cast<double>(
         std::chrono::system_clock::to_time_t(snap.timestamp));
     int day = unix_day(ts);
-    reset_daily_if_needed(day);
+    reset_daily_if_needed(day, ts);
 
     // Auto-detect rated capacity from BMS unless user overrode it
     if (!rated_override_ && snap.nominal_ah > 1.0) {
@@ -612,8 +620,8 @@ void AnalyticsEngine::on_battery(const BatterySnapshot& snap, const PwrGateSnaps
             }
         }
     }
-    // Hourly discharge archive
-    int hour = unix_hour(ts);
+    // Hourly discharge archive (local time)
+    int hour = local_hour_id(ts);
     if (last_discharge_hour_ >= 0 && hour != last_discharge_hour_) {
         double wh = discharge_wh_this_hour_;
         if (discharge_hour_count_ < DISCHARGE_HOURS) {
@@ -668,7 +676,7 @@ void AnalyticsEngine::on_battery(const BatterySnapshot& snap, const PwrGateSnaps
     else               snap_.dod_status = "High stress";
 
     double load = (snap.current_a > 0) ? snap.power_w : 0.0;
-    push_load_sample(load);
+    push_load_sample(ts, load);
     recompute_load_stats();
 
     bool discharging = snap.current_a >  0.1;
@@ -700,13 +708,13 @@ void AnalyticsEngine::on_charger(const PwrGateSnapshot& snap, const BatterySnaps
     double ts = static_cast<double>(
         std::chrono::system_clock::to_time_t(snap.timestamp));
     int day = unix_day(ts);
-    reset_daily_if_needed(day);
+    reset_daily_if_needed(day, ts);
 
     if (chg_seen_ && ts > prev_chg_ts_ && snap.sol_v > 1.0 && snap.bat_a > 0) {
         double dt_h = (ts - prev_chg_ts_) / 3600.0;
         if (dt_h > 0 && dt_h < (5.0 / 60.0)) {
-            // Solar power = panel_v × charge_current (same current flows through PWM)
-            double sol_pwr = snap.sol_v * snap.bat_a;
+            // Solar power harvested = battery voltage × charge current (actual power into battery)
+            double sol_pwr = snap.bat_v * snap.bat_a;
             solar_energy_wh_ += sol_pwr * dt_h;
         }
     }
@@ -715,8 +723,9 @@ void AnalyticsEngine::on_charger(const PwrGateSnapshot& snap, const BatterySnaps
     update_charging_stage(snap.bat_v, snap.target_v, snap.bat_a, snap.state);
     prev_chg_a_ = snap.bat_a;
 
-    // Efficiency = output power / input power = (bat_v × bat_a) / (ps_v × bat_a)
-    //            = bat_v / ps_v   (valid only during active charging from PS)
+    // Efficiency approximation: bat_v / ps_v. Valid for linear/series-pass chargers
+    // where I_in ≈ I_out. For switching converters this is a voltage ratio, not
+    // true efficiency (would need input current measurement).
     if ((snap.state == "Charging" || snap.state == "Float") &&
         snap.bat_a > 0.5 && snap.bat_v > 1.0) {
         double input_v = snap.ps_v > 0.5 ? snap.ps_v
@@ -729,7 +738,7 @@ void AnalyticsEngine::on_charger(const PwrGateSnapshot& snap, const BatterySnaps
 
     if (snap.bat_a < -0.05) {
         double load_w = snap.bat_v * (-snap.bat_a);
-        push_load_sample(load_w);
+        push_load_sample(ts, load_w);
         recompute_load_stats();
         integrate_discharge_wh(ts, load_w);
     }
@@ -740,7 +749,7 @@ void AnalyticsEngine::on_charger(const PwrGateSnapshot& snap, const BatterySnaps
     snap_.solar_voltage_v = snap.sol_v;
     snap_.solar_active    = snap.sol_v > 1.0;
     snap_.solar_power_w   = (snap_.solar_active && snap.bat_a > 0)
-                           ? snap.sol_v * snap.bat_a : 0.0;
+                           ? snap.bat_v * snap.bat_a : 0.0;
     snap_.solar_energy_today_wh = solar_energy_wh_;
 
     // Charger runtime today
