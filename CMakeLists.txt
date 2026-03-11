@@ -203,9 +203,13 @@ if(BUILD_TESTING)
         target_link_libraries(limonitor_integration_test PkgConfig::GIO)
     endif()
 
-    # Unit tests (Database, WeatherForecast, HttpServer CORS/settings)
+    # Unit tests
     set(UTEST_SOURCES
-        tests/unit_test.cpp
+        tests/unit/unit_test_main.cpp
+        tests/unit/database_test.cpp
+        tests/unit/http_test.cpp
+        tests/unit/analytics_test.cpp
+        tests/unit/test_runner_test.cpp
         src/logger.cpp
         src/analytics.cpp
         src/shelly_client.cpp

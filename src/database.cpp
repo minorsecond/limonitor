@@ -1789,7 +1789,11 @@ void Database::cleanup(int max_age_days, int system_event_max_age_days, int ops_
         {"battery_readings", "ts"},
         {"charger_readings", "ts"},
         {"solar_performance", "ts"},
-        {"test_telemetry", "ts"}
+        {"test_telemetry", "timestamp"},
+        {"battery_resistance", "timestamp"},
+        {"battery_capacity_tests", "timestamp"},
+        {"voltage_sag_samples", "timestamp"},
+        {"charger_efficiency_samples", "timestamp"}
     };
 
     for (const auto& target : targets) {

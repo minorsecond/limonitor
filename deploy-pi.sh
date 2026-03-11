@@ -85,10 +85,25 @@ else
     cmake -B build -DGIT_COMMIT_HASH="$GIT_HASH"
 fi
 
-cmake --build build --target limonitor -j$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
+# Concurrency optimization: limit jobs on memory-constrained devices (e.g. Pi Zero 2W, Pi 3B)
+TOTAL_MEM_KB=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}' || echo 0)
+CPU_CORES=$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
+JOBS=$CPU_CORES
+
+if [ "$TOTAL_MEM_KB" -gt 0 ]; then
+    # If total RAM < 1GB, limit to 1 job to avoid OOM during linking/LTO
+    if [ "$TOTAL_MEM_KB" -lt 1000000 ]; then
+        JOBS=1
+    # If total RAM < 2GB, limit to 2 jobs
+    elif [ "$TOTAL_MEM_KB" -lt 2000000 ]; then
+        JOBS=$(($CPU_CORES < 2 ? $CPU_CORES : 2))
+    fi
+fi
+
+cmake --build build --target limonitor -j$JOBS
 
 if [[ "$BUILD_TESTS" == "ON" ]]; then
-    cmake --build build --target limonitor_unit_test -j$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
+    cmake --build build --target limonitor_unit_test -j$JOBS
 fi
 
 echo "=== install ==="
