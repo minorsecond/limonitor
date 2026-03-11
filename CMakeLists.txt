@@ -33,25 +33,32 @@ set(COMMON_OPT_FLAGS -O3 -flto -fomit-frame-pointer)
 # Detect architecture and apply specific micro-optimizations
 if(APPLE AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
     # Apple Silicon (M1/M2/M3)
+    set(ARCH_NAME "Apple Silicon (M1/M2/M3)")
     set(ARCH_OPT_FLAGS -mcpu=apple-m1)
-    message(STATUS "Optimizing for Apple Silicon (M1/M2/M3)")
 elseif(NOT APPLE AND (CMAKE_SYSTEM_PROCESSOR MATCHES "armv7" OR CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64"))
     # Raspberry Pi detection (rough check by processor and system)
     # RPi 3B+, Zero 2W use Cortex-A53
     execute_process(COMMAND grep -q "Cortex-A53" /proc/cpuinfo RESULT_VARIABLE IS_A53)
     if(IS_A53 EQUAL 0)
+        set(ARCH_NAME "Raspberry Pi 3B+ / Zero 2W (Cortex-A53)")
         set(ARCH_OPT_FLAGS -march=armv8-a+crc -mtune=cortex-a53 -mfpu=neon-fp-armv8)
-        message(STATUS "Optimizing for Raspberry Pi 3B+ / Zero 2W (Cortex-A53)")
     else()
         # Fallback for other ARM/RPi
+        set(ARCH_NAME "Native ARM")
         set(ARCH_OPT_FLAGS -march=native)
-        message(STATUS "Optimizing for native ARM processor")
     endif()
 else()
     # Generic or other arch
+    set(ARCH_NAME "Native Host")
     set(ARCH_OPT_FLAGS -march=native)
-    message(STATUS "Optimizing for native host processor")
 endif()
+
+message(STATUS "------------------------------------------------------------")
+message(STATUS "  HYPER-OPTIMIZATION PROFILE: ${ARCH_NAME}")
+message(STATUS "  Build Type:      ${CMAKE_BUILD_TYPE}")
+message(STATUS "  Arch Flags:      ${ARCH_OPT_FLAGS}")
+message(STATUS "  Common Flags:    ${COMMON_OPT_FLAGS}")
+message(STATUS "------------------------------------------------------------")
 
 # Optional libcurl for weather API
 find_package(CURL)
