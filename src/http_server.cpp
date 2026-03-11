@@ -1,5 +1,6 @@
 #include "http_server.hpp"
 #include "logger.hpp"
+#include "ops_events.hpp"
 #include "analytics/extensions.hpp"
 #include <algorithm>
 #include <arpa/inet.h>
@@ -39,6 +40,19 @@ static std::string iso8601(std::chrono::system_clock::time_point tp) {
     gmtime_r(&t, &tm_buf);
     std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm_buf);
     return buf;
+}
+static std::string jval_s(const std::string& body, const std::string& key) {
+    std::string pat = "\"" + key + "\"";
+    auto p = body.find(pat);
+    if (p == std::string::npos) return "";
+    p = body.find(':', p);
+    if (p == std::string::npos) return "";
+    p++;
+    while (p < body.size() && (body[p] == ' ' || body[p] == '\t')) p++;
+    if (p >= body.size() || body[p] != '"') return "";
+    auto q = body.find('"', p + 1);
+    if (q == std::string::npos) return "";
+    return body.substr(p + 1, q - p - 1);
 }
 
 HttpServer::HttpServer(DataStore& store, Database* db, const std::string& bind_addr, uint16_t port,
@@ -214,6 +228,7 @@ void HttpServer::handle(int fd) {
         recv(sock, rbuf, sizeof(rbuf), 0);
         close(sock);
         if (sent > 0) {
+            std::string reason = jval_s(body, "reason");
             if (db_) {
                 if (turn == "off" && is_test) {
                     db_->set_setting("shelly_test_active", "1");
@@ -222,6 +237,22 @@ void HttpServer::handle(int fd) {
                     db_->set_setting("shelly_test_active", "0");
                     db_->set_setting("shelly_test_start_ts", "");
                 }
+                auto snap_opt = store_.latest();
+                auto pg_opt = store_.latest_pwrgate();
+                OpsEvent ev;
+                ev.timestamp = std::chrono::system_clock::now();
+                ev.type = (turn == "off") ? (is_test ? "grid_test_start" : "maintenance_start") : (is_test ? "grid_test_end" : "maintenance_end");
+                ev.subtype = is_test ? "test" : "maintenance";
+                ev.message = (turn == "off") ? ("Grid turned off" + (reason.empty() ? "" : ": " + reason)) : ("Grid turned on" + (reason.empty() ? "" : ": " + reason));
+                ev.notes = reason;
+                char meta[256];
+                if (snap_opt && pg_opt) {
+                    std::snprintf(meta, sizeof(meta), "{\"soc\":%.1f,\"voltage\":%.2f,\"load\":%.1f,\"charger\":\"%s\",\"grid_v\":%.2f,\"solar_v\":%.2f}",
+                        snap_opt->soc_pct, snap_opt->total_voltage_v, std::abs(snap_opt->power_w),
+                        pg_opt->state.c_str(), pg_opt->ps_v, pg_opt->sol_v);
+                    ev.metadata_json = meta;
+                }
+                db_->insert_ops_event(ev);
             }
             send_response(fd, 200, "application/json", "{\"ok\":true,\"turn\":\"" + turn + "\"}\n");
         } else {
@@ -263,6 +294,107 @@ void HttpServer::handle(int fd) {
             db_->set_setting(key, val);
         }
         send_response(fd, 200, "application/json", "{\"ok\":true}\n");
+        return;
+    }
+
+    if (method == "POST" && path == "/api/maintenance/start") {
+        if (!db_) { send_response(fd, 503, "application/json", "{\"ok\":false,\"error\":\"Database unavailable\"}\n"); return; }
+        auto body_start = req.find("\r\n\r\n");
+        if (body_start != std::string::npos) body_start += 4;
+        else { body_start = req.find("\n\n"); if (body_start != std::string::npos) body_start += 2; }
+        std::string body = (body_start != std::string::npos && body_start < req.size()) ? req.substr(body_start) : "";
+        std::string reason = jval_s(body, "reason");
+        std::string expected = jval_s(body, "expected_duration");
+        std::string notes = jval_s(body, "notes");
+        auto now = std::chrono::system_clock::now();
+        db_->set_setting("maintenance_mode", "1");
+        db_->set_setting("maintenance_start_time", std::to_string(std::chrono::system_clock::to_time_t(now)));
+        db_->set_setting("maintenance_end_time", "");
+        auto snap_opt = store_.latest();
+        auto pg_opt = store_.latest_pwrgate();
+        OpsEvent ev;
+        ev.timestamp = now;
+        ev.type = "maintenance_start";
+        ev.subtype = "maintenance";
+        ev.message = "Maintenance started" + (reason.empty() ? "" : ": " + reason);
+        ev.notes = notes;
+        char meta[384];
+        if (snap_opt && pg_opt) {
+            std::snprintf(meta, sizeof(meta), "{\"soc\":%.1f,\"voltage\":%.2f,\"load\":%.1f,\"charger\":\"%s\",\"grid_v\":%.2f,\"solar_v\":%.2f,\"expected_duration\":\"%s\"}",
+                snap_opt->soc_pct, snap_opt->total_voltage_v, std::abs(snap_opt->power_w),
+                pg_opt->state.c_str(), pg_opt->ps_v, pg_opt->sol_v, expected.c_str());
+            ev.metadata_json = meta;
+        }
+        db_->insert_ops_event(ev);
+        send_response(fd, 200, "application/json", "{\"ok\":true}\n");
+        return;
+    }
+
+    if (method == "POST" && path == "/api/maintenance/end") {
+        if (!db_) { send_response(fd, 503, "application/json", "{\"ok\":false,\"error\":\"Database unavailable\"}\n"); return; }
+        auto now = std::chrono::system_clock::now();
+        db_->set_setting("maintenance_mode", "0");
+        db_->set_setting("maintenance_end_time", std::to_string(std::chrono::system_clock::to_time_t(now)));
+        auto snap_opt = store_.latest();
+        auto pg_opt = store_.latest_pwrgate();
+        OpsEvent ev;
+        ev.timestamp = now;
+        ev.type = "maintenance_end";
+        ev.subtype = "maintenance";
+        ev.message = "Maintenance ended";
+        if (snap_opt && pg_opt) {
+            char meta[256];
+            std::snprintf(meta, sizeof(meta), "{\"soc\":%.1f,\"voltage\":%.2f,\"load\":%.1f,\"charger\":\"%s\",\"grid_v\":%.2f,\"solar_v\":%.2f}",
+                snap_opt->soc_pct, snap_opt->total_voltage_v, std::abs(snap_opt->power_w),
+                pg_opt->state.c_str(), pg_opt->ps_v, pg_opt->sol_v);
+            ev.metadata_json = meta;
+        }
+        db_->insert_ops_event(ev);
+        send_response(fd, 200, "application/json", "{\"ok\":true}\n");
+        return;
+    }
+
+    if (method == "POST" && path == "/api/note") {
+        if (!db_) { send_response(fd, 503, "application/json", "{\"ok\":false,\"error\":\"Database unavailable\"}\n"); return; }
+        auto body_start = req.find("\r\n\r\n");
+        if (body_start != std::string::npos) body_start += 4;
+        else { body_start = req.find("\n\n"); if (body_start != std::string::npos) body_start += 2; }
+        std::string body = (body_start != std::string::npos && body_start < req.size()) ? req.substr(body_start) : "";
+        std::string message = jval_s(body, "message");
+        if (message.empty()) { send_response(fd, 400, "application/json", "{\"ok\":false,\"error\":\"message required\"}\n"); return; }
+        auto snap_opt = store_.latest();
+        auto pg_opt = store_.latest_pwrgate();
+        OpsEvent ev;
+        ev.timestamp = std::chrono::system_clock::now();
+        ev.type = "note";
+        ev.message = message;
+        if (snap_opt && pg_opt) {
+            char meta[256];
+            std::snprintf(meta, sizeof(meta), "{\"soc\":%.1f,\"voltage\":%.2f,\"load\":%.1f,\"charger\":\"%s\",\"grid_v\":%.2f,\"solar_v\":%.2f}",
+                snap_opt->soc_pct, snap_opt->total_voltage_v, std::abs(snap_opt->power_w),
+                pg_opt->state.c_str(), pg_opt->ps_v, pg_opt->sol_v);
+            ev.metadata_json = meta;
+        }
+        db_->insert_ops_event(ev);
+        send_response(fd, 200, "application/json", "{\"ok\":true}\n");
+        return;
+    }
+
+    if (method == "POST" && path == "/api/event/reclassify") {
+        if (!db_) { send_response(fd, 503, "application/json", "{\"ok\":false,\"error\":\"Database unavailable\"}\n"); return; }
+        auto body_start = req.find("\r\n\r\n");
+        if (body_start != std::string::npos) body_start += 4;
+        else { body_start = req.find("\n\n"); if (body_start != std::string::npos) body_start += 2; }
+        std::string body = (body_start != std::string::npos && body_start < req.size()) ? req.substr(body_start) : "";
+        std::string id_s = jval_s(body, "id");
+        std::string subtype = jval_s(body, "subtype");
+        if (id_s.empty() || subtype.empty()) { send_response(fd, 400, "application/json", "{\"ok\":false,\"error\":\"id and subtype required\"}\n"); return; }
+        int64_t id = 0;
+        try { id = std::stoll(id_s); } catch (...) { send_response(fd, 400, "application/json", "{\"ok\":false,\"error\":\"invalid id\"}\n"); return; }
+        if (db_->update_ops_event_subtype(id, subtype))
+            send_response(fd, 200, "application/json", "{\"ok\":true}\n");
+        else
+            send_response(fd, 404, "application/json", "{\"ok\":false,\"error\":\"event not found\"}\n");
         return;
     }
 
@@ -327,6 +459,25 @@ void HttpServer::handle(int fd) {
         }
         std::string theme = db_ ? db_->get_setting("theme") : "";
         send_response(fd, 200, "text/html", html_solar_page(init_settings, theme));
+    } else if (path == "/ops_log" || path == "/ops_log.html") {
+        std::string theme = db_ ? db_->get_setting("theme") : "";
+        if (theme.empty()) theme = "dark";
+        send_response(fd, 200, "text/html", html_ops_log_page(db_, theme));
+    } else if (path == "/api/ops_log") {
+        size_t n = 100;
+        auto ni = query.find("n=");
+        if (ni != std::string::npos) { try { n = std::stoul(query.substr(ni + 2)); } catch (...) {} }
+        std::string filter;
+        auto fi = query.find("type=");
+        if (fi != std::string::npos) {
+            auto end = query.find('&', fi);
+            std::string raw = (end != std::string::npos) ? query.substr(fi + 5, end - fi - 5) : query.substr(fi + 5);
+            if (raw.find(',') == std::string::npos) filter = raw;
+        }
+        auto events = db_ ? db_->load_ops_events(std::min(n, size_t{500}), filter) : std::vector<OpsEvent>{};
+        send_response(fd, 200, "application/json", ops_log_json(events));
+    } else if (path == "/api/maintenance_status") {
+        send_response(fd, 200, "application/json", maintenance_status_json(db_));
     } else if (path == "/api/shelly/status") {
         bool active = db_ && db_->get_setting("shelly_test_active") == "1";
         std::string start = db_ ? db_->get_setting("shelly_test_start_ts") : "";
@@ -782,6 +933,36 @@ std::string HttpServer::system_events_json(const std::vector<SystemEvent>& event
         o += "\n  {\"time\":" + jstr(tbuf) + ",\"message\":" + jstr(e.message) + "}";
     }
     o += "\n]\n";
+    return o;
+}
+
+std::string HttpServer::ops_log_json(const std::vector<OpsEvent>& events) {
+    std::string o = "{\"events\":[";
+    for (size_t i = 0; i < events.size(); i++) {
+        if (i) o += ",";
+        const auto& e = events[i];
+        char tbuf[32];
+        std::time_t t = std::chrono::system_clock::to_time_t(e.timestamp);
+        struct tm tm_b{};
+        localtime_r(&t, &tm_b);
+        std::strftime(tbuf, sizeof(tbuf), "%Y-%m-%dT%H:%M:%S", &tm_b);
+        o += "\n  {\"id\":" + std::to_string(e.id) + ",\"timestamp\":\"" + tbuf + "\",\"type\":" + jstr(e.type) +
+             ",\"subtype\":" + jstr(e.subtype) + ",\"message\":" + jstr(e.message) + ",\"notes\":" + jstr(e.notes) +
+             ",\"metadata\":" + (e.metadata_json.empty() ? "{}" : e.metadata_json) + "}";
+    }
+    o += "\n]}\n";
+    return o;
+}
+
+std::string HttpServer::maintenance_status_json(Database* db) {
+    if (!db) return "{\"maintenance_mode\":false}\n";
+    bool active = db->get_setting("maintenance_mode") == "1";
+    std::string start = db->get_setting("maintenance_start_time");
+    std::string end = db->get_setting("maintenance_end_time");
+    std::string o = "{\"maintenance_mode\":" + std::string(active ? "true" : "false");
+    if (!start.empty()) o += ",\"maintenance_start_time\":" + jstr(start);
+    if (!end.empty()) o += ",\"maintenance_end_time\":" + jstr(end);
+    o += "}\n";
     return o;
 }
 
@@ -1704,7 +1885,7 @@ html.light .grid-btn-test{background:var(--border);color:var(--text)}
 </head><body><div class="wrap">
 )HTML";
 
-    o += "<nav class=\"tabs\"><a href=\"/\" class=\"tab active\">Dashboard</a><a href=\"/solar\" class=\"tab\">Solar</a><a href=\"/settings\" class=\"tab\">Settings</a></nav>";
+    o += "<nav class=\"tabs\"><a href=\"/\" class=\"tab active\">Dashboard</a><a href=\"/solar\" class=\"tab\">Solar</a><a href=\"/settings\" class=\"tab\">Settings</a><a href=\"/ops_log\" class=\"tab\">Ops Log</a></nav>";
     o += "<header><h1>limonitor</h1><div class=\"hstat\">";
     o += "<span><span class=\"dot " + dot_cls + "\"></span>" + ble_st + "</span>";
     if (s.valid && !s.device_name.empty())
@@ -2216,7 +2397,7 @@ function upTestBanner(){var b=$('test-banner');if(!b||!b.classList.contains('sho
 initSettings()
 initAtabs()
 fetch('/api/shelly/status').then(function(r){return r.json()}).then(function(s){if(s.test_active){var b=$('test-banner');if(b){b.classList.add('show');upTestBanner();setInterval(upTestBanner,5000)}}}).catch(function(){})
-function initGridControl(){var gw=$('grid-control-wrap');if(!gw)return;var sh=getSetting('shelly_host',''),se=getSetting('shelly_enabled','0');if(!sh||(se!=='1'&&se!=='true'))return;gw.style.display='block';var offBtn=$('shelly-off-btn'),onBtn=$('shelly-on-btn'),testStart=$('shelly-test-start-btn'),testEnd=$('shelly-test-end-btn'),shellyMsg=$('shelly-msg');var testActive=getSetting('shelly_test_active','0')==='1';if(testActive&&testStart)testStart.style.display='none';if(testActive&&testEnd)testEnd.style.display='inline-block';function shellyReq(turn,isTest){if(shellyMsg)shellyMsg.textContent='';if(shellyMsg)shellyMsg.className='msg';var body={turn:turn};if(isTest)body.test=true;fetch('/api/shelly/relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json()}).then(function(d){if(d.ok){if(shellyMsg)shellyMsg.textContent='Done. Grid turned '+turn+'.';if(shellyMsg)shellyMsg.className='msg';if(turn==='off'){if(testStart)testStart.style.display='none';if(testEnd)testEnd.style.display='inline-block'}else{if(testStart)testStart.style.display='inline-block';if(testEnd)testEnd.style.display='none'}}else{if(shellyMsg){shellyMsg.textContent='Error: '+(d.error||'unknown');shellyMsg.className='msg err'}}}).catch(function(){if(shellyMsg){shellyMsg.textContent='Request failed.';shellyMsg.className='msg err'}})}if(offBtn)offBtn.onclick=function(){if(confirm('Turn off grid power supply? System will run on battery only.'))shellyReq('off')};if(onBtn)onBtn.onclick=function(){if(confirm('Turn on grid power supply?'))shellyReq('on')};if(testStart)testStart.onclick=function(){if(confirm('Start battery test? This will turn off grid to collect discharge data. Run for a few hours, then click End test.'))shellyReq('off',true)};if(testEnd){testEnd.onclick=function(){if(confirm('End battery test and turn grid back on?'))shellyReq('on')};testEnd.style.display='none'}}
+function initGridControl(){var gw=$('grid-control-wrap');if(!gw)return;var sh=getSetting('shelly_host',''),se=getSetting('shelly_enabled','0');if(!sh||(se!=='1'&&se!=='true'))return;gw.style.display='block';var offBtn=$('shelly-off-btn'),onBtn=$('shelly-on-btn'),testStart=$('shelly-test-start-btn'),testEnd=$('shelly-test-end-btn'),shellyMsg=$('shelly-msg');var testActive=getSetting('shelly_test_active','0')==='1';if(testActive&&testStart)testStart.style.display='none';if(testActive&&testEnd)testEnd.style.display='inline-block';function shellyReq(turn,isTest,reason){if(shellyMsg)shellyMsg.textContent='';if(shellyMsg)shellyMsg.className='msg';var body={turn:turn};if(isTest)body.test=true;if(reason)body.reason=reason;fetch('/api/shelly/relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json()}).then(function(d){if(d.ok){if(shellyMsg)shellyMsg.textContent='Done. Grid turned '+turn+'.';if(shellyMsg)shellyMsg.className='msg';if(turn==='off'){if(testStart)testStart.style.display='none';if(testEnd)testEnd.style.display='inline-block'}else{if(testStart)testStart.style.display='inline-block';if(testEnd)testEnd.style.display='none'}}else{if(shellyMsg){shellyMsg.textContent='Error: '+(d.error||'unknown');shellyMsg.className='msg err'}}}).catch(function(){if(shellyMsg){shellyMsg.textContent='Request failed.';shellyMsg.className='msg err'}})}if(offBtn)offBtn.onclick=function(){var r=prompt('Reason for turning off grid (optional):');if(r===null)return;if(confirm('Turn off grid power supply? System will run on battery only.'))shellyReq('off',false,r||'')};if(onBtn)onBtn.onclick=function(){var r=prompt('Reason for turning on grid (optional):');if(r===null)return;if(confirm('Turn on grid power supply?'))shellyReq('on',false,r||'')};if(testStart)testStart.onclick=function(){var r=prompt('Reason for starting battery test (optional):');if(r===null)return;if(confirm('Start battery test? This will turn off grid to collect discharge data. Run for a few hours, then click End test.'))shellyReq('off',true,r||'')};if(testEnd){testEnd.onclick=function(){var r=prompt('Reason for ending test (optional):');if(r===null)return;if(confirm('End battery test and turn grid back on?'))shellyReq('on',false,r||'')};testEnd.style.display='none'}}
 initGridControl()
 
 function upBat(){fetch('/api/status').then(function(r){return r.json()}).then(function(d){
@@ -2888,7 +3069,7 @@ td .rc-main{font-weight:600}
 <link rel="prefetch" href="/"><link rel="prefetch" href="/settings">
 </head><body>
 )HTML";
-    o += "<nav class=\"tabs\"><a href=\"/\" class=\"tab\">Dashboard</a><a href=\"/solar\" class=\"tab active\">Solar</a><a href=\"/settings\" class=\"tab\">Settings</a>";
+    o += "<nav class=\"tabs\"><a href=\"/\" class=\"tab\">Dashboard</a><a href=\"/solar\" class=\"tab active\">Solar</a><a href=\"/settings\" class=\"tab\">Settings</a><a href=\"/ops_log\" class=\"tab\">Ops Log</a>";
     o += "<button id=\"thm-btn\" class=\"btn\" onclick=\"toggleTheme()\" title=\"Toggle theme\" style=\"margin-left:auto\">&#9788;</button>";
     o += "<button id=\"set-btn\" class=\"btn\" onclick=\"toggleSettings()\" title=\"Settings\">&#9881;</button></nav>";
     o += "<div id=\"settings-modal\" class=\"set-modal\" style=\"display:none\">"
@@ -3381,6 +3562,98 @@ td .rc-main{font-weight:600}
     return o;
 }
 
+std::string HttpServer::html_ops_log_page(Database* db, const std::string& theme) {
+    (void)db;
+    std::string o;
+    o.reserve(6000);
+    o += R"HTML(<!DOCTYPE html><html lang="en" class=")HTML";
+    o += (theme == "light") ? "light" : "";
+    o += R"HTML("><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ops Log — limonitor</title>
+<link rel="prefetch" href="/"><link rel="prefetch" href="/solar"><link rel="prefetch" href="/settings">
+<style>
+:root{--bg:#0d0d11;--card:#16161c;--border:#2e2e3a;--text:#e0e0ea;--muted:#9090a8;--green:#4ade80;--orange:#fb923c;--red:#f87171;--blue:#60a5fa}
+html.light{--bg:#f2f3f7;--card:#fff;--border:#d4d4e0;--text:#1a1a2c;--muted:#5a5a72;--green:#16a34a;--orange:#ea580c;--red:#dc2626;--blue:#2563eb}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,sans-serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5;padding:1rem;max-width:640px;margin:0 auto}
+nav{display:flex;align-items:center;gap:.5rem;margin-bottom:1rem;padding-bottom:.75rem;border-bottom:1px solid var(--border)}
+nav a{color:var(--muted);text-decoration:none;font-size:.9rem;padding:.35rem .6rem;border-radius:6px}
+nav a:hover{color:var(--text)}nav a.active{color:var(--green);font-weight:600}
+h1{font-size:1.25rem;color:var(--green);margin-bottom:.75rem}
+.ops-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem;margin-bottom:.75rem}
+.ops-card h2{font-size:.85rem;color:var(--muted);margin-bottom:.5rem;text-transform:uppercase;letter-spacing:.08em}
+.ops-btn{font-family:inherit;font-size:.85rem;font-weight:600;padding:.5rem 1rem;border-radius:6px;cursor:pointer;border:none;margin-right:.5rem;margin-bottom:.5rem}
+.ops-btn-start{background:var(--blue);color:#fff}.ops-btn-end{background:var(--orange);color:#fff}
+.ops-btn:hover{opacity:.92}
+.ops-input{width:100%;padding:.5rem .6rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:.9rem;margin-bottom:.5rem}
+.ops-submit{background:var(--green);color:#fff;border:none;padding:.5rem 1rem;border-radius:6px;cursor:pointer;font-weight:600;font-size:.85rem}
+.ops-timeline{list-style:none}
+.ops-timeline li{padding:.4rem 0;border-bottom:1px solid var(--border);font-size:.85rem;display:flex;gap:.5rem;align-items:flex-start}
+.ops-timeline li:last-child{border-bottom:none}
+.ops-time{color:var(--muted);font-family:monospace;font-size:.75rem;min-width:4.5rem;flex-shrink:0}
+.ops-msg{flex:1}
+.ops-type-note{border-left:3px solid var(--green);padding-left:.5rem}
+.ops-type-maintenance_start,.ops-type-maintenance_end,.ops-type-grid_test_start,.ops-type-grid_test_end{border-left:3px solid var(--blue);padding-left:.5rem}
+.ops-type-grid_outage{border-left:3px solid var(--red);padding-left:.5rem}
+.ops-type-system_event{border-left:3px solid var(--orange);padding-left:.5rem}
+.ops-filter{display:flex;gap:.35rem;flex-wrap:wrap;margin-bottom:.5rem}
+.ops-filter button{background:var(--card);border:1px solid var(--border);color:var(--muted);padding:.25rem .5rem;font-size:.75rem;border-radius:4px;cursor:pointer}
+.ops-filter button:hover,.ops-filter button.active{border-color:var(--green);color:var(--green)}
+.maint-active{background:rgba(96,165,250,.15)!important;border:1px solid var(--blue);padding:.75rem;border-radius:6px;margin-bottom:.5rem}
+</style></head><body>
+<nav><a href="/">Dashboard</a><a href="/solar">Solar</a><a href="/settings">Settings</a><a href="/ops_log" class="active">Ops Log</a></nav>
+<h1>Ops Log</h1>
+<div class="ops-card" id="maint-card">
+<h2>Maintenance</h2>
+<div id="maint-status"></div>
+<button type="button" class="ops-btn ops-btn-start" id="maint-start-btn" style="display:none">Start Maintenance</button>
+<button type="button" class="ops-btn ops-btn-end" id="maint-end-btn" style="display:none">End Maintenance</button>
+</div>
+<div class="ops-card">
+<h2>Add Note</h2>
+<input type="text" class="ops-input" id="note-input" placeholder="e.g. Adjusted charge current to 10A">
+<button type="button" class="ops-submit" id="note-submit">Add</button>
+</div>
+<div class="ops-card">
+<h2>Recent Events</h2>
+<div class="ops-filter">
+<button type="button" class="ops-filter-btn active" data-filter="">All</button>
+<button type="button" class="ops-filter-btn" data-filter="note">Notes</button>
+<button type="button" class="ops-filter-btn" data-filter="maintenance_start,maintenance_end,grid_test_start,grid_test_end">Maintenance</button>
+<button type="button" class="ops-filter-btn" data-filter="grid_outage">Outages</button>
+</div>
+<ul class="ops-timeline" id="ops-timeline"></ul>
+</div>
+<script>
+function $(id){return document.getElementById(id)}
+function loadMaintStatus(){fetch('/api/maintenance_status').then(function(r){return r.json()}).then(function(d){
+var st=$('maint-status'),start=$('maint-start-btn'),end=$('maint-end-btn');
+if(d.maintenance_mode){st.innerHTML='<span class="maint-active">Maintenance window active</span>';if(start)start.style.display='none';if(end)end.style.display='inline-block'}
+else{st.textContent='No maintenance in progress';if(start)start.style.display='inline-block';if(end)end.style.display='none'}
+})}
+function loadOpsLog(filter){var url='/api/ops_log?n=100';var singleType=filter&&filter.indexOf(',')<0;if(singleType)url+='&type='+encodeURIComponent(filter);fetch(url).then(function(r){return r.json()}).then(function(d){
+var ul=$('ops-timeline');ul.innerHTML='';
+var evs=d.events||[];
+if(filter&&filter.indexOf(',')>=0){var types=filter.split(',');evs=evs.filter(function(e){return types.indexOf(e.type)>=0})}
+if(!evs.length){ul.innerHTML='<li class="ops-msg" style="color:var(--muted)">No events yet</li>';return}
+evs.forEach(function(e){
+var li=document.createElement('li');
+var time=e.timestamp?e.timestamp.replace('T',' ').substring(0,16):'';
+li.innerHTML='<span class="ops-time">'+time+'</span><span class="ops-msg ops-type-'+e.type+'">'+e.message+(e.notes?' <span style="color:var(--muted)">('+e.notes+')</span>':'')+'</span>';
+ul.appendChild(li);
+});
+})}
+$('maint-start-btn').onclick=function(){var r=prompt('Reason (optional):');fetch('/api/maintenance/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reason:r||''})}).then(function(x){return x.json()}).then(function(d){if(d.ok){loadMaintStatus();loadOpsLog()}})}
+$('maint-end-btn').onclick=function(){fetch('/api/maintenance/end',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})}).then(function(x){return x.json()}).then(function(d){if(d.ok){loadMaintStatus();loadOpsLog()}})}
+$('note-submit').onclick=function(){var inp=$('note-input');var msg=inp.value.trim();if(!msg)return;fetch('/api/note',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})}).then(function(x){return x.json()}).then(function(d){if(d.ok){inp.value='';loadOpsLog()}})}
+$('note-input').onkeydown=function(e){if(e.key==='Enter')$('note-submit').click()}
+document.querySelectorAll('.ops-filter-btn').forEach(function(b){b.onclick=function(){document.querySelectorAll('.ops-filter-btn').forEach(function(x){x.classList.remove('active')});b.classList.add('active');loadOpsLog(b.dataset.filter)}})
+loadMaintStatus();loadOpsLog();
+</script></body></html>)HTML";
+    return o;
+}
+
 std::string HttpServer::html_settings_page(Database* db) {
     auto g = [db](const std::string& k, const std::string& d) {
         if (!db) return d;
@@ -3438,7 +3711,7 @@ h1{font-size:1.35rem;font-weight:600;color:var(--green);margin-bottom:.25rem}
 .test-banner .tb-btn{background:#fff!important;color:#c2410c!important;border:none;padding:.35rem .8rem;font-weight:600;cursor:pointer;border-radius:4px}
 .test-banner .tb-btn:hover{opacity:.92}
 </style></head><body>
-<nav><a href="/">Dashboard</a><a href="/solar">Solar</a><a href="/settings" class="active">Settings</a><span class="spacer"></span><button class="thm" id="thm-btn" onclick="toggleTheme()" title="Toggle theme">)HTML";
+<nav><a href="/">Dashboard</a><a href="/solar">Solar</a><a href="/settings" class="active">Settings</a><a href="/ops_log">Ops Log</a><span class="spacer"></span><button class="thm" id="thm-btn" onclick="toggleTheme()" title="Toggle theme">)HTML";
     o += (theme == "light") ? "&#9788;" : "&#263d;";
     o += R"HTML(</button></nav>
 <div id="test-banner" class="test-banner"><span><strong>Battery test active</strong> &middot; SoC: <span id="tb-soc">—</span>% &middot; Load: <span id="tb-load">—</span> W &middot; Runtime: <span id="tb-rt">—</span> h</span><button class="tb-btn" onclick="endTestFromBanner()">End test</button></div>
@@ -3470,7 +3743,9 @@ h1{font-size:1.35rem;font-weight:600;color:var(--green);margin-bottom:.25rem}
     o += esc(g("shelly_battery_test_max_hours", "24"));
     o += "\" title=\"Force grid on after this many hours\"></div><div class=\"row\"><label>Low SoC cutoff % (safety)</label><input type=\"number\" name=\"shelly_battery_test_low_soc\" min=\"5\" max=\"50\" step=\"1\" value=\"";
     o += esc(g("shelly_battery_test_low_soc", "20"));
-    o += "\" title=\"Turn grid on if battery drops below this %\"></div><div class=\"section-title\">EpicPowerGate / Serial</div><div class=\"row\"><label>Serial device</label><input type=\"text\" name=\"serial_device\" placeholder=\"/dev/ttyACM0\" value=\"";
+    o += "\" title=\"Turn grid on if battery drops below this %\"></div><div class=\"row\"><label>Maintenance auto-timeout (min)</label><input type=\"number\" name=\"maintenance_auto_timeout_minutes\" min=\"0\" max=\"10080\" value=\"";
+    o += esc(g("maintenance_auto_timeout_minutes", "60"));
+    o += "\" title=\"Auto-end maintenance mode after this many minutes (0=disabled)\"></div><div class=\"section-title\">EpicPowerGate / Serial</div><div class=\"row\"><label>Serial device</label><input type=\"text\" name=\"serial_device\" placeholder=\"/dev/ttyACM0\" value=\"";
     o += esc(g("serial_device", ""));
     o += "\"></div><div class=\"row\"><label>Serial baud</label><input type=\"number\" name=\"serial_baud\" value=\"";
     o += esc(g("serial_baud", "115200"));
@@ -3508,7 +3783,7 @@ h1{font-size:1.35rem;font-weight:600;color:var(--green);margin-bottom:.25rem}
     o += "></div><button type=\"submit\" class=\"btn\">Save</button><div id=\"msg\" class=\"msg\"></div></form><script>\n"
          "(function(){var n=document.querySelectorAll('nav a[href^=\"/\"]');for(var i=0;i<n.length;i++){n[i].addEventListener('click',function(e){if(e.ctrlKey||e.metaKey||e.shiftKey)return;var h=this.getAttribute('href');if(!h)return;e.preventDefault();location.href=h})}})();\n"
          "document.getElementById('cfg-form').onsubmit=function(e){e.preventDefault();var f=e.target;var o={settings_initialized:'1'};\n"
-         "['device_name','device_address','adapter_path','http_port','http_bind','log_file','verbose','shelly_host','shelly_enabled','shelly_battery_test_auto','shelly_battery_test_max_hours','shelly_battery_test_low_soc','serial_device','serial_baud','pwrgate_remote','poll_interval','db_path','db_interval','battery_purchased','rated_capacity_ah','tx_threshold','solar_enabled','solar_panel_watts','solar_system_efficiency','solar_zip_code','weather_api_key','weather_zip_code','daemon'].forEach(function(k){\n"
+         "['device_name','device_address','adapter_path','http_port','http_bind','log_file','verbose','shelly_host','shelly_enabled','shelly_battery_test_auto','shelly_battery_test_max_hours','shelly_battery_test_low_soc','maintenance_auto_timeout_minutes','serial_device','serial_baud','pwrgate_remote','poll_interval','db_path','db_interval','battery_purchased','rated_capacity_ah','tx_threshold','solar_enabled','solar_panel_watts','solar_system_efficiency','solar_zip_code','weather_api_key','weather_zip_code','daemon'].forEach(function(k){\n"
          "var el=f.elements[k];if(el)o[k]=el.type==='checkbox'?(el.checked?'1':'0'):el.value\n"
          "});\nfetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(o)})\n"
          ".then(function(r){if(r.ok){document.getElementById('msg').textContent='Saved. Restart limonitor to apply.';document.getElementById('msg').className='msg'}else{throw new Error()}})\n"

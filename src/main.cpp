@@ -5,6 +5,7 @@
 #include "data_store.hpp"
 #include "database.hpp"
 #include "http_server.hpp"
+#include "ops_events.hpp"
 #include "litime_protocol.hpp"
 #include "logger.hpp"
 #include "pwrgate_client.hpp"
@@ -625,6 +626,31 @@ int main(int argc, char** argv) {
             if (db && db->is_open()) {
                 auto now = std::chrono::steady_clock::now();
                 shelly::check_test_conditions(db.get(), store);
+                std::string mm = db->get_setting("maintenance_mode");
+                if (mm == "1") {
+                    std::string start_s = db->get_setting("maintenance_start_time");
+                    std::string timeout_s = db->get_setting("maintenance_auto_timeout_minutes");
+                    int timeout_min = 60;
+                    if (!timeout_s.empty()) { try { timeout_min = std::stoi(timeout_s); } catch (...) {} }
+                    if (!start_s.empty() && timeout_min > 0) {
+                        try {
+                            long start_ts = std::stol(start_s);
+                            auto sys_now = std::chrono::system_clock::now();
+                            auto now_ts = std::chrono::system_clock::to_time_t(sys_now);
+                            if (now_ts - start_ts >= timeout_min * 60) {
+                                db->set_setting("maintenance_mode", "0");
+                                db->set_setting("maintenance_end_time", std::to_string(static_cast<long>(now_ts)));
+                                OpsEvent ev;
+                                ev.timestamp = sys_now;
+                                ev.type = "maintenance_end";
+                                ev.subtype = "maintenance";
+                                ev.message = "Maintenance auto-ended (timeout)";
+                                db->insert_ops_event(ev);
+                                LOG_INFO("Maintenance auto-ended after %d min timeout", timeout_min);
+                            }
+                        } catch (...) {}
+                    }
+                }
                 if (std::chrono::duration_cast<std::chrono::minutes>(now - last_checkpoint).count() >= 5) {
                     db->checkpoint();
                     last_checkpoint = now;

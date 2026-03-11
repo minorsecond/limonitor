@@ -7,6 +7,7 @@
 #include "analytics/weather_forecast.hpp"
 #include "data_store.hpp"
 #include "database.hpp"
+#include "ops_events.hpp"
 #include "system_events.hpp"
 #include "tx_events.hpp"
 #include <atomic>
@@ -79,6 +80,10 @@ private:
     static std::string html_solar_page(const std::string& init_settings = "",
                                        const std::string& theme = "");
     static std::string html_settings_page(Database* db);
+    static std::string html_ops_log_page(Database* db, const std::string& theme);
+
+    static std::string ops_log_json(const std::vector<OpsEvent>& events);
+    static std::string maintenance_status_json(Database* db);
 
     static void send_response(int fd, int code, const char* content_type, const std::string& body);
 };

@@ -126,6 +126,18 @@ bool Database::migrate() {
         ");"
         "CREATE INDEX IF NOT EXISTS ev_ts ON system_events(ts);"
 
+        "CREATE TABLE IF NOT EXISTS ops_events ("
+        "  id           INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  ts           INTEGER NOT NULL,"
+        "  type         TEXT NOT NULL,"
+        "  subtype      TEXT DEFAULT '',"
+        "  message      TEXT NOT NULL,"
+        "  notes        TEXT DEFAULT '',"
+        "  metadata_json TEXT DEFAULT ''"
+        ");"
+        "CREATE INDEX IF NOT EXISTS oe_ts ON ops_events(ts);"
+        "CREATE INDEX IF NOT EXISTS oe_type ON ops_events(type);"
+
         "CREATE TABLE IF NOT EXISTS settings ("
         "  key   TEXT PRIMARY KEY,"
         "  value TEXT NOT NULL"
@@ -385,6 +397,83 @@ std::vector<SystemEvent> Database::load_system_events(size_t n) const {
     sqlite3_finalize(stmt);
     std::reverse(result.begin(), result.end());  // oldest first
     return result;
+}
+
+void Database::insert_ops_event(const OpsEvent& e) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return;
+
+    auto ts = static_cast<sqlite3_int64>(
+        std::chrono::system_clock::to_time_t(e.timestamp));
+
+    const char* sql = "INSERT INTO ops_events (ts, type, subtype, message, notes, metadata_json) VALUES (?, ?, ?, ?, ?, ?)";
+    sqlite3_stmt* stmt = nullptr;
+    auto* db = db_handle(db_);
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        LOG_WARN("DB: prepare ops_event: %s", sqlite3_errmsg(db));
+        return;
+    }
+    sqlite3_bind_int64(stmt, 1, ts);
+    sqlite3_bind_text(stmt, 2, e.type.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, e.subtype.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, e.message.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, e.notes.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 6, e.metadata_json.c_str(), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step(stmt) != SQLITE_DONE)
+        LOG_WARN("DB: insert ops_event: %s", sqlite3_errmsg(db));
+    sqlite3_finalize(stmt);
+}
+
+std::vector<OpsEvent> Database::load_ops_events(size_t n, const std::string& type_filter) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<OpsEvent> result;
+    result.reserve(std::min(n, size_t{500}));
+    if (!db_) return result;
+
+    std::string sql = "SELECT id, ts, type, subtype, message, notes, metadata_json FROM ops_events ORDER BY ts DESC LIMIT " + std::to_string(std::min(n, size_t{500}));
+    if (!type_filter.empty())
+        sql = "SELECT id, ts, type, subtype, message, notes, metadata_json FROM ops_events WHERE type=? ORDER BY ts DESC LIMIT " + std::to_string(std::min(n, size_t{500}));
+
+    sqlite3_stmt* stmt = nullptr;
+    auto* db = db_handle(db_);
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK)
+        return result;
+
+    if (!type_filter.empty())
+        sqlite3_bind_text(stmt, 1, type_filter.c_str(), -1, SQLITE_TRANSIENT);
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        OpsEvent e;
+        e.id = sqlite3_column_int64(stmt, 0);
+        e.timestamp = std::chrono::system_clock::from_time_t(
+            static_cast<time_t>(sqlite3_column_int64(stmt, 1)));
+        if (const char* p = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2))) e.type = p;
+        if (const char* p = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3))) e.subtype = p;
+        if (const char* p = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4))) e.message = p;
+        if (const char* p = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5))) e.notes = p;
+        if (const char* p = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6))) e.metadata_json = p;
+        result.push_back(std::move(e));
+    }
+    sqlite3_finalize(stmt);
+    std::reverse(result.begin(), result.end());
+    return result;
+}
+
+bool Database::update_ops_event_subtype(int64_t id, const std::string& subtype) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return false;
+
+    const char* sql = "UPDATE ops_events SET subtype=? WHERE id=?";
+    sqlite3_stmt* stmt = nullptr;
+    auto* db = db_handle(db_);
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return false;
+    sqlite3_bind_text(stmt, 1, subtype.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 2, id);
+    bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+    sqlite3_finalize(stmt);
+    return ok;
 }
 
 std::vector<BatterySnapshot> Database::load_battery_history(size_t n) const {

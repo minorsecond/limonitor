@@ -1,5 +1,6 @@
 #pragma once
 #include "battery_data.hpp"
+#include "ops_events.hpp"
 #include "pwrgate.hpp"
 #include "system_events.hpp"
 #include <chrono>
@@ -42,6 +43,10 @@ public:
     void insert_charger(const PwrGateSnapshot& p);
     void insert_system_event(const SystemEvent& e);
     std::vector<SystemEvent> load_system_events(size_t n = 200) const;
+
+    void insert_ops_event(const OpsEvent& e);
+    std::vector<OpsEvent> load_ops_events(size_t n = 200, const std::string& type_filter = "") const;
+    bool update_ops_event_subtype(int64_t id, const std::string& subtype);
 
     // Checkpoint WAL into main db (updates main file mtime; normally writes go to -wal).
     void checkpoint();
