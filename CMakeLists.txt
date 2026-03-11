@@ -22,6 +22,37 @@ set(PROTO_SOURCES
     src/jbd_protocol.cpp
 )
 
+# --- Hyper-optimization detection logic ---
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+
+# Common optimization flags for all platforms in Release mode
+set(COMMON_OPT_FLAGS -O3 -flto -fomit-frame-pointer)
+
+# Detect architecture and apply specific micro-optimizations
+if(APPLE AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
+    # Apple Silicon (M1/M2/M3)
+    set(ARCH_OPT_FLAGS -mcpu=apple-m1)
+    message(STATUS "Optimizing for Apple Silicon (M1/M2/M3)")
+elseif(NOT APPLE AND (CMAKE_SYSTEM_PROCESSOR MATCHES "armv7" OR CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64"))
+    # Raspberry Pi detection (rough check by processor and system)
+    # RPi 3B+, Zero 2W use Cortex-A53
+    execute_process(COMMAND grep -q "Cortex-A53" /proc/cpuinfo RESULT_VARIABLE IS_A53)
+    if(IS_A53 EQUAL 0)
+        set(ARCH_OPT_FLAGS -march=armv8-a+crc -mtune=cortex-a53 -mfpu=neon-fp-armv8)
+        message(STATUS "Optimizing for Raspberry Pi 3B+ / Zero 2W (Cortex-A53)")
+    else()
+        # Fallback for other ARM/RPi
+        set(ARCH_OPT_FLAGS -march=native)
+        message(STATUS "Optimizing for native ARM processor")
+    endif()
+else()
+    # Generic or other arch
+    set(ARCH_OPT_FLAGS -march=native)
+    message(STATUS "Optimizing for native host processor")
+endif()
+
 # Optional libcurl for weather API
 find_package(CURL)
 if(CURL_FOUND)
@@ -63,7 +94,10 @@ else()
 endif()
 
 add_executable(limonitor ${SOURCES})
-target_compile_options(limonitor PRIVATE -Wall -Wextra -Wno-psabi)
+target_compile_options(limonitor PRIVATE -Wall -Wextra -Wno-psabi ${COMMON_OPT_FLAGS} ${ARCH_OPT_FLAGS})
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_link_options(limonitor PRIVATE -flto)
+endif()
 
 # Common link libs (atomic needed for 64-bit atomics on 32-bit ARM)
 target_link_libraries(limonitor pthread SQLite::SQLite3)
@@ -103,7 +137,10 @@ else()
 endif()
 
 add_executable(limonitor_integration_test ${ITEST_SOURCES})
-target_compile_options(limonitor_integration_test PRIVATE -Wall -Wextra -Wno-psabi)
+target_compile_options(limonitor_integration_test PRIVATE -Wall -Wextra -Wno-psabi ${COMMON_OPT_FLAGS} ${ARCH_OPT_FLAGS})
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_link_options(limonitor_integration_test PRIVATE -flto)
+endif()
 target_link_libraries(limonitor_integration_test pthread)
 if(APPLE)
     target_link_libraries(limonitor_integration_test
@@ -145,7 +182,10 @@ else()
 endif()
 
 add_executable(limonitor_unit_test ${UTEST_SOURCES})
-target_compile_options(limonitor_unit_test PRIVATE -Wall -Wextra -Wno-psabi)
+target_compile_options(limonitor_unit_test PRIVATE -Wall -Wextra -Wno-psabi ${COMMON_OPT_FLAGS} ${ARCH_OPT_FLAGS})
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_link_options(limonitor_unit_test PRIVATE -flto)
+endif()
 target_link_libraries(limonitor_unit_test pthread SQLite::SQLite3)
 if(NOT APPLE)
     target_link_libraries(limonitor_unit_test atomic)

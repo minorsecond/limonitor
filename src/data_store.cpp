@@ -185,7 +185,6 @@ void DataStore::process_system_events(const BatterySnapshot& snap,
 }
 
 void DataStore::update(BatterySnapshot snap) {
-    std::vector<Observer> observers_copy;
     {
         std::lock_guard<std::mutex> lk(mu_);
         process_tx_detection(snap);
@@ -199,9 +198,9 @@ void DataStore::update(BatterySnapshot snap) {
                                analytics_.snapshot(), ring_, tx_events_);
         }
         while (ring_.size() > max_history_) ring_.pop_front();
-        observers_copy = observers_;
+
+        for (const auto& obs : observers_) obs(snap);
     }
-    for (const auto& obs : observers_copy) obs(snap);
 }
 
 std::optional<BatterySnapshot> DataStore::latest_locked() const {

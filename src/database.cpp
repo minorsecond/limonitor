@@ -80,7 +80,8 @@ bool Database::is_open() const {
 bool Database::migrate() {
     // WAL mode: concurrent readers + writer, faster on flash storage
     if (!exec("PRAGMA journal_mode=WAL;")) return false;
-    if (!exec("PRAGMA synchronous=NORMAL;")) return false;
+    // NORMAL is safe for WAL, but EXTRA/FULL ensures every commit is durable even if power is lost.
+    if (!exec("PRAGMA synchronous=EXTRA;")) return false;
 
     if (!exec(
         "CREATE TABLE IF NOT EXISTS battery_readings ("

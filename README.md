@@ -9,6 +9,11 @@ a Prometheus metrics endpoint.
 
 ## Features
 
+### Performance & Stability
+- **Hyper-optimized for Raspberry Pi and Apple Silicon (M-series)**: Automatic architecture detection in the build system applies optimal compiler flags for your specific CPU.
+- **Low Memory Footprint**: Efficient ring-buffered analytics ensure stable performance even on resource-constrained devices like the RPi Zero 2W.
+- **High Reliability**: Uses floating-point stability-focused optimizations for precise battery math.
+
 ### Live monitoring
 - Pack voltage, current, SoC, power, and time-remaining
 - Per-cell voltages with colour-coded imbalance indicator

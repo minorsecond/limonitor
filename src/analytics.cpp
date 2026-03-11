@@ -214,9 +214,27 @@ void AnalyticsEngine::set_purchase_date(const std::string& d) {
 }
 
 void AnalyticsEngine::push_voltage_soc_sample(double ts, double v, double soc) {
+    if (voltage_ring_count_ == VOLTAGE_N) {
+        // Remove oldest sample from sums
+        double old_ts = voltage_ring_ts_[voltage_ring_head_];
+        double old_v = voltage_ring_[voltage_ring_head_];
+        double old_soc = soc_ring_[voltage_ring_head_];
+        v_sum_x_ -= old_ts; v_sum_y_ -= old_v;
+        v_sum_x2_ -= old_ts * old_ts; v_sum_xy_ -= old_ts * old_v;
+        s_sum_x_ -= old_ts; s_sum_y_ -= old_soc;
+        s_sum_x2_ -= old_ts * old_ts; s_sum_xy_ -= old_ts * old_soc;
+    }
+
     voltage_ring_[voltage_ring_head_] = v;
     soc_ring_[voltage_ring_head_] = soc;
     voltage_ring_ts_[voltage_ring_head_] = ts;
+
+    // Add new sample to sums
+    v_sum_x_ += ts; v_sum_y_ += v;
+    v_sum_x2_ += ts * ts; v_sum_xy_ += ts * v;
+    s_sum_x_ += ts; s_sum_y_ += soc;
+    s_sum_x2_ += ts * ts; s_sum_xy_ += ts * soc;
+
     voltage_ring_head_ = (voltage_ring_head_ + 1) % VOLTAGE_N;
     if (voltage_ring_count_ < VOLTAGE_N) ++voltage_ring_count_;
 }
@@ -226,28 +244,13 @@ void AnalyticsEngine::compute_voltage_trend() {
         snap_.voltage_trend = "—";
         return;
     }
-    size_t n = voltage_ring_count_;
-    double sum_x = 0, sum_y = 0;
-    for (size_t i = 0; i < n; ++i) {
-        size_t idx = (voltage_ring_head_ + VOLTAGE_N - 1 - i) % VOLTAGE_N;
-        sum_x += voltage_ring_ts_[idx];
-        sum_y += voltage_ring_[idx];
-    }
-    double x_bar = sum_x / n;
-    double y_bar = sum_y / n;
-    double sum_dxdy = 0, sum_dx2 = 0;
-    for (size_t i = 0; i < n; ++i) {
-        size_t idx = (voltage_ring_head_ + VOLTAGE_N - 1 - i) % VOLTAGE_N;
-        double dx = voltage_ring_ts_[idx] - x_bar;
-        double dy = voltage_ring_[idx] - y_bar;
-        sum_dx2  += dx * dx;
-        sum_dxdy += dx * dy;
-    }
-    if (sum_dx2 < 1e-6) {
+    const double n = static_cast<double>(voltage_ring_count_);
+    const double denominator = n * v_sum_x2_ - v_sum_x_ * v_sum_x_;
+    if (denominator < 1e-6) { // Sum of squares is always non-negative
         snap_.voltage_trend = "stable";
         return;
     }
-    double slope = sum_dxdy / sum_dx2;
+    const double slope = (n * v_sum_xy_ - v_sum_x_ * v_sum_y_) / denominator;
     if (slope > 1e-6)
         snap_.voltage_trend = "up";
     else if (slope < -1e-6)
@@ -262,29 +265,14 @@ void AnalyticsEngine::compute_soc_trend() {
         snap_.soc_rate_pct_per_h = 0;
         return;
     }
-    size_t n = voltage_ring_count_;
-    double sum_x = 0, sum_y = 0;
-    for (size_t i = 0; i < n; ++i) {
-        size_t idx = (voltage_ring_head_ + VOLTAGE_N - 1 - i) % VOLTAGE_N;
-        sum_x += voltage_ring_ts_[idx];
-        sum_y += soc_ring_[idx];
-    }
-    double x_bar = sum_x / n;
-    double y_bar = sum_y / n;
-    double sum_dxdy = 0, sum_dx2 = 0;
-    for (size_t i = 0; i < n; ++i) {
-        size_t idx = (voltage_ring_head_ + VOLTAGE_N - 1 - i) % VOLTAGE_N;
-        double dx = voltage_ring_ts_[idx] - x_bar;
-        double dy = soc_ring_[idx] - y_bar;
-        sum_dx2  += dx * dx;
-        sum_dxdy += dx * dy;
-    }
-    if (sum_dx2 < 1e-6) {
+    const double n = static_cast<double>(voltage_ring_count_);
+    const double denominator = n * s_sum_x2_ - s_sum_x_ * s_sum_x_;
+    if (denominator < 1e-6) {
         snap_.soc_trend = "stable";
         snap_.soc_rate_pct_per_h = 0;
         return;
     }
-    double slope = sum_dxdy / sum_dx2;  // %/s
+    const double slope = (n * s_sum_xy_ - s_sum_x_ * s_sum_y_) / denominator; // %/s
     snap_.soc_rate_pct_per_h = slope * 3600.0;
     if (slope > 1e-5)
         snap_.soc_trend = "up";

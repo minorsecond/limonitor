@@ -164,6 +164,11 @@ private:
     double rate_ring_ts_[RATE_N]{};
     size_t rate_ring_count_{0};
     size_t rate_ring_head_{0};
+
+    // Cached sums for O(1) trend calculation
+    double v_sum_x_{0}, v_sum_y_{0}, v_sum_x2_{0}, v_sum_xy_{0};
+    double s_sum_x_{0}, s_sum_y_{0}, s_sum_x2_{0}, s_sum_xy_{0};
+
     int charge_slowdown_confirm_{0};   // debounce: require 6 consecutive to show
     int charge_slowdown_clear_{0};     // debounce: require 6 consecutive to clear
     int psu_limited_confirm_{0};       // debounce: require 4 consecutive to show
