@@ -440,6 +440,26 @@ int main(int argc, char** argv) {
     if (!db->is_open())
         LOG_WARN("DB: running without persistence; config will not be migrated");
 
+    // Grid recovery: if app crashed/restarted while a grid-off battery test was active, restore grid
+    if (db->is_open() && db->get_setting("shelly_test_active") == "1") {
+        std::string shelly_host = db->get_setting("shelly_host");
+        std::string shelly_enabled = db->get_setting("shelly_enabled");
+        if (!shelly_host.empty() && (shelly_enabled == "1" || shelly_enabled == "true")) {
+            LOG_WARN("Startup: detected interrupted grid-off test — restoring grid power in 15s");
+            std::thread([db]() {
+                std::this_thread::sleep_for(std::chrono::seconds(15));
+                bool ok = shelly::turn_on(db.get());
+                if (ok) {
+                    db->set_setting("shelly_test_active", "0");
+                    db->set_setting("shelly_test_start_ts", "");
+                    LOG_INFO("Startup: grid restored after crash/reboot recovery");
+                } else {
+                    LOG_ERROR("Startup: FAILED to restore grid after crash — manual intervention required");
+                }
+            }).detach();
+        }
+    }
+
     // Apply poll interval globally (used by ble_manager.cpp)
     g_poll_interval_s = cfg.poll_interval_s;
 

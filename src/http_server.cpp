@@ -2,6 +2,7 @@
 #include "logger.hpp"
 #include "ops_events.hpp"
 #include "ops_util.hpp"
+#include "shelly_client.hpp"
 #include "analytics/extensions.hpp"
 #include "testing/types.hpp"
 #include <algorithm>
@@ -129,6 +130,7 @@ bool HttpServer::start() {
 
     running_ = true;
     thread_ = std::thread(&HttpServer::serve_loop, this);
+    shelly_poll_thread_ = std::thread(&HttpServer::shelly_poll_loop, this);
     LOG_INFO("HTTP: listening on %s:%d", bind_addr_.c_str(), port_);
     return true;
 }
@@ -137,6 +139,7 @@ void HttpServer::stop() {
     running_ = false;
     if (listen_fd_ >= 0) { shutdown(listen_fd_, SHUT_RDWR); close(listen_fd_); listen_fd_ = -1; }
     if (thread_.joinable()) thread_.join();
+    if (shelly_poll_thread_.joinable()) shelly_poll_thread_.join();  // exits within 1s
 }
 
 void HttpServer::serve_loop() {
@@ -150,8 +153,12 @@ void HttpServer::serve_loop() {
         }
         struct timeval tv{5, 0};
         setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-        handle(client);
-        close(client);
+        // Handle each connection in its own thread so a slow request (e.g. Shelly
+        // network I/O or a heavy DB query) doesn't stall every other client.
+        std::thread([this, client]() {
+            handle(client);
+            close(client);
+        }).detach();
     }
 }
 
@@ -484,6 +491,34 @@ void HttpServer::handle(int fd) {
         }
     }
 
+    if (method == "POST" && path == "/api/tests/safety_limits") {
+        std::string body;
+        { auto p = req.find("\r\n\r\n"); if (p != std::string::npos) body = req.substr(p + 4);
+          else { p = req.find("\n\n"); if (p != std::string::npos) body = req.substr(p + 2); } }
+        if (!test_runner_ || !db_) {
+            send_response(fd, 503, "application/json", "{\"ok\":false,\"error\":\"unavailable\"}\n");
+            return;
+        }
+        testing::SafetyLimits lim = test_runner_->safety_limits();
+        auto sv = jval_s(body, "soc_floor_pct");
+        if (!sv.empty()) { try { lim.soc_floor_pct = std::stod(sv); } catch (...) {} }
+        sv = jval_s(body, "voltage_floor_v");
+        if (!sv.empty()) { try { lim.voltage_floor_v = std::stod(sv); } catch (...) {} }
+        sv = jval_s(body, "max_duration_sec");
+        if (!sv.empty()) { try { lim.max_duration_sec = std::stoi(sv); } catch (...) {} }
+        if (body.find("\"abort_on_overtemp\":true") != std::string::npos)
+            lim.abort_on_overtemp = true;
+        else if (body.find("\"abort_on_overtemp\":false") != std::string::npos)
+            lim.abort_on_overtemp = false;
+        test_runner_->set_safety_limits(lim);
+        db_->set_setting("test_soc_floor_pct", std::to_string(lim.soc_floor_pct));
+        db_->set_setting("test_voltage_floor_v", std::to_string(lim.voltage_floor_v));
+        db_->set_setting("test_max_duration_sec", std::to_string(lim.max_duration_sec));
+        db_->set_setting("test_abort_on_overtemp", lim.abort_on_overtemp ? "1" : "0");
+        send_response(fd, 200, "application/json", "{\"ok\":true}\n");
+        return;
+    }
+
     if (method == "POST" && path == "/api/tests/schedules") {
         if (!db_) { send_response(fd, 503, "application/json", "{\"ok\":false,\"error\":\"Database unavailable\"}\n"); return; }
         auto body_start = req.find("\r\n\r\n");
@@ -612,8 +647,15 @@ void HttpServer::handle(int fd) {
     } else if (path == "/api/shelly/status") {
         bool active = db_ && db_->get_setting("shelly_test_active") == "1";
         std::string start = db_ ? db_->get_setting("shelly_test_start_ts") : "";
+        auto shst = fetch_shelly_status();
         std::string out = "{\"test_active\":" + std::string(active ? "true" : "false");
         if (!start.empty()) out += ",\"start_ts\":" + start;
+        out += ",\"relay_on\":" + std::string(shst.relay_on ? "true" : "false");
+        out += ",\"power_w\":" + jdbl(shst.power_w);
+        if (shst.current_a > 0) out += ",\"current_a\":" + jdbl(shst.current_a);
+        if (shst.voltage_v > 0) out += ",\"voltage_v\":" + jdbl(shst.voltage_v);
+        if (shst.total_kwh > 0) out += ",\"total_kwh\":" + jdbl(shst.total_kwh, 3);
+        out += ",\"ok\":" + std::string(shst.ok ? "true" : "false");
         out += "}\n";
         send_response(fd, 200, "application/json", out);
     } else if (path == "/api/charger") {
@@ -634,7 +676,7 @@ void HttpServer::handle(int fd) {
         send_response(fd, 200, "application/json",
                       charger_history_json(store_.pwrgate_history(count)));
     } else if (path == "/api/flow") {
-        send_response(fd, 200, "application/json", flow_json(snap, pg));
+        send_response(fd, 200, "application/json", flow_json(snap, pg, fetch_shelly_status()));
     } else if (path == "/api/tx_events") {
         size_t count = 100;
         auto ni = query.find("n=");
@@ -769,11 +811,8 @@ void HttpServer::handle(int fd) {
             double v_start = st.voltage_at_start > 0 ? st.voltage_at_start : v;
             double v_min = v;
             if (db_) {
-                auto samples = db_->load_test_telemetry(st.test_id, 500);
-                for (const auto& s : samples) {
-                    if (s.battery_voltage > 0 && (v_min <= 0 || s.battery_voltage < v_min))
-                        v_min = s.battery_voltage;
-                }
+                double dbmin = db_->get_test_min_voltage(st.test_id);
+                if (dbmin > 0) v_min = dbmin;
             }
             double sag = (v_start > 0 && v_min > 0 && v_start > v_min) ? (v_start - v_min) : 0;
             char buf[384];
@@ -1937,7 +1976,34 @@ static std::string effective_charger_state(const PwrGateSnapshot& pg) {
     return pg.state;
 }
 
-std::string HttpServer::flow_json(const BatterySnapshot& bat, const PwrGateSnapshot& chg) {
+shelly::Status HttpServer::fetch_shelly_status() {
+    std::lock_guard<std::mutex> lk(shelly_cache_mu_);
+    return shelly_cache_;
+}
+
+void HttpServer::shelly_poll_loop() {
+    int wait_ticks = 0;  // each tick = 1s
+    while (running_) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        if (!running_) break;
+        if (--wait_ticks > 0) continue;
+        shelly::Status st;
+        try {
+            st = shelly::get_status(db_);
+        } catch (...) {
+            st.ok = false;
+        }
+        {
+            std::lock_guard<std::mutex> lk(shelly_cache_mu_);
+            shelly_cache_ = st;
+        }
+        // Back off longer when healthy (30s), retry sooner on failure (10s)
+        wait_ticks = st.ok ? 30 : 10;
+    }
+}
+
+std::string HttpServer::flow_json(const BatterySnapshot& bat, const PwrGateSnapshot& chg,
+                                   const shelly::Status& shelly) {
     std::string o = "{\n";
     o += "  \"battery_voltage\": " + jdbl(bat.valid ? bat.total_voltage_v : 0) + ",\n";
     o += "  \"battery_current\": " + jdbl(bat.valid ? bat.current_a : 0) + ",\n";
@@ -1946,7 +2012,13 @@ std::string HttpServer::flow_json(const BatterySnapshot& bat, const PwrGateSnaps
     o += "  \"charger_voltage\": " + jdbl(chg.valid ? chg.ps_v : 0) + ",\n";
     o += "  \"charger_state\": " + jstr(effective_charger_state(chg)) + ",\n";
     double power_w = chg.valid ? (chg.bat_v * chg.bat_a) : (bat.valid ? bat.power_w : 0);
-    o += "  \"power_watts\": " + jdbl(std::abs(power_w)) + "\n";
+    o += "  \"power_watts\": " + jdbl(std::abs(power_w)) + ",\n";
+    // Shelly grid stats (AC side — true wall power, upstream of PSU)
+    o += "  \"grid_enabled\": " + std::string(shelly.ok ? "true" : "false") + ",\n";
+    o += "  \"grid_relay_on\": " + std::string(shelly.relay_on ? "true" : "false") + ",\n";
+    o += "  \"grid_power_w\": " + jdbl(shelly.power_w) + ",\n";
+    o += "  \"grid_current_a\": " + jdbl(shelly.current_a) + ",\n";
+    o += "  \"grid_voltage_v\": " + jdbl(shelly.voltage_v) + "\n";
     o += "}\n";
     return o;
 }
@@ -3048,6 +3120,8 @@ function renderFlowDiagram(d){
   var el=document.getElementById('flow-svg');if(!el)return
   var bv=d.battery_voltage||0,ba=d.battery_current||0,sol=d.solar_voltage||0,chv=d.charger_voltage||0
   var pw=d.power_watts||0
+  var gridEnabled=!!d.grid_enabled,gridPwr=d.grid_power_w||0,gridOn=d.grid_relay_on!==false
+  var gridActive=gridEnabled&&gridOn&&gridPwr>3
   var batPwr=bv*ba
   var sysLoad=bv*Math.abs(ba)
   var charging=ba<-0.1,discharging=ba>0.1,idle=Math.abs(ba)<=0.1
@@ -3071,28 +3145,28 @@ function renderFlowDiagram(d){
   if(mobile){
     nodes=[
       {id:'solar',x:100,y:52,w:80,h:44,cls:'flow-node flow-node-solar',lbl:'Solar',val:fmt(sol,1)+' V',inactive:!solarActive,tf:wFill,lf:wMuted},
-      {id:'grid',x:100,y:128,w:80,h:44,cls:'flow-node flow-node-grid',lbl:'Grid',val:fmt(chv,2)+' V',inactive:false,tf:wFill,lf:wMuted},
+      {id:'grid',x:100,y:128,w:80,h:44,cls:'flow-node flow-node-grid',lbl:'Grid',val:gridEnabled?fmt(gridPwr,0)+' W':fmt(chv,2)+' V',inactive:gridEnabled&&!gridOn,tf:wFill,lf:wMuted},
       {id:'charger',x:100,y:204,w:80,h:44,cls:'flow-node flow-node-charger',lbl:chgNodeLbl,val:chgNodeVal,inactive:false,tf:wFill,lf:wMuted},
       {id:'battery',x:100,y:280,w:92,h:58,cls:'flow-node flow-node-battery',lbl:'Battery',val:fmt(bv,2)+' V',val2:(ba>=0?'+':'')+fmt(ba,2)+' A',val2Cls:idle?'':charging?'flow-cur-chg':'flow-cur-dchg',inactive:false,tf:wFill,lf:wMuted},
       {id:'load',x:100,y:368,w:80,h:44,cls:'flow-node flow-node-load',lbl:'Load',val:fmt(sysLoad||0,1)+' W',inactive:false,tf:fillTxt,lf:fillMuted}
     ]
     arrows=[
       {path:'M 100 74 L 100 102',cls:(solarActive?chgCls:idleCls)+' flow-arrow-solar',anim:charging&&solarActive,pwr:solarActive&&charging?fmt(chgPwr,0)+' W':'',mx:118,my:88},
-      {path:'M 100 150 L 100 182',cls:chv>1?chgCls:idleCls,anim:charging&&chv>1,pwr:chv>1&&charging?fmt(chgPwr,0)+' W':'',mx:118,my:166},
+      {path:'M 100 150 L 100 182',cls:(gridActive||((!gridEnabled)&&chv>1))?chgCls:idleCls,anim:gridActive||((!gridEnabled)&&charging&&chv>1),pwr:gridEnabled?fmt(gridPwr,0)+' W':(chv>1&&charging?fmt(chgPwr,0)+' W':''),mx:118,my:166},
       {path:'M 100 226 L 100 258',cls:chgCls,anim:charging,pwr:charging?fmt(Math.abs(batPwr||0),0)+' W':'',mx:118,my:242},
       {path:'M 100 302 L 100 346',cls:loadAnim?dchgCls:idleCls,anim:loadAnim,pwr:(sysLoad||0)>0?fmt(sysLoad||0,0)+' W':'',mx:118,my:324}
     ]
   }else{
     nodes=[
       {id:'solar',x:324,y:55,w:76,h:40,cls:'flow-node flow-node-solar',lbl:'Solar',val:fmt(sol,1)+' V',inactive:!solarActive,tf:wFill,lf:wMuted},
-      {id:'grid',x:180,y:140,w:76,h:44,cls:'flow-node flow-node-grid',lbl:'Grid',val:fmt(chv,2)+' V',inactive:false,tf:wFill,lf:wMuted},
+      {id:'grid',x:180,y:140,w:76,h:44,cls:'flow-node flow-node-grid',lbl:'Grid',val:gridEnabled?fmt(gridPwr,0)+' W':fmt(chv,2)+' V',inactive:gridEnabled&&!gridOn,tf:wFill,lf:wMuted},
       {id:'charger',x:324,y:140,w:88,h:44,cls:'flow-node flow-node-charger',lbl:chgNodeLbl,val:chgNodeVal,inactive:false,tf:wFill,lf:wMuted},
       {id:'battery',x:468,y:140,w:92,h:58,cls:'flow-node flow-node-battery',lbl:'Battery',val:fmt(bv,2)+' V',val2:(ba>=0?'+':'')+fmt(ba,2)+' A',val2Cls:idle?'':charging?'flow-cur-chg':'flow-cur-dchg',inactive:false,tf:wFill,lf:wMuted},
       {id:'load',x:612,y:140,w:76,h:44,cls:'flow-node flow-node-load',lbl:'Load',val:fmt(sysLoad||0,1)+' W',inactive:false,tf:fillTxt,lf:fillMuted}
     ]
     arrows=[
       {path:'M 324 75 L 324 118',cls:(solarActive?chgCls:idleCls)+' flow-arrow-solar',anim:charging&&solarActive,pwr:solarActive&&charging?fmt(chgPwr,0)+' W':'',mx:336,my:96},
-      {path:'M 218 140 L 280 140',cls:chv>1?chgCls:idleCls,anim:charging&&chv>1,pwr:chv>1&&charging?fmt(chgPwr,0)+' W':'',mx:249,my:133},
+      {path:'M 218 140 L 280 140',cls:(gridActive||((!gridEnabled)&&chv>1))?chgCls:idleCls,anim:gridActive||((!gridEnabled)&&charging&&chv>1),pwr:gridEnabled?fmt(gridPwr,0)+' W':(chv>1&&charging?fmt(chgPwr,0)+' W':''),mx:249,my:133},
       {path:'M 368 140 L 422 140',cls:chgCls,anim:charging,pwr:charging?fmt(Math.abs(batPwr||0),0)+' W':'',mx:395,my:133},
       {path:'M 514 140 L 574 140',cls:loadAnim?dchgCls:idleCls,anim:loadAnim,pwr:sysLoad>0?fmt(sysLoad||0,0)+' W':'',mx:544,my:133}
     ]
@@ -4118,11 +4192,30 @@ html.light .active-monitor{background:linear-gradient(135deg,rgba(22,163,74,.06)
 </div>
 <div class="test-card">
 <h2>Scheduled Tests</h2>
-<div id="sched-list" class="sched-placeholder">No scheduled tests. Add schedules in Settings.</div>
+<div id="sched-list" class="sched-placeholder">No scheduled tests.</div>
+<div style="margin-top:.75rem;display:flex;flex-wrap:wrap;gap:.5rem;align-items:flex-end">
+<select id="sched-type" style="font-family:inherit;font-size:.85rem;padding:.35rem .5rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)"><option value="ups_failover">UPS Failover</option><option value="load_spike">Load Spike</option><option value="capacity">Capacity</option><option value="charger_recovery">Charger Recovery</option><option value="simulated_outage">Simulated Outage</option></select>
+<select id="sched-freq" style="font-family:inherit;font-size:.85rem;padding:.35rem .5rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)"><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly" selected>Monthly</option></select>
+<input type="number" id="sched-hour" min="0" max="23" value="2" placeholder="Hr" title="Hour (0–23)" style="width:3.5rem;font-family:inherit;font-size:.85rem;padding:.35rem .4rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">
+<input type="number" id="sched-min" min="0" max="59" value="0" placeholder="Min" title="Minute" style="width:3.5rem;font-family:inherit;font-size:.85rem;padding:.35rem .4rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">
+<input type="number" id="sched-dom" min="1" max="28" value="1" placeholder="Day" title="Day of month" style="width:3.5rem;font-family:inherit;font-size:.85rem;padding:.35rem .4rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">
+<button type="button" class="test-btn test-btn-start" onclick="addTestSchedule()" style="margin:0">Add</button>
+</div>
 </div>
 <div class="test-card">
 <h2>Test Safety Limits</h2>
-<div id="safety-limits" style="font-size:.85rem"></div>
+<div id="safety-limits-view"></div>
+<div id="safety-limits-form" style="display:none">
+<div class="diag-grid" style="margin-bottom:.5rem">
+<div class="diag-item"><div style="font-size:.75rem;color:var(--muted);margin-bottom:.3rem">Min SOC %</div><input type="number" id="sl-soc" min="5" max="50" step="1" style="width:100%;font-family:inherit;font-size:.9rem;padding:.3rem .4rem;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text)"></div>
+<div class="diag-item"><div style="font-size:.75rem;color:var(--muted);margin-bottom:.3rem">Min Voltage V</div><input type="number" id="sl-v" min="10" max="60" step="0.1" style="width:100%;font-family:inherit;font-size:.9rem;padding:.3rem .4rem;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text)"></div>
+<div class="diag-item"><div style="font-size:.75rem;color:var(--muted);margin-bottom:.3rem">Max Duration (min)</div><input type="number" id="sl-dur" min="5" max="600" step="5" style="width:100%;font-family:inherit;font-size:.9rem;padding:.3rem .4rem;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text)"></div>
+<div class="diag-item" style="display:flex;align-items:center;gap:.5rem"><input type="checkbox" id="sl-ot"><label for="sl-ot" style="font-size:.85rem">Abort on overtemp</label></div>
+</div>
+<button type="button" class="test-btn test-btn-start" onclick="saveSafetyLimits()" style="margin-right:.5rem">Save</button>
+<button type="button" class="test-btn" onclick="showSafetyView()" style="background:var(--border);color:var(--text);margin:0">Cancel</button>
+<span id="sl-msg" style="font-size:.8rem;color:var(--muted);margin-left:.5rem"></span>
+</div>
 </div>
 <div class="test-card">
 <h2>Test History</h2>
@@ -4152,7 +4245,11 @@ function fmtDur(s){if(!s)return'—';if(s<60)return s+'s';if(s<3600)return Math.
 function fmtType(t){var x=TEST_TYPES.find(function(p){return p.id===t});return x?x.name:t}
 function renderTestList(running,activeData){var wrap=$('test-list');wrap.innerHTML='';if(running&&activeData){var start=new Date(activeData.start_time*1000);var elapsed=activeData.duration_seconds||0;var m=Math.floor(elapsed/60),s=elapsed%60;var elapsedStr=(m>0?m+'m ':'')+s+'s';wrap.innerHTML='<div class="active-inline"><strong>'+fmtType(activeData.test_type)+'</strong><div class="test-item-meta">Started: '+start.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})+' &middot; Elapsed: '+elapsedStr+'</div><div class="diag-grid" style="margin-top:.5rem"><div class="diag-item">Battery: <span class="val">'+(activeData.battery_voltage||0).toFixed(2)+' V</span></div><div class="diag-item">Current: <span class="val">'+(activeData.battery_current||0).toFixed(1)+' A</span></div><div class="diag-item">Load: <span class="val">'+(activeData.load_power||0).toFixed(0)+' W</span></div><div class="diag-item">SOC: <span class="val">'+(activeData.battery_soc||0).toFixed(0)+'%</span></div><div class="diag-item">Energy: <span class="val">'+(activeData.energy_delivered_wh||0).toFixed(0)+' Wh</span></div><div class="diag-item">Sag: <span class="val">'+(activeData.voltage_sag||0).toFixed(2)+' V</span></div></div></div>';return}TEST_TYPES.forEach(function(t){var div=document.createElement('div');div.className='test-item';div.innerHTML='<div><strong>'+t.name+'</strong><div class="test-item-desc">'+t.desc+'</div><div class="test-item-meta">Duration: '+t.dur+' &middot; Battery impact: '+t.impact+'</div></div><button type="button" class="test-btn test-btn-start test-item-btn" data-type="'+t.id+'">Run</button>';div.querySelector('button').onclick=function(){if(running)return;fetch('/api/tests/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({test_type:t.id})}).then(function(r){return r.json()}).then(function(d){if(d.ok){loadTests();loadActive()}})};wrap.appendChild(div)})}
 function loadBatteryHealth(){fetch('/api/battery/diagnostics').then(function(r){return r.json()}).then(function(d){var wrap=$('battery-health');var capVal=d.estimated_capacity_pct>=0?d.estimated_capacity_pct.toFixed(0)+'%':'unknown';var resVal=d.internal_resistance_mohm>0?(d.internal_resistance_mohm/1000).toFixed(3)+' Ω':'estimating';var sagVal=d.avg_voltage_sag_v>=0?d.avg_voltage_sag_v.toFixed(2)+' V':'unknown';var effVal=d.charge_efficiency_pct>=0?d.charge_efficiency_pct.toFixed(0)+'%':'unknown';var healthVal=(d.health_score||0)>0?(d.health_score||0)+'/100':'pending tests';wrap.innerHTML='<div class="diag-item"><span class="val">'+capVal+'</span><div>Estimated Capacity</div></div><div class="diag-item"><span class="val">'+resVal+'</span><div>Internal Resistance</div></div><div class="diag-item"><span class="val">'+sagVal+'</span><div>Average Voltage Sag</div></div><div class="diag-item"><span class="val">'+effVal+'</span><div>Charge Efficiency</div></div><div class="diag-item"><span class="val">'+healthVal+'</span><div>Health Score</div></div>'})}
-function loadSafetyLimits(){fetch('/api/tests/safety_limits').then(function(r){return r.json()}).then(function(d){var ot='Abort on Overtemperature: '+(d.abort_on_overtemp?'enabled':'disabled');$('safety-limits').innerHTML='<div class="diag-grid" style="margin:0"><div class="diag-item">Minimum SOC: <span class="val">'+d.soc_floor_pct+'%</span></div><div class="diag-item">Minimum Voltage: <span class="val">'+d.voltage_floor_v+' V</span></div><div class="diag-item">Maximum Duration: <span class="val">'+fmtDur(d.max_duration_sec)+'</span></div><div class="diag-item">'+ot+'</div></div>'})}
+var _safetyLimits={}
+function showSafetyView(){$('safety-limits-view').style.display='';$('safety-limits-form').style.display='none'}
+function showSafetyEdit(){$('safety-limits-view').style.display='none';$('safety-limits-form').style.display='';if(_safetyLimits.soc_floor_pct!=null){$('sl-soc').value=_safetyLimits.soc_floor_pct;$('sl-v').value=_safetyLimits.voltage_floor_v;$('sl-dur').value=Math.round(_safetyLimits.max_duration_sec/60);$('sl-ot').checked=!!_safetyLimits.abort_on_overtemp}}
+function saveSafetyLimits(){var lim={soc_floor_pct:parseFloat($('sl-soc').value),voltage_floor_v:parseFloat($('sl-v').value),max_duration_sec:parseInt($('sl-dur').value,10)*60,abort_on_overtemp:$('sl-ot').checked};fetch('/api/tests/safety_limits',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(lim)}).then(function(r){return r.json()}).then(function(d){if(d.ok){_safetyLimits=lim;loadSafetyLimits();showSafetyView()}else{$('sl-msg').textContent='Save failed';$('sl-msg').style.color='#dc2626'}})}
+function loadSafetyLimits(){fetch('/api/tests/safety_limits').then(function(r){return r.json()}).then(function(d){_safetyLimits=d;var ot=d.abort_on_overtemp?'enabled':'disabled';$('safety-limits-view').innerHTML='<div class="diag-grid" style="margin:0"><div class="diag-item">Minimum SOC: <span class="val">'+d.soc_floor_pct+'%</span></div><div class="diag-item">Minimum Voltage: <span class="val">'+d.voltage_floor_v+' V</span></div><div class="diag-item">Max Duration: <span class="val">'+fmtDur(d.max_duration_sec)+'</span></div><div class="diag-item">Overtemp abort: <span class="val">'+ot+'</span></div></div><button type="button" class="test-btn test-btn-start" onclick="showSafetyEdit()" style="margin-top:.5rem;font-size:.75rem;padding:.3rem .7rem">Edit</button>'})}
 function loadActive(){fetch('/api/tests/active').then(function(r){return r.json()}).then(function(d){var mon=$('active-monitor');if(!d.running){mon.style.display='none';renderRunTestState(false,null);return}mon.style.display='block';var start=new Date(d.start_time*1000);var elapsed=d.duration_seconds||0;var m=Math.floor(elapsed/60),s=elapsed%60;var elapsedStr=(m>0?m+'m ':'')+s+'s';$('active-content').innerHTML='<div><strong>'+fmtType(d.test_type)+'</strong><div class="test-item-meta">Started: '+start.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})+' &middot; Elapsed: '+elapsedStr+'</div></div><div class="diag-grid"><div class="diag-item">Battery Voltage: <span class="val">'+d.battery_voltage.toFixed(2)+' V</span></div><div class="diag-item">Battery Current: <span class="val">'+d.battery_current.toFixed(1)+' A</span></div><div class="diag-item">Load Power: <span class="val">'+d.load_power.toFixed(0)+' W</span></div><div class="diag-item">SOC: <span class="val">'+d.battery_soc.toFixed(0)+'%</span></div><div class="diag-item">Energy Delivered: <span class="val">'+d.energy_delivered_wh.toFixed(0)+' Wh</span></div><div class="diag-item">Voltage Sag: <span class="val">'+d.voltage_sag.toFixed(2)+' V</span></div></div>';renderRunTestState(true,d);fetch('/api/tests/'+d.test_id+'/telemetry').then(function(x){return x.json()}).then(function(tel){var s=tel.samples||[];if(s.length<2){$('active-charts').innerHTML='';return}var w=400,h=80,pad=25;var svg=function(key,label,color){var min=999,max=-999;s.forEach(function(x){var v=x[key];if(v!=null&&!isNaN(v)){min=Math.min(min,v);max=Math.max(max,v)}});if(max<min)max=min+1;var xf=function(i){return pad+(w-pad*2)*(i/(s.length-1||1))};var yf=function(v){return h-pad-(h-pad*2)*(v-min)/(max-min)};var path='M';s.forEach(function(x,i){var v=x[key]!=null?x[key]:min;path+=(i?'L':'')+xf(i)+','+yf(v)});return'<div class="detail-chart">'+label+'</div><svg width="100%" height="80" viewBox="0 0 400 80"><path d="'+path+'" fill="none" stroke="'+color+'" stroke-width="1"/></svg>'};$('active-charts').innerHTML=svg('v','Voltage (V)','var(--green)')+svg('a','Current (A)','var(--blue)')+svg('load','Load (W)','var(--orange)')})})}
 function renderRunTestState(running,activeData){renderTestList(running,activeData);var stopBtn=$('stop-test');if(stopBtn)stopBtn.disabled=!running}
 function loadTests(){fetch('/api/tests').then(function(r){return r.json()}).then(function(d){
@@ -4177,7 +4274,9 @@ $('export-csv').onclick=function(){if(window._detailId)exportTest(window._detail
 $('export-json').onclick=function(){if(window._detailId)exportTest(window._detailId,'json')}
 $('save-notes').onclick=function(){if(!window._detailId)return;var n=$('detail-notes').value;fetch('/api/tests/'+window._detailId+'/notes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({notes:n})}).then(function(r){return r.json()}).then(function(d){if(d.ok)loadTests()})}
 $('finish-notes-ok').onclick=function(){if(lastStoppedTestId&&$('finish-notes').value.trim()){fetch('/api/tests/'+lastStoppedTestId+'/notes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({notes:$('finish-notes').value.trim()})}).then(function(r){return r.json()})};$('notes-prompt-card').style.display='none';lastStoppedTestId=null}
-function loadSchedules(){fetch('/api/tests/schedules').then(function(r){return r.json()}).then(function(d){var wrap=$('sched-list');var s=d.schedules||[];if(!s.length){wrap.className='sched-placeholder';wrap.innerHTML='No scheduled tests. Add schedules in Settings.';return}wrap.className='';var html='';s.forEach(function(x){if(!x.enabled)return;var next=new Date(x.next_run_ts*1000);var freq=x.frequency||'monthly';var freqStr=freq.charAt(0).toUpperCase()+freq.slice(1);html+='<div class="sched-item"><span>'+fmtType(x.test_type)+'</span><span style="color:var(--muted);font-size:.85rem">Frequency: '+freqStr+' &middot; Next: '+next.toLocaleDateString()+' '+next.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})+'</span></div>'});wrap.innerHTML=html||'<div class="sched-placeholder">No enabled schedules</div>'})}
+function addTestSchedule(){var t=$('sched-type').value,f=$('sched-freq').value,h=parseInt($('sched-hour').value,10)||2,m=parseInt($('sched-min').value,10)||0,d=parseInt($('sched-dom').value,10)||1;fetch('/api/tests/schedules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({test_type:t,frequency:f,run_hour:h,run_minute:m,day_of_month:d})}).then(function(r){return r.json()}).then(function(x){if(x.ok)loadSchedules()})}
+function delTestSchedule(id){fetch('/api/tests/schedules/'+id,{method:'DELETE'}).then(function(r){if(r.ok)loadSchedules()})}
+function loadSchedules(){fetch('/api/tests/schedules').then(function(r){return r.json()}).then(function(d){var wrap=$('sched-list');var s=d.schedules||[];if(!s.length){wrap.className='sched-placeholder';wrap.innerHTML='No scheduled tests.';return}wrap.className='';var html='';s.forEach(function(x){var next=new Date(x.next_run_ts*1000);var freq=x.frequency||'monthly';var freqStr=freq.charAt(0).toUpperCase()+freq.slice(1);var en=x.enabled?'':'<span style="color:var(--muted)"> (disabled)</span>';html+='<div class="sched-item"><span>'+fmtType(x.test_type)+en+'</span><span style="color:var(--muted);font-size:.8rem">'+freqStr+' &middot; Next: '+next.toLocaleDateString()+' '+next.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})+'</span><button type="button" onclick="delTestSchedule('+x.id+')" style="font-family:inherit;font-size:.75rem;background:none;border:none;color:var(--muted);cursor:pointer;padding:.1rem .4rem" title="Remove">&#x2715;</button></div>'});wrap.innerHTML=html})}
 loadTests();loadBatteryHealth();loadSafetyLimits();loadActive();loadSchedules();
 setInterval(function(){loadTests();loadActive()},3000);
 setInterval(loadBatteryHealth,60000);

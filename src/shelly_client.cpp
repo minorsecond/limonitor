@@ -12,6 +12,105 @@
 
 namespace shelly {
 
+// Returns response body, or "" on failure
+static std::string do_get(const std::string& host, int port, const char* path, int timeout_s = 5) {
+    struct addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo* res = nullptr;
+    char portstr[8];
+    std::snprintf(portstr, sizeof(portstr), "%d", port);
+    if (getaddrinfo(host.c_str(), portstr, &hints, &res) != 0) return "";
+    int sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (sock < 0) { freeaddrinfo(res); return ""; }
+    struct timeval tv{timeout_s, 0};
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    if (connect(sock, res->ai_addr, res->ai_addrlen) != 0) {
+        freeaddrinfo(res); close(sock); return "";
+    }
+    freeaddrinfo(res);
+    char reqbuf[256];
+    std::snprintf(reqbuf, sizeof(reqbuf),
+        "GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n", path, host.c_str());
+    send(sock, reqbuf, std::strlen(reqbuf), MSG_NOSIGNAL);
+    std::string body;
+    char rbuf[1024];
+    ssize_t n;
+    while ((n = recv(sock, rbuf, sizeof(rbuf) - 1, 0)) > 0) {
+        rbuf[n] = '\0';
+        body += rbuf;
+    }
+    close(sock);
+    // Strip HTTP headers
+    auto pos = body.find("\r\n\r\n");
+    if (pos != std::string::npos) body = body.substr(pos + 4);
+    return body;
+}
+
+// Simple JSON value extractor: finds "key":value (number or bool) in a flat JSON string
+static double json_double(const std::string& body, const char* key, double def = 0) {
+    std::string pat = std::string("\"") + key + "\":";
+    auto pos = body.find(pat);
+    if (pos == std::string::npos) return def;
+    pos += pat.size();
+    while (pos < body.size() && body[pos] == ' ') ++pos;
+    try { return std::stod(body.substr(pos)); } catch (...) { return def; }
+}
+
+static bool json_bool(const std::string& body, const char* key, bool def = false) {
+    std::string pat = std::string("\"") + key + "\":";
+    auto pos = body.find(pat);
+    if (pos == std::string::npos) return def;
+    pos += pat.size();
+    while (pos < body.size() && body[pos] == ' ') ++pos;
+    if (body.substr(pos, 4) == "true") return true;
+    if (body.substr(pos, 5) == "false") return false;
+    return def;
+}
+
+Status get_status(Database* db) {
+    Status st;
+    if (!db) return st;
+    std::string host = db->get_setting("shelly_host");
+    if (host.empty()) return st;
+
+    int port = 80;
+    auto colon = host.find(':');
+    if (colon != std::string::npos) {
+        try { port = std::stoi(host.substr(colon + 1)); } catch (...) {}
+        host = host.substr(0, colon);
+    }
+
+    // Try Gen2 (Plus/Pro) first: rpc endpoint — 2s timeout for live monitoring
+    std::string body = do_get(host, port, "/rpc/Switch.GetStatus?id=0", 2);
+    if (body.find("\"apower\"") != std::string::npos) {
+        // Gen2
+        st.ok = true;
+        st.relay_on = json_bool(body, "output");
+        st.power_w  = json_double(body, "apower");
+        st.current_a = json_double(body, "current");
+        st.voltage_v = json_double(body, "voltage");
+        // "aenergy":{"total":kwh}
+        auto ep = body.find("\"aenergy\"");
+        if (ep != std::string::npos) {
+            auto sub = body.substr(ep);
+            st.total_kwh = json_double(sub, "total") / 1000.0; // Wh → kWh
+        }
+        return st;
+    }
+
+    // Gen1 fallback: /relay/0 + /meter/0
+    std::string relay_body = do_get(host, port, "/relay/0", 2);
+    std::string meter_body = do_get(host, port, "/meter/0", 2);
+    if (relay_body.empty() && meter_body.empty()) return st;
+    st.ok = true;
+    st.relay_on = json_bool(relay_body, "ison");
+    st.power_w  = json_double(meter_body, "power");
+    st.total_kwh = json_double(meter_body, "total") / 60000.0; // Watt-minutes → kWh
+    return st;
+}
+
 static bool do_request(Database* db, const char* turn) {
     if (!db) return false;
     std::string host = db->get_setting("shelly_host");

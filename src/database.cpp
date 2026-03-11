@@ -101,6 +101,7 @@ bool Database::migrate() {
         "  t2         REAL"                // temperature sensor 2
         ");"
         "CREATE INDEX IF NOT EXISTS bat_ts ON battery_readings(ts);"
+        "CREATE INDEX IF NOT EXISTS bat_ts_a ON battery_readings(ts, a);"
 
         "CREATE TABLE IF NOT EXISTS charger_readings ("
         "  id     INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -213,6 +214,7 @@ bool Database::migrate() {
         ");"
         "CREATE INDEX IF NOT EXISTS tt_test ON test_telemetry(test_id);"
         "CREATE INDEX IF NOT EXISTS tt_ts ON test_telemetry(timestamp);"
+        "CREATE INDEX IF NOT EXISTS tt_test_ts ON test_telemetry(test_id, timestamp);"
     )) return false;
 
     if (!exec(
@@ -682,6 +684,11 @@ std::vector<UsageSlotProfile> Database::get_usage_profile(int days_back) const {
     std::lock_guard<std::mutex> lk(mu_);
     std::vector<UsageSlotProfile> result(8);
     for (int i = 0; i < 8; ++i) result[i].slot = i;
+    // Cache for 60 s — this query runs on every dashboard refresh via /api/analytics
+    auto now_t = std::time(nullptr);
+    if (!usage_profile_cache_.empty() && (now_t - usage_profile_cache_ts_) < USAGE_PROFILE_CACHE_TTL_S)
+        return usage_profile_cache_;
+
     if (!db_) return result;
 
     auto* db = db_handle(db_);
@@ -712,6 +719,8 @@ std::vector<UsageSlotProfile> Database::get_usage_profile(int days_back) const {
         }
     }
     sqlite3_finalize(stmt);
+    usage_profile_cache_ = result;
+    usage_profile_cache_ts_ = now_t;
     return result;
 }
 
@@ -1375,4 +1384,36 @@ std::string Database::default_path() {
         return std::string(home) + "/.local/share/limonitor/limonitor.db";
 #endif
     return "./limonitor.db";
+}
+
+double Database::get_test_min_voltage(int64_t test_id) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return 0;
+    auto* db = db_handle(db_);
+    const char* sql = "SELECT MIN(battery_voltage) FROM test_telemetry "
+                      "WHERE test_id=? AND battery_voltage > 0";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return 0;
+    sqlite3_bind_int64(stmt, 1, test_id);
+    double result = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_type(stmt, 0) != SQLITE_NULL)
+        result = sqlite3_column_double(stmt, 0);
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+void Database::abort_interrupted_tests() {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return;
+    int64_t now = static_cast<int64_t>(std::time(nullptr));
+    char sql[256];
+    std::snprintf(sql, sizeof(sql),
+        "UPDATE test_runs SET result='aborted', end_time=%lld, "
+        "duration_seconds=MAX(1,%lld-start_time) WHERE result='running'",
+        (long long)now, (long long)now);
+    char* err = nullptr;
+    if (sqlite3_exec(db_handle(db_), sql, nullptr, nullptr, &err) != SQLITE_OK) {
+        LOG_WARN("DB: abort_interrupted_tests: %s", err ? err : "error");
+        sqlite3_free(err);
+    }
 }

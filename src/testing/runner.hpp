@@ -77,6 +77,7 @@ private:
     void flush_telemetry();
     bool check_safety_limits(const BatterySnapshot& bat) const;
     void finish_test(const std::string& result, const std::string& metadata_json);
+    void load_limits_from_db();
 };
 
 // Called from main loop (e.g. every 60s) to run due scheduled tests

@@ -124,6 +124,10 @@ public:
     void insert_test_telemetry_batch(const std::vector<testing::TestTelemetrySample>& samples);
     std::vector<testing::TestTelemetrySample> load_test_telemetry(int64_t test_id,
                                                                   size_t limit = 10000) const;
+    double get_test_min_voltage(int64_t test_id) const;
+
+    // Mark any test_runs with result='running' as 'aborted' (recovery from crashes).
+    void abort_interrupted_tests();
 
     // Test schedules (automated tests)
     struct TestScheduleRow {
@@ -176,6 +180,10 @@ private:
     mutable std::unordered_map<std::string, std::string> settings_cache_;
     mutable std::chrono::steady_clock::time_point settings_cache_time_{};
     static constexpr int SETTINGS_CACHE_TTL_MS = 2000;
+
+    mutable std::vector<UsageSlotProfile> usage_profile_cache_;
+    mutable std::time_t usage_profile_cache_ts_{0};
+    static constexpr int USAGE_PROFILE_CACHE_TTL_S = 60;
     void invalidate_settings_cache() const;
 
     bool migrate();

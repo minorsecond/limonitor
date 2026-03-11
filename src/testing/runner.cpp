@@ -9,7 +9,13 @@
 namespace testing {
 
 TestRunner::TestRunner(DataStore& store, Database* db)
-    : store_(store), db_(db), telemetry_buffer_(50) {}
+    : store_(store), db_(db), telemetry_buffer_(50) {
+    // Recover from crashes: any test left as 'running' in the DB is stale.
+    if (db_ && db_->is_open()) {
+        db_->abort_interrupted_tests();
+        load_limits_from_db();
+    }
+}
 
 TestRunner::~TestRunner() {
     stop_test();
@@ -291,6 +297,18 @@ void check_scheduled_tests(Database* db, DataStore& store, TestRunner* runner) {
         db->update_test_schedule_skip(s.id, now, "start_test failed");
         db->update_test_schedule_next_run(s.id, compute_next_run(s.frequency, s.run_hour, s.run_minute, s.day_of_month));
     }
+}
+
+void TestRunner::load_limits_from_db() {
+    if (!db_) return;
+    auto s = db_->get_setting("test_soc_floor_pct");
+    if (!s.empty()) try { limits_.soc_floor_pct = std::stod(s); } catch (...) {}
+    s = db_->get_setting("test_voltage_floor_v");
+    if (!s.empty()) try { limits_.voltage_floor_v = std::stod(s); } catch (...) {}
+    s = db_->get_setting("test_max_duration_sec");
+    if (!s.empty()) try { limits_.max_duration_sec = std::stoi(s); } catch (...) {}
+    s = db_->get_setting("test_abort_on_overtemp");
+    if (!s.empty()) limits_.abort_on_overtemp = (s == "1" || s == "true");
 }
 
 } // namespace testing

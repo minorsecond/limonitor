@@ -8,11 +8,13 @@
 #include "data_store.hpp"
 #include "database.hpp"
 #include "ops_events.hpp"
+#include "shelly_client.hpp"
 #include "system_events.hpp"
 #include "tx_events.hpp"
 #include "testing/runner.hpp"
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -51,7 +53,13 @@ private:
     static std::string svg_charger_chart(const std::vector<PwrGateSnapshot>& hist);
     static std::string charger_json(const PwrGateSnapshot& pg);
     static std::string charger_history_json(const std::vector<PwrGateSnapshot>& snaps);
-    static std::string flow_json(const BatterySnapshot& bat, const PwrGateSnapshot& chg);
+    static std::string flow_json(const BatterySnapshot& bat, const PwrGateSnapshot& chg,
+                                  const shelly::Status& shelly = {});
+    shelly::Status fetch_shelly_status();  // reads from cache — zero latency
+    void shelly_poll_loop();               // background thread — polls Shelly every N seconds
+    shelly::Status shelly_cache_{};
+    mutable std::mutex shelly_cache_mu_;
+    std::thread shelly_poll_thread_;
     static std::string tx_events_json(const std::vector<TxEvent>& events);
     static std::string system_events_json(const std::vector<SystemEvent>& events);
     static std::string analytics_json(const AnalyticsSnapshot& a,
