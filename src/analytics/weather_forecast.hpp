@@ -72,6 +72,17 @@ std::vector<double> project_battery_soc(double start_soc_pct, double capacity_wh
                                         const std::vector<double>& generation_wh,
                                         const std::vector<double>& usage_wh);
 
+// Runtime estimate: hours from a given SoC to cutoff at constant load.
+// Returns 0 if inputs are invalid.
+double estimate_runtime_h(double capacity_wh, double soc_pct, double cutoff_pct, double load_w);
+
+// Scale a usage profile so its weighted average matches a measured load.
+// Returns the scale factor applied (1.0 if no scaling needed/possible).
+double scale_usage_profile(std::vector<double>& avg_w_per_slot,
+                           std::vector<double>& stddev_w_per_slot,
+                           const std::vector<int>& sample_counts,
+                           double measured_avg_w);
+
 class WeatherForecast {
 public:
     explicit WeatherForecast(const WeatherConfig& cfg, Database* db = nullptr);

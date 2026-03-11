@@ -795,12 +795,29 @@ std::string HttpServer::solar_forecast_json(const WeatherForecastResult& r) {
 HttpServer::UsageCache HttpServer::compute_usage_cache() const {
     UsageCache c;
     if (db_) c.usage = db_->get_usage_profile(7);
+
+    auto an = store_.analytics();
+    c.measured_avg_w = an.avg_discharge_24h_w;
+
     if (!c.usage.empty()) {
+        std::vector<double> avgs, sds;
+        std::vector<int> counts;
+        for (const auto& u : c.usage) {
+            avgs.push_back(u.avg_w);
+            sds.push_back(u.stddev_w);
+            counts.push_back(u.sample_count);
+        }
+        scale_usage_profile(avgs, sds, counts, c.measured_avg_w);
+        for (size_t i = 0; i < c.usage.size(); ++i) {
+            c.usage[i].avg_w = avgs[i];
+            c.usage[i].stddev_w = sds[i];
+        }
         int total_n = 0;
         double total_sum = 0;
         for (const auto& u : c.usage) { total_sum += u.avg_w * u.sample_count; total_n += u.sample_count; }
         c.fallback_w = total_n > 0 ? total_sum / total_n : 0;
     }
+
     if (db_) {
         auto perf = db_->load_solar_performance(30);
         c.perf_count = static_cast<int>(perf.size());
@@ -928,6 +945,7 @@ std::string HttpServer::solar_forecast_week_json(const SolarForecastWeekResult& 
     auto soc_proj = project_battery_soc(r.current_soc_pct, cap_wh, gen_wh_vec, use_wh_vec);
 
     o += "  \"capacity_wh\": " + jdbl(cap_wh, 1) + ",\n";
+    o += "  \"measured_avg_w\": " + jdbl(ext_cache->measured_avg_w, 1) + ",\n";
     o += "  \"slots\": [";
     for (size_t i = 0; i < r.slots.size(); ++i) {
         const auto& s = r.slots[i];
@@ -2838,7 +2856,6 @@ td .rc-main{font-weight:600}
          "var socArr=[];\n"
          "if(showSoc&&capWh>0){\n"
          "var lastSoc=lastDailyData.current_soc_pct||0;\n"
-         "try{console.log('[SoC Debug] start='+lastSoc+'% capWh='+capWh+' ah='+ah+' bv='+bv+' capacity_wh='+(lastDailyData.capacity_wh||'N/A'));}catch(e){}\n"
          "slots.forEach(function(s){\n"
          "if(typeof s.soc_pct==='number'){lastSoc=s.soc_pct;socArr.push(lastSoc);}\n"
          "else{var netWh=(s.kwh-(s.use_kwh||0))*1000;lastSoc+=(netWh/capWh)*100;lastSoc=Math.max(0,Math.min(100,lastSoc));socArr.push(lastSoc);}\n"
@@ -2983,7 +3000,7 @@ td .rc-main{font-weight:600}
          "lh+='<span class=lg><span class=swatch style=\"background:var(--green)\"></span><span class=dot style=\"background:var(--green)\"></span>Solar generation'+(isReal?(isHist?' (realistic, measured)':' (realistic, default taper)'):' (nominal)')+'<span class=tip>'+(isReal?(isHist?'Solar energy adjusted for charge controller absorption/float taper derived from the last 14 days of historical charge data. At higher SoC, the charger reduces current, so less solar energy is actually accepted by the battery.':'Solar energy adjusted using a standard CC-CV taper model. At higher SoC the charger reduces current, so less energy is accepted. Connect a charge controller for measured taper data.'):'Expected solar energy per 3-hour slot based on panel capacity, system efficiency, and cloud cover from OpenWeather forecast. Assumes constant max charge current (nominal).')+'</span></span>';\n"
          "lh+='<span class=lg><span class=\"swatch-band\" style=\"background:linear-gradient(var(--green),transparent);opacity:.2\"></span>95% CI<span class=tip>Inner band: 95% confidence interval (\\u00b11.96\\u03c3). Based on cloud forecast uncertainty (CV\\u00a0=\\u00a010\\u201320%). The actual yield should fall within this band ~95% of the time.</span></span>';\n"
          "lh+='<span class=lg><span class=\"swatch-band\" style=\"background:linear-gradient(var(--green),transparent);opacity:.08\"></span>99% CI<span class=tip>Outer band: 99% confidence interval (\\u00b12.576\\u03c3). Very unlikely the actual yield falls outside this range\\u2014only ~1% of the time if the cloud model is well-calibrated.</span></span>';\n"
-         "if(showUse)lh+='<span class=lg><span class=swatch style=\"background:var(--orange);border-top:1.5px dashed var(--orange)\"></span><span class=dot style=\"background:var(--orange)\"></span>Est. usage (7d)<span class=tip>Average power consumption per 3-hour time-of-day slot, computed from the last 7 days of battery discharge history. Shaded band shows the 95% CI from observed variability across days.</span></span>';\n"
+         "if(showUse){var mw=lastDailyData.measured_avg_w;lh+='<span class=lg><span class=swatch style=\"background:var(--orange);border-top:1.5px dashed var(--orange)\"></span><span class=dot style=\"background:var(--orange)\"></span>Est. usage'+(mw>0?' ('+fmt(mw,1)+'W avg)':' (7d)')+'<span class=tip>'+(mw>0?'Power consumption estimated from the measured 24h average load ('+fmt(mw,1)+' W). Time-of-day profile scaled to match actual integrated discharge. Shaded band shows 95% CI.':'Average power consumption per 3-hour time-of-day slot from the last 7 days of battery discharge data. Shaded band shows the 95% CI from observed variability.')+'</span></span>';}\n"
          "if(showCumul)lh+='<span class=lg><span class=swatch style=\"border-top:1.5px dashed var(--cyan)\"></span>Cumulative<span class=tip>Running total of solar energy generated over the forecast period. Useful for projecting total harvest and comparing against battery capacity or load.</span></span>';\n"
          "if(showSoc)lh+='<span class=lg><span class=swatch style=\"background:var(--violet)\"></span>Projected SoC<span class=tip>Projected battery state of charge over time. Starts at current SoC ('+Math.round(lastDailyData.current_soc_pct||0)+'%) and adds solar generation while subtracting estimated usage each slot. Dashed lines mark 20% (low) and 80% (absorption taper) thresholds.</span></span>';\n"
          "lg.innerHTML=lh;}\n"

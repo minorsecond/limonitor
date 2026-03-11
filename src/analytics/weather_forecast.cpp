@@ -35,6 +35,32 @@ std::vector<double> project_battery_soc(double start_soc_pct, double capacity_wh
     return result;
 }
 
+double estimate_runtime_h(double capacity_wh, double soc_pct, double cutoff_pct, double load_w) {
+    if (capacity_wh <= 0 || load_w <= 0 || soc_pct <= cutoff_pct) return 0;
+    double usable_wh = capacity_wh * (soc_pct - cutoff_pct) / 100.0;
+    return usable_wh / load_w;
+}
+
+double scale_usage_profile(std::vector<double>& avg_w_per_slot,
+                           std::vector<double>& stddev_w_per_slot,
+                           const std::vector<int>& sample_counts,
+                           double measured_avg_w) {
+    if (measured_avg_w <= 0.5) return 1.0;
+    size_t n = avg_w_per_slot.size();
+    int total_n = 0;
+    double total_sum = 0;
+    for (size_t i = 0; i < n && i < sample_counts.size(); ++i) {
+        total_sum += avg_w_per_slot[i] * sample_counts[i];
+        total_n += sample_counts[i];
+    }
+    double profile_avg = total_n > 0 ? total_sum / total_n : 0;
+    if (profile_avg <= 0.5) return 1.0;
+    double scale = measured_avg_w / profile_avg;
+    for (size_t i = 0; i < n; ++i) avg_w_per_slot[i] *= scale;
+    for (size_t i = 0; i < stddev_w_per_slot.size(); ++i) stddev_w_per_slot[i] *= scale;
+    return scale;
+}
+
 WeatherForecast::WeatherForecast(const WeatherConfig& cfg, Database* db)
     : cfg_(cfg), db_(db)
 {

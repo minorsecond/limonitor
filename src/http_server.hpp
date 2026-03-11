@@ -61,6 +61,7 @@ private:
     struct UsageCache {
         std::vector<UsageSlotProfile> usage;
         double fallback_w{0};
+        double measured_avg_w{0};  // from analytics 24h discharge (0 = unavailable)
         double avg_coeff{0};
         int perf_count{0};
     };

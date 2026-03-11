@@ -685,6 +685,147 @@ static void test_soc_realistic_scenario() {
     ASSERT(soc[15] > 0.0, "soc_realistic: doesn't hit 0 in 2 days");
 }
 
+// ---------- estimate_runtime_h tests ----------
+
+static void test_runtime_basic() {
+    // 1356 Wh battery, 93.8% SoC, 10% cutoff, 14W load
+    // Usable: 1356 * (93.8 - 10) / 100 = 1137.5 Wh
+    // Runtime: 1137.5 / 14 = 81.25 h
+    double rt = estimate_runtime_h(1356.0, 93.8, 10.0, 14.0);
+    ASSERT(approx_eq(rt, 81.25, 0.1), "runtime_basic: 93.8% → 10% at 14W ≈ 81.25h");
+}
+
+static void test_runtime_full_to_cutoff() {
+    // 1356 Wh, 100% SoC, 10% cutoff, 14W
+    // Usable: 1356 * 90/100 = 1220.4 Wh
+    // Runtime: 1220.4 / 14 = 87.17 h
+    double rt = estimate_runtime_h(1356.0, 100.0, 10.0, 14.0);
+    ASSERT(approx_eq(rt, 87.17, 0.1), "runtime_full: 100% → 10% at 14W ≈ 87.17h");
+}
+
+static void test_runtime_zero_load() {
+    double rt = estimate_runtime_h(1356.0, 100.0, 10.0, 0.0);
+    ASSERT(rt == 0.0, "runtime_zero_load: returns 0");
+}
+
+static void test_runtime_soc_below_cutoff() {
+    double rt = estimate_runtime_h(1356.0, 5.0, 10.0, 14.0);
+    ASSERT(rt == 0.0, "runtime_below_cutoff: SoC < cutoff returns 0");
+}
+
+static void test_runtime_soc_at_cutoff() {
+    double rt = estimate_runtime_h(1356.0, 10.0, 10.0, 14.0);
+    ASSERT(rt == 0.0, "runtime_at_cutoff: SoC == cutoff returns 0");
+}
+
+static void test_runtime_zero_capacity() {
+    double rt = estimate_runtime_h(0.0, 80.0, 10.0, 14.0);
+    ASSERT(rt == 0.0, "runtime_zero_cap: returns 0");
+}
+
+static void test_runtime_consistency_with_dashboard() {
+    // From user's system: 100Ah * 13.56V = 1356 Wh, 14W load
+    // Dashboard shows: Full→10% = 86.9h, Current(93.8%)→10% = 80.9h
+    double rt_full = estimate_runtime_h(1356.0, 100.0, 10.0, 14.0);
+    double rt_curr = estimate_runtime_h(1356.0, 93.8, 10.0, 14.0);
+    ASSERT(approx_eq(rt_full, 87.17, 0.5), "runtime_consistency: full→10% ≈ 87h (dashboard: 86.9h)");
+    ASSERT(approx_eq(rt_curr, 81.25, 0.5), "runtime_consistency: 93.8%→10% ≈ 81h (dashboard: 80.9h)");
+}
+
+// ---------- scale_usage_profile tests ----------
+
+static void test_scale_basic() {
+    // Profile averages 27W, measured is 14W → scale ≈ 0.519
+    std::vector<double> avgs = {30.0, 25.0, 28.0, 20.0, 35.0, 22.0, 30.0, 26.0};
+    std::vector<double> sds  = {6.0,  5.0,  5.6,  4.0,  7.0,  4.4,  6.0,  5.2};
+    std::vector<int> counts  = {10,   10,   10,   10,   10,   10,   10,   10};
+    // Weighted avg = (30+25+28+20+35+22+30+26)*10 / 80 = 216*10/80 = 27.0
+    double scale = scale_usage_profile(avgs, sds, counts, 14.0);
+    ASSERT(approx_eq(scale, 14.0/27.0, 0.01), "scale_basic: factor ≈ 0.519");
+    // Verify all slots are scaled
+    ASSERT(approx_eq(avgs[0], 30.0 * 14.0/27.0, 0.1), "scale_basic: slot 0 scaled");
+    ASSERT(approx_eq(avgs[4], 35.0 * 14.0/27.0, 0.1), "scale_basic: slot 4 scaled");
+    ASSERT(approx_eq(sds[0], 6.0 * 14.0/27.0, 0.1), "scale_basic: stddev 0 scaled");
+}
+
+static void test_scale_no_measured() {
+    // measured_avg_w = 0 → no scaling
+    std::vector<double> avgs = {30.0, 25.0};
+    std::vector<double> sds  = {6.0, 5.0};
+    std::vector<int> counts  = {10, 10};
+    double scale = scale_usage_profile(avgs, sds, counts, 0.0);
+    ASSERT(approx_eq(scale, 1.0), "scale_no_measured: factor = 1.0");
+    ASSERT(approx_eq(avgs[0], 30.0), "scale_no_measured: slot 0 unchanged");
+}
+
+static void test_scale_zero_profile() {
+    // All profile values are 0 → no scaling
+    std::vector<double> avgs = {0.0, 0.0};
+    std::vector<double> sds  = {0.0, 0.0};
+    std::vector<int> counts  = {10, 10};
+    double scale = scale_usage_profile(avgs, sds, counts, 14.0);
+    ASSERT(approx_eq(scale, 1.0), "scale_zero_profile: factor = 1.0");
+}
+
+static void test_scale_preserves_ratio() {
+    // Slot ratios should be preserved after scaling
+    std::vector<double> avgs = {10.0, 30.0, 20.0};
+    std::vector<double> sds  = {2.0, 6.0, 4.0};
+    std::vector<int> counts  = {10, 10, 10};
+    // Profile avg = (10+30+20)*10/30 = 20.0, measured = 10.0 → scale = 0.5
+    scale_usage_profile(avgs, sds, counts, 10.0);
+    ASSERT(approx_eq(avgs[0] / avgs[1], 10.0/30.0, 0.001), "scale_ratio: slot ratio preserved");
+    ASSERT(approx_eq(avgs[1] / avgs[2], 30.0/20.0, 0.001), "scale_ratio: slot ratio preserved 2");
+}
+
+static void test_scale_uneven_counts() {
+    // Weighted average with uneven sample counts
+    std::vector<double> avgs = {30.0, 10.0};
+    std::vector<double> sds  = {6.0, 2.0};
+    std::vector<int> counts  = {90, 10};
+    // Weighted avg = (30*90 + 10*10) / 100 = 2800/100 = 28.0
+    double scale = scale_usage_profile(avgs, sds, counts, 14.0);
+    ASSERT(approx_eq(scale, 14.0/28.0, 0.01), "scale_uneven: weighted factor ≈ 0.5");
+}
+
+// ---------- SoC + scaled usage consistency test ----------
+
+static void test_soc_with_scaled_usage() {
+    // Verify SoC projection with realistic scaled usage matches runtime estimate
+    // 100Ah * 13.56V = 1356 Wh, 14W avg load, start at 93.8%
+    double cap = 1356.0;
+    double start = 93.8;
+    double load_w = 14.0;
+    double use_per_slot = load_w * 3.0;  // 42 Wh per 3h slot
+
+    // 8 slots per day, 5 days = 40 slots, no solar
+    std::vector<double> gen(40, 0.0);
+    std::vector<double> use(40, use_per_slot);
+    auto soc = project_battery_soc(start, cap, gen, use);
+    ASSERT(soc.size() == 40, "soc_scaled: 40 slots");
+
+    // At 14W, runtime from 93.8% to 10% ≈ 81.25h ≈ 27 slots of 3h
+    double rt = estimate_runtime_h(cap, start, 10.0, load_w);
+    int slots_to_cutoff = static_cast<int>(std::floor(rt / 3.0));
+
+    // SoC at slot just before cutoff should be > 10%
+    if (slots_to_cutoff > 0 && slots_to_cutoff <= 40) {
+        ASSERT(soc[slots_to_cutoff - 1] > 10.0,
+               "soc_scaled: SoC > 10% one slot before runtime cutoff");
+    }
+    // SoC at slot at/after cutoff should be ≤ 10%
+    if (slots_to_cutoff < 40) {
+        ASSERT(soc[slots_to_cutoff] <= 10.0 + 3.5,
+               "soc_scaled: SoC near 10% at runtime cutoff slot");
+    }
+
+    // Verify it doesn't hit 0 too early — at 14W, should take ~67 slots to fully drain
+    // (1356*0.938 / 42 ≈ 30.3 slots = 90.9h from 93.8% to 0%)
+    ASSERT(soc[25] > 0.0, "soc_scaled: still alive at slot 25 (75h)");
+    // But should be empty by slot 35 (105h)
+    ASSERT(soc[35] <= 0.01, "soc_scaled: drained by slot 35 (105h)");
+}
+
 static void test_soc_full_drain_recovery() {
     // Battery drains to 0, then solar brings it back
     double cap = 5000.0;
@@ -732,6 +873,22 @@ int main() {
     test_soc_mismatched_lengths();
     test_soc_realistic_scenario();
     test_soc_full_drain_recovery();
+
+    test_runtime_basic();
+    test_runtime_full_to_cutoff();
+    test_runtime_zero_load();
+    test_runtime_soc_below_cutoff();
+    test_runtime_soc_at_cutoff();
+    test_runtime_zero_capacity();
+    test_runtime_consistency_with_dashboard();
+
+    test_scale_basic();
+    test_scale_no_measured();
+    test_scale_zero_profile();
+    test_scale_preserves_ratio();
+    test_scale_uneven_counts();
+
+    test_soc_with_scaled_usage();
 
     std::fprintf(stderr, "\n=== %d failure(s) ===\n", g_failures);
     return g_failures > 0 ? 1 : 0;
