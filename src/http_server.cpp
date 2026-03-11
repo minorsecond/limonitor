@@ -4706,10 +4706,11 @@ $('export-csv').onclick=function(){if(window._detailId)exportTest(window._detail
 $('export-json').onclick=function(){if(window._detailId)exportTest(window._detailId,'json')}
 $('save-notes').onclick=function(){if(!window._detailId)return;var n=$('detail-notes').value;fetch('/api/tests/'+window._detailId+'/notes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({notes:n})}).then(function(r){return r.json()}).then(function(d){if(d.ok)loadTests()})}
 $('finish-notes-ok').onclick=function(){if(lastStoppedTestId&&$('finish-notes').value.trim()){fetch('/api/tests/'+lastStoppedTestId+'/notes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({notes:$('finish-notes').value.trim()})}).then(function(r){return r.json()})};$('notes-prompt-card').style.display='none';lastStoppedTestId=null}
+function schedFreqChange(){var f=$('sched-freq').value;var dl=$('sched-dom-label');if(dl)dl.style.display=f==='monthly'?'':'none'}
 function addTestSchedule(){var t=$('sched-type').value,f=$('sched-freq').value,h=parseInt($('sched-hour').value,10)||2,m=parseInt($('sched-min').value,10)||0,d=parseInt($('sched-dom').value,10)||1;fetch('/api/tests/schedules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({test_type:t,frequency:f,run_hour:h,run_minute:m,day_of_month:d})}).then(function(r){return r.json()}).then(function(x){if(x.ok)loadSchedules()})}
 function delTestSchedule(id){fetch('/api/tests/schedules/'+id,{method:'DELETE'}).then(function(r){if(r.ok)loadSchedules()})}
 function loadSchedules(){fetch('/api/tests/schedules').then(function(r){return r.json()}).then(function(d){var wrap=$('sched-list');var s=d.schedules||[];if(!s.length){wrap.className='sched-placeholder';wrap.innerHTML='No scheduled tests.';return}wrap.className='';var html='';s.forEach(function(x){var next=new Date(x.next_run_ts*1000);var freq=x.frequency||'monthly';var freqStr=freq.charAt(0).toUpperCase()+freq.slice(1);var en=x.enabled?'':'<span style="color:var(--muted)"> (disabled)</span>';html+='<div class="sched-item"><span>'+fmtType(x.test_type)+en+'</span><span style="color:var(--muted);font-size:.8rem">'+freqStr+' &middot; Next: '+next.toLocaleDateString()+' '+next.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})+'</span><button type="button" onclick="delTestSchedule('+x.id+')" style="font-family:inherit;font-size:.75rem;background:none;border:none;color:var(--muted);cursor:pointer;padding:.1rem .4rem" title="Remove">&#x2715;</button></div>'});wrap.innerHTML=html})}
-loadTests();loadBatteryHealth();loadSafetyLimits();loadActive();loadSchedules();
+loadTests();loadBatteryHealth();loadSafetyLimits();loadActive();loadSchedules();schedFreqChange();
 setInterval(function(){loadTests();loadActive()},3000);
 setInterval(loadBatteryHealth,60000);
 )HTML" + grid_event_banner_js() + R"HTML(</script></body></html>)HTML";
@@ -4732,8 +4733,12 @@ std::string HttpServer::html_settings_page(Database* db) {
         }
         return r;
     };
+    auto chk = [&g](const std::string& key) {
+        auto v = g(key, "0");
+        return std::string((v == "1" || v == "true") ? " checked" : "");
+    };
     std::string o;
-    o.reserve(8000);
+    o.reserve(10000);
     std::string theme = g("theme", "");
     if (theme.empty()) theme = "dark";
     o += R"HTML(<!DOCTYPE html><html lang="en" class=")HTML";
@@ -4746,148 +4751,165 @@ std::string HttpServer::html_settings_page(Database* db) {
 :root{--bg:#0d0d11;--card:#16161c;--border:#2e2e3a;--text:#e0e0ea;--muted:#9090a8;--green:#4ade80;--input-bg:#1a1a22}
 html.light{--bg:#f2f3f7;--card:#fff;--border:#d4d4e0;--text:#1a1a2c;--muted:#5a5a72;--green:#16a34a;--input-bg:#fafafa}
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5;padding:1.5rem;max-width:560px;margin:0 auto;transition:background .2s,color .2s}
+body{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5;padding:1.5rem;max-width:560px;margin:0 auto}
 nav{display:flex;align-items:center;gap:.5rem;margin-bottom:1.5rem;padding-bottom:1rem;border-bottom:1px solid var(--border)}
-nav a{color:var(--muted);text-decoration:none;font-size:.9rem;padding:.35rem .6rem;border-radius:6px;transition:color .15s,background .15s}
-nav a:hover{color:var(--text);background:var(--card)}
-nav a.active{color:var(--green);font-weight:600}
-nav .spacer{flex:1}
-nav .thm{background:var(--card);border:1px solid var(--border);color:var(--text);padding:.35rem .6rem;border-radius:6px;cursor:pointer;font-size:.85rem}
+nav a{color:var(--muted);text-decoration:none;font-size:.9rem;padding:.35rem .6rem;border-radius:6px}
+nav a:hover{color:var(--text);background:var(--card)}nav a.active{color:var(--green);font-weight:600}
+nav .spacer{flex:1}nav .thm{background:var(--card);border:1px solid var(--border);color:var(--text);padding:.35rem .6rem;border-radius:6px;cursor:pointer;font-size:.85rem}
 h1{font-size:1.35rem;font-weight:600;color:var(--green);margin-bottom:.25rem}
 .sub{font-size:.8rem;color:var(--muted);margin-bottom:1.25rem}
-.form-wrap{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1.25rem;margin-bottom:1rem;box-shadow:0 1px 3px rgba(0,0,0,.08)}
-.section-title{font-size:.65rem;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);margin:1rem 0 .5rem;font-weight:600}
-.section-title:first-child{margin-top:0}
-.row{margin-bottom:.75rem}
-.row:last-of-type{margin-bottom:0}
+.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1.25rem;margin-bottom:1rem;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.card-title{font-size:.7rem;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:700;margin-bottom:.75rem;padding-bottom:.4rem;border-bottom:1px solid var(--border)}
+.row{margin-bottom:.65rem}.row:last-child{margin-bottom:0}
 .row label{display:block;font-size:.8rem;color:var(--muted);margin-bottom:.3rem;font-weight:500}
-.row input,.row select{width:100%;padding:.5rem .6rem;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text);font-family:inherit;font-size:.9rem;transition:border-color .15s}
+.row input[type=text],.row input[type=number],.row select{width:100%;padding:.5rem .6rem;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text);font-family:inherit;font-size:.9rem}
 .row input:focus,.row select:focus{outline:none;border-color:var(--green)}
-.row input[type=checkbox]{width:auto;margin-right:.5rem;vertical-align:middle}
-.btn{background:var(--green);color:#fff;border:none;padding:.55rem 1.25rem;border-radius:6px;cursor:pointer;font-family:inherit;font-size:.9rem;font-weight:600;margin-top:.5rem}
-.btn:hover{opacity:.92;transform:translateY(-1px)}
-.msg{font-size:.8rem;color:var(--muted);margin-top:.6rem}
-.err{color:#dc2626}
+.row input[type=checkbox]{width:auto;margin-right:.4rem;vertical-align:middle;cursor:pointer}
+.hint{font-size:.75rem;color:var(--muted);margin-top:.2rem}
+.btn{background:var(--green);color:#fff;border:none;padding:.55rem 1.25rem;border-radius:6px;cursor:pointer;font-family:inherit;font-size:.9rem;font-weight:600}
+.btn-sm{padding:.35rem .8rem;font-size:.8rem}
+.msg{font-size:.8rem;color:var(--muted);margin-top:.6rem}.err{color:#dc2626}
 .test-banner{display:none;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.5rem;padding:.6rem 1rem;margin-bottom:1rem;background:linear-gradient(135deg,#c2410c 0%,#ea580c 100%);color:#fff;border-radius:8px;font-size:.85rem}
-.test-banner.show{display:flex}
-.test-banner .tb-btn{background:#fff!important;color:#c2410c!important;border:none;padding:.35rem .8rem;font-weight:600;cursor:pointer;border-radius:4px}
-.test-banner .tb-btn:hover{opacity:.92}
+.test-banner.show{display:flex}.test-banner .tb-btn{background:#fff!important;color:#c2410c!important;border:none;padding:.35rem .8rem;font-weight:600;cursor:pointer;border-radius:4px}
 .pwr-modal{position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;z-index:1100}
 .pwr-modal-panel{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;min-width:320px;max-width:90vw;box-shadow:0 12px 40px rgba(0,0,0,.35)}
-.pwr-modal-title{font-size:1rem;font-weight:600;color:var(--text);margin-bottom:.4rem}
-.pwr-modal-desc{font-size:.85rem;color:var(--muted);line-height:1.4;margin-bottom:1rem}
+.pwr-modal-title{font-size:1rem;font-weight:600;margin-bottom:.4rem}.pwr-modal-desc{font-size:.85rem;color:var(--muted);line-height:1.4;margin-bottom:1rem}
 .pwr-reason-input{width:100%;padding:.6rem .75rem;border:1px solid var(--border);border-radius:8px;background:var(--input-bg);color:var(--text);font-size:.9rem;font-family:inherit;resize:vertical;min-height:80px;margin-bottom:.5rem}
-.pwr-reason-input:focus{outline:none;border-color:var(--green)}
-.pwr-modal-err{font-size:.8rem;color:#dc2626;margin-bottom:.5rem;display:none}
+.pwr-reason-input:focus{outline:none;border-color:var(--green)}.pwr-modal-err{font-size:.8rem;color:#dc2626;margin-bottom:.5rem;display:none}
 .pwr-modal-btns{display:flex;gap:.5rem;justify-content:flex-end;margin-top:1rem}
 .pwr-modal-btn{font-family:inherit;font-size:.85rem;font-weight:600;padding:.5rem 1rem;border-radius:6px;cursor:pointer;border:none}
-.pwr-modal-cancel{background:var(--border);color:var(--muted)}
-.pwr-modal-submit{background:var(--green);color:#fff}
-.pwr-modal-submit:disabled{opacity:.5;cursor:not-allowed}
+.pwr-modal-cancel{background:var(--border);color:var(--muted)}.pwr-modal-submit{background:var(--green);color:#fff}.pwr-modal-submit:disabled{opacity:.5;cursor:not-allowed}
 </style></head><body>
 <nav><a href="/">Dashboard</a><a href="/solar">Solar</a><a href="/settings" class="active">Settings</a><a href="/ops_log">Ops Log</a><a href="/testing">Testing</a><span class="spacer"></span><button class="thm" id="thm-btn" onclick="toggleTheme()" title="Toggle theme">)HTML";
     o += (theme == "light") ? "&#9788;" : "&#263d;";
     o += R"HTML(</button></nav>
 <div id="test-banner" class="test-banner"><span><strong>Battery test active</strong> &middot; SoC: <span id="tb-soc">—</span>% &middot; Load: <span id="tb-load">—</span> W &middot; Runtime: <span id="tb-rt">—</span> h</span><button class="tb-btn" onclick="endTestFromBanner()">End test</button></div>
-<div id="pwr-reason-modal" class="pwr-modal" style="display:none"><div class="pwr-modal-panel" onclick="event.stopPropagation()"><div class="pwr-modal-title" id="pwr-modal-title">Reason required</div><p class="pwr-modal-desc" id="pwr-modal-desc">Please provide a reason for this action.</p><textarea id="pwr-reason-input" class="pwr-reason-input" placeholder="e.g. Ending battery test" rows="3"></textarea><div class="pwr-modal-err" id="pwr-modal-err">Please enter a reason.</div><div class="pwr-modal-btns"><button type="button" class="pwr-modal-btn pwr-modal-cancel" id="pwr-modal-cancel">Cancel</button><button type="button" class="pwr-modal-btn pwr-modal-submit" id="pwr-modal-submit" disabled>Submit</button></div></div></div>
+<div id="pwr-reason-modal" class="pwr-modal" style="display:none"><div class="pwr-modal-panel" onclick="event.stopPropagation()"><div class="pwr-modal-title" id="pwr-modal-title">Reason required</div><p class="pwr-modal-desc" id="pwr-modal-desc"></p><textarea id="pwr-reason-input" class="pwr-reason-input" placeholder="e.g. Ending battery test" rows="3"></textarea><div class="pwr-modal-err" id="pwr-modal-err">Please enter a reason.</div><div class="pwr-modal-btns"><button type="button" class="pwr-modal-btn pwr-modal-cancel" id="pwr-modal-cancel">Cancel</button><button type="button" class="pwr-modal-btn pwr-modal-submit" id="pwr-modal-submit" disabled>Submit</button></div></div></div>
 <h1>Settings</h1>
-<p class="sub">Application configuration. Restart limonitor after saving to apply hardware changes.</p>
-<form id="cfg-form" class="form-wrap">
-<div class="section-title">BLE</div>
-<div class="row"><label>Device name</label><input type="text" name="device_name" placeholder="e.g. L-12100BNNA70" value=")HTML";
+<p class="sub">Application configuration. Hardware changes (BLE, serial) require a restart to take effect.</p>
+<form id="cfg-form">
+<div class="card"><div class="card-title">Bluetooth (BLE)</div>
+<div class="row"><label>Device name fragment</label><input type="text" name="device_name" placeholder="e.g. L-12100BNNA70" value=")HTML";
     o += esc(g("device_name", ""));
-    o += "\"></div><div class=\"row\"><label>Device address (MAC)</label><input type=\"text\" name=\"device_address\" placeholder=\"AA:BB:CC:DD:EE:FF\" value=\"";
+    o += R"HTML("><p class="hint">Connects to the first device whose name contains this string.</p></div>
+<div class="row"><label>Device address (MAC)</label><input type="text" name="device_address" placeholder="AA:BB:CC:DD:EE:FF" value=")HTML";
     o += esc(g("device_address", ""));
-    o += "\"></div><div class=\"row\"><label>Adapter path</label><input type=\"text\" name=\"adapter_path\" value=\"";
+    o += R"HTML("></div>
+<div class="row"><label>Adapter path</label><input type="text" name="adapter_path" value=")HTML";
     o += esc(g("adapter_path", "/org/bluez/hci0"));
-    o += "\"></div><div class=\"section-title\">HTTP</div><div class=\"row\"><label>Port</label><input type=\"number\" name=\"http_port\" min=\"1\" max=\"65535\" value=\"";
+    o += R"HTML("></div></div>
+
+<div class="card"><div class="card-title">HTTP Server</div>
+<div class="row"><label>Port</label><input type="number" name="http_port" min="1" max="65535" value=")HTML";
     o += esc(g("http_port", "8080"));
-    o += "\"></div><div class=\"row\"><label>Bind address</label><input type=\"text\" name=\"http_bind\" value=\"";
+    o += R"HTML("></div>
+<div class="row"><label>Bind address</label><input type="text" name="http_bind" value=")HTML";
     o += esc(g("http_bind", "0.0.0.0"));
-    o += "\"></div><div class=\"row\"><label>Log file</label><input type=\"text\" name=\"log_file\" placeholder=\"(stderr only)\" value=\"";
+    o += R"HTML("></div>
+<div class="row"><label>Log file</label><input type="text" name="log_file" placeholder="(stderr only)" value=")HTML";
     o += esc(g("log_file", ""));
-    o += "\"></div><div class=\"row\"><label>Verbose (DEBUG logs)</label><input type=\"checkbox\" name=\"verbose\" ";
-    o += (g("verbose", "0") == "1" || g("verbose", "0") == "true") ? "checked" : "";
-    o += "></div><div class=\"section-title\">Shelly (Grid Control)</div><div class=\"row\"><label>Shelly host (IP or hostname)</label><input type=\"text\" name=\"shelly_host\" placeholder=\"192.168.3.10\" value=\"";
+    o += R"HTML("></div>
+<div class="row"><label><input type="checkbox" name="verbose")HTML";
+    o += chk("verbose");
+    o += R"HTML(> Verbose logging (DEBUG level)</label></div></div>
+
+<div class="card"><div class="card-title">Grid Control (Shelly)</div>
+<div class="row"><label>Shelly host</label><input type="text" name="shelly_host" placeholder="192.168.3.10" value=")HTML";
     o += esc(g("shelly_host", ""));
-    o += "\"></div><div class=\"row\"><label>Enable grid control</label><input type=\"checkbox\" name=\"shelly_enabled\" ";
-    o += (g("shelly_enabled", "0") == "1" || g("shelly_enabled", "0") == "true") ? "checked" : "";
-    o += "></div><div class=\"row\"><label>Auto-end test when data sufficient</label><input type=\"checkbox\" name=\"shelly_battery_test_auto\" ";
-    o += (g("shelly_battery_test_auto", "0") == "1" || g("shelly_battery_test_auto", "0") == "true") ? "checked" : "";
-    o += " title=\"Turn grid back on when 6+ hours of discharge data collected\"></div><div class=\"row\"><label>Max test hours (safety)</label><input type=\"number\" name=\"shelly_battery_test_max_hours\" min=\"1\" max=\"168\" value=\"";
+    o += R"HTML("><p class="hint">IP address or hostname of the Shelly smart plug. Gen1 and Gen2 supported.</p></div>
+<div class="row"><label><input type="checkbox" name="shelly_enabled")HTML";
+    o += chk("shelly_enabled");
+    o += R"HTML(> Enable grid control (relay on/off)</label></div>
+<div class="row"><label><input type="checkbox" name="shelly_battery_test_auto")HTML";
+    o += chk("shelly_battery_test_auto");
+    o += R"HTML(> Auto-end test when discharge data is sufficient</label>
+<p class="hint">Restores grid after ~6 hours of discharge history is collected.</p></div>
+<div class="row"><label>Max test duration (hours)</label><input type="number" name="shelly_battery_test_max_hours" min="1" max="168" value=")HTML";
     o += esc(g("shelly_battery_test_max_hours", "24"));
-    o += "\" title=\"Force grid on after this many hours\"></div><div class=\"row\"><label>Low SoC cutoff % (safety)</label><input type=\"number\" name=\"shelly_battery_test_low_soc\" min=\"5\" max=\"50\" step=\"1\" value=\"";
+    o += R"HTML("><p class="hint">Grid is force-restored after this many hours regardless of state.</p></div>
+<div class="row"><label>Low SoC safety cutoff (%)</label><input type="number" name="shelly_battery_test_low_soc" min="5" max="50" step="1" value=")HTML";
     o += esc(g("shelly_battery_test_low_soc", "20"));
-    o += "\" title=\"Turn grid on if battery drops below this %\"></div><div class=\"row\"><label>Maintenance auto-timeout (min)</label><input type=\"number\" name=\"maintenance_auto_timeout_minutes\" min=\"0\" max=\"10080\" value=\"";
+    o += R"HTML("><p class="hint">Grid is force-restored if battery SoC drops below this threshold.</p></div>
+<div class="row"><label>Maintenance window timeout (minutes, 0 = no timeout)</label><input type="number" name="maintenance_auto_timeout_minutes" min="0" max="10080" value=")HTML";
     o += esc(g("maintenance_auto_timeout_minutes", "60"));
-    o += "\" title=\"Auto-end maintenance mode after this many minutes (0=disabled)\"></div><div class=\"section-title\">EpicPowerGate / Serial</div><div class=\"row\"><label>Serial device</label><input type=\"text\" name=\"serial_device\" placeholder=\"/dev/ttyACM0\" value=\"";
-    o += esc(g("serial_device", ""));
-    o += "\"></div><div class=\"row\"><label>Serial baud</label><input type=\"number\" name=\"serial_baud\" value=\"";
-    o += esc(g("serial_baud", "115200"));
-    o += "\"></div><div class=\"row\"><label>Remote PwrGate (host:port)</label><input type=\"text\" name=\"pwrgate_remote\" placeholder=\"ham-pi:8081\" value=\"";
-    o += esc(g("pwrgate_remote", ""));
-    o += "\"></div><div class=\"section-title\">Database & polling</div><div class=\"row\"><label>Poll interval (seconds)</label><input type=\"number\" name=\"poll_interval\" min=\"1\" value=\"";
-    o += esc(g("poll_interval", "5"));
-    o += "\"></div><div class=\"row\"><label>DB path</label><input type=\"text\" name=\"db_path\" placeholder=\"default\" value=\"";
-    o += esc(g("db_path", ""));
-    o += "\"></div><div class=\"row\"><label>DB write interval (seconds)</label><input type=\"number\" name=\"db_interval\" min=\"0\" value=\"";
-    o += esc(g("db_interval", "60"));
-    o += "\"></div><div class=\"section-title\">Battery</div><div class=\"row\"><label>Purchase date (YYYY-MM-DD)</label><input type=\"text\" name=\"battery_purchased\" placeholder=\"2024-03-15\" value=\"";
+    o += R"HTML("><p class="hint">Suppresses outage detection. Auto-ends after this many minutes.</p></div></div>
+
+<div class="card"><div class="card-title">Battery</div>
+<div class="row"><label>Purchase date</label><input type="text" name="battery_purchased" placeholder="YYYY-MM-DD" value=")HTML";
     o += esc(g("battery_purchased", ""));
-    o += "\"></div><div class=\"row\"><label>Rated capacity (Ah, 0=auto)</label><input type=\"number\" name=\"rated_capacity_ah\" min=\"0\" step=\"0.1\" value=\"";
+    o += R"HTML("></div>
+<div class="row"><label>Rated capacity (Ah, 0 = auto-detect)</label><input type="number" name="rated_capacity_ah" min="0" step="0.1" value=")HTML";
     o += esc(g("rated_capacity_ah", "0"));
-    o += "\"></div><div class=\"row\"><label>TX threshold (amps)</label><input type=\"number\" name=\"tx_threshold\" min=\"0\" step=\"0.1\" value=\"";
+    o += R"HTML("></div>
+<div class="row"><label>TX event threshold (amps)</label><input type="number" name="tx_threshold" min="0" step="0.1" value=")HTML";
     o += esc(g("tx_threshold", "1.0"));
-    o += "\"></div><div class=\"section-title\">Solar & weather</div><div class=\"row\"><label>Solar enabled</label><input type=\"checkbox\" name=\"solar_enabled\" ";
-    o += (g("solar_enabled", "0") == "1" || g("solar_enabled", "0") == "true") ? "checked" : "";
-    o += "></div><div class=\"row\"><label>Solar panel watts</label><input type=\"number\" name=\"solar_panel_watts\" min=\"0\" value=\"";
+    o += R"HTML("><p class="hint">Minimum current change to log a charge/discharge transition event.</p></div></div>
+
+<div class="card"><div class="card-title">Solar &amp; Weather</div>
+<div class="row"><label><input type="checkbox" name="solar_enabled")HTML";
+    o += chk("solar_enabled");
+    o += R"HTML(> Enable solar features</label></div>
+<div class="row"><label>Panel rated watts</label><input type="number" name="solar_panel_watts" min="0" value=")HTML";
     o += esc(g("solar_panel_watts", "400"));
-    o += "\"></div><div class=\"row\"><label>Solar system efficiency (0–1)</label><input type=\"number\" name=\"solar_system_efficiency\" min=\"0\" max=\"1\" step=\"0.01\" value=\"";
+    o += R"HTML("></div>
+<div class="row"><label>System efficiency (0–1)</label><input type="number" name="solar_system_efficiency" min="0" max="1" step="0.01" value=")HTML";
     o += esc(g("solar_system_efficiency", "0.75"));
-    o += "\"></div><div class=\"row\"><label>Solar ZIP code</label><input type=\"text\" name=\"solar_zip_code\" value=\"";
+    o += R"HTML("></div>
+<div class="row"><label>Solar ZIP code</label><input type="text" name="solar_zip_code" value=")HTML";
     o += esc(g("solar_zip_code", "80112"));
-    o += "\"></div><div class=\"row\"><label>Weather API key</label><input type=\"text\" name=\"weather_api_key\" placeholder=\"OpenWeather\" value=\"";
+    o += R"HTML("></div>
+<div class="row"><label>OpenWeather API key</label><input type="text" name="weather_api_key" placeholder="Get one at openweathermap.org" value=")HTML";
     o += esc(g("weather_api_key", ""));
-    o += "\"></div><div class=\"row\"><label>Weather ZIP code</label><input type=\"text\" name=\"weather_zip_code\" value=\"";
+    o += R"HTML("></div>
+<div class="row"><label>Weather ZIP code</label><input type="text" name="weather_zip_code" value=")HTML";
     o += esc(g("weather_zip_code", "80112"));
-    o += "\"></div><div class=\"row\"><label>Refresh weather cache</label>"
-         "<button type=\"button\" class=\"btn\" style=\"padding:.35rem .8rem;font-size:.8rem\" onclick=\"refreshWx()\">&#8635; Fetch fresh data</button>"
-         " <span id=\"wx-msg\" style=\"font-size:.8rem;color:var(--muted)\"></span></div>"
-         "<div class=\"section-title\">Scheduled Tests</div>"
-         "<div class=\"row\"><label>Add scheduled test</label>"
-         "<div style=\"display:flex;flex-wrap:wrap;gap:.5rem;align-items:flex-end\">"
-         "<select id=\"sched-type\" style=\"width:auto\"><option value=\"ups_failover\">UPS Failover</option><option value=\"load_spike\">Load Spike</option><option value=\"capacity\">Capacity</option><option value=\"charger_recovery\">Charger Recovery</option><option value=\"simulated_outage\">Simulated Outage</option></select>"
-         "<select id=\"sched-freq\" style=\"width:auto\"><option value=\"daily\">Daily</option><option value=\"weekly\">Weekly</option><option value=\"monthly\" selected>Monthly</option></select>"
-         "<input type=\"number\" id=\"sched-hour\" min=\"0\" max=\"23\" value=\"2\" placeholder=\"Hour\" style=\"width:4rem\">"
-         "<input type=\"number\" id=\"sched-min\" min=\"0\" max=\"59\" value=\"0\" placeholder=\"Min\" style=\"width:4rem\">"
-         "<input type=\"number\" id=\"sched-dom\" min=\"1\" max=\"28\" value=\"1\" placeholder=\"Day\" style=\"width:4rem\" title=\"Day of month (monthly)\">"
-         "<button type=\"button\" class=\"btn\" style=\"padding:.35rem .8rem\" onclick=\"addSchedule()\">Add</button>"
-         "</div><div id=\"sched-list-settings\" style=\"margin-top:.5rem;font-size:.85rem;color:var(--muted)\"></div></div>"
-         "<div class=\"row\"><label>Daemon mode</label><input type=\"checkbox\" name=\"daemon\" ";
-    o += (g("daemon", "0") == "1" || g("daemon", "0") == "true") ? "checked" : "";
-    o += "></div><button type=\"submit\" class=\"btn\">Save</button><div id=\"msg\" class=\"msg\"></div></form><script>\n"
-         "(function(){var n=document.querySelectorAll('nav a[href^=\"/\"]');for(var i=0;i<n.length;i++){n[i].addEventListener('click',function(e){if(e.ctrlKey||e.metaKey||e.shiftKey)return;var h=this.getAttribute('href');if(!h)return;e.preventDefault();location.href=h})}})();\n"
-         "document.getElementById('cfg-form').onsubmit=function(e){e.preventDefault();var f=e.target;var o={settings_initialized:'1'};\n"
-         "['device_name','device_address','adapter_path','http_port','http_bind','log_file','verbose','shelly_host','shelly_enabled','shelly_battery_test_auto','shelly_battery_test_max_hours','shelly_battery_test_low_soc','maintenance_auto_timeout_minutes','serial_device','serial_baud','pwrgate_remote','poll_interval','db_path','db_interval','battery_purchased','rated_capacity_ah','tx_threshold','solar_enabled','solar_panel_watts','solar_system_efficiency','solar_zip_code','weather_api_key','weather_zip_code','daemon'].forEach(function(k){\n"
-         "var el=f.elements[k];if(el)o[k]=el.type==='checkbox'?(el.checked?'1':'0'):el.value\n"
-         "});\nfetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(o)})\n"
-         ".then(function(r){if(r.ok){document.getElementById('msg').textContent='Saved. Restart limonitor to apply.';document.getElementById('msg').className='msg'}else{throw new Error()}})\n"
-         ".catch(function(){document.getElementById('msg').textContent='Save failed.';document.getElementById('msg').className='msg err'})\n"
-         "}\n"
-         "function toggleTheme(){var isLight=document.documentElement.classList.toggle('light');var t=isLight?'light':'dark';document.getElementById('thm-btn').textContent=isLight?'\u263d':'\u263c';fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme:t})}).catch(function(){})}\n"
-         "function refreshWx(){var m=document.getElementById('wx-msg');if(m)m.textContent='Refreshing…';fetch('/api/weather_refresh').then(function(r){return r.json()}).then(function(d){if(m)m.textContent=d.ok?'Done! Cache cleared. Visit Solar page to see fresh data.':'Error: '+d.message;if(m)m.style.color=d.ok?'var(--green)':'#dc2626'}).catch(function(e){if(m){m.textContent='Error: '+e.message;m.style.color='#dc2626'}})}\n"
-         "function $(id){return document.getElementById(id)}\n"
-         "function fmt(n,p){return n==null||isNaN(n)?'—':n.toFixed(p)}\n"
-         "function showPowerReasonModal(opts,onConfirm){var title=opts.title||'Reason required';var desc=opts.desc||'Please provide a reason for this action.';var confirmText=opts.confirmText||'Submit';var modal=$('pwr-reason-modal');var inp=$('pwr-reason-input');var err=$('pwr-modal-err');var submitBtn=$('pwr-modal-submit');if(!modal||!inp)return;$('pwr-modal-title').textContent=title;var descEl=$('pwr-modal-desc');descEl.textContent=desc;descEl.style.display=desc?'':'none';submitBtn.textContent=confirmText;inp.value='';err.style.display='none';submitBtn.disabled=true;modal.style.display='flex';inp.focus();function close(){modal.style.display='none';}$('pwr-modal-cancel').onclick=close;submitBtn.onclick=function(){var r=inp.value.trim();if(!r){err.style.display='';err.textContent='Please enter a reason.';return;}close();onConfirm(r);};inp.oninput=function(){submitBtn.disabled=!inp.value.trim();err.style.display='none';};inp.onkeydown=function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();if(inp.value.trim())submitBtn.click();}};modal.onclick=function(e){if(e.target===modal)close();};}\n"
-         "function endTestFromBanner(){showPowerReasonModal({title:'End battery test',desc:'This will turn grid back on. A reason is required.',confirmText:'End test'},function(r){fetch('/api/shelly/relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({turn:'on',reason:r})}).then(function(x){return x.json()}).then(function(d){if(d.ok){var b=$('test-banner');if(b)b.classList.remove('show')}}).catch(function(){})})}\n"
-         "function upTestBanner(){var b=$('test-banner');if(!b||!b.classList.contains('show'))return;fetch('/api/shelly/status').then(function(r){return r.json()}).then(function(s){if(!s.test_active){b.classList.remove('show');return}Promise.all([fetch('/api/status').then(function(r){return r.json()}),fetch('/api/analytics').then(function(r){return r.json()})]).then(function(arr){var st=arr[0],an=arr[1];var soc=$('tb-soc'),load=$('tb-load'),rt=$('tb-rt');if(soc)soc.textContent=st.valid?fmt(st.soc_pct,1):'—';if(load)load.textContent=an.avg_discharge_24h_w>0?fmt(an.avg_discharge_24h_w,1):'—';if(rt)rt.textContent=an.runtime_from_current_h>0?fmt(an.runtime_from_current_h,1):'—'})})}\n"
-         "fetch('/api/shelly/status').then(function(r){return r.json()}).then(function(s){if(s.test_active){var b=$('test-banner');if(b){b.classList.add('show');upTestBanner();setInterval(upTestBanner,5000)}}}).catch(function(){})\n"
-         "function addSchedule(){var t=$('sched-type').value,f=$('sched-freq').value,h=parseInt($('sched-hour').value,10)||2,m=parseInt($('sched-min').value,10)||0,d=parseInt($('sched-dom').value,10)||1;fetch('/api/tests/schedules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({test_type:t,frequency:f,run_hour:h,run_minute:m,day_of_month:d})}).then(function(r){return r.json()}).then(function(x){if(x.ok){loadSchedSettings();$('msg').textContent='Schedule added. Runs in daemon mode.';$('msg').className='msg'}else{$('msg').textContent='Error: '+(x.error||'failed');$('msg').className='msg err'}}).catch(function(){$('msg').textContent='Failed to add schedule';$('msg').className='msg err'})}\n"
-         "function loadSchedSettings(){fetch('/api/tests/schedules').then(function(r){return r.json()}).then(function(d){var s=d.schedules||[];var el=$('sched-list-settings');if(!el)return;if(!s.length){el.innerHTML='No scheduled tests. Add above.';return}el.innerHTML=s.map(function(x){var n=new Date(x.next_run_ts*1000);return x.test_type+' ('+x.frequency+') &middot; Next: '+n.toLocaleDateString()+' '+n.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})+' <a href=\"#\" onclick=\"delSchedule('+x.id+');return false\" style=\"color:var(--muted);margin-left:.5rem\">Remove</a>'}).join('<br>')})}\n"
-         "function delSchedule(id){fetch('/api/tests/schedules/'+id,{method:'DELETE'}).then(function(r){if(r.ok)loadSchedSettings()})}\n"
-         "loadSchedSettings();\n"
-         + grid_event_banner_js() +
-         "</script></body></html>";
+    o += R"HTML("></div>
+<div class="row"><button type="button" class="btn btn-sm" onclick="refreshWx()">&#8635; Refresh weather cache</button> <span id="wx-msg" class="hint" style="display:inline"></span></div></div>
+
+<div class="card"><div class="card-title">Serial / PwrGate</div>
+<div class="row"><label>Serial device</label><input type="text" name="serial_device" placeholder="/dev/ttyACM0" value=")HTML";
+    o += esc(g("serial_device", ""));
+    o += R"HTML("></div>
+<div class="row"><label>Baud rate</label><input type="number" name="serial_baud" value=")HTML";
+    o += esc(g("serial_baud", "115200"));
+    o += R"HTML("></div>
+<div class="row"><label>Remote PwrGate (host:port)</label><input type="text" name="pwrgate_remote" placeholder="ham-pi:8081" value=")HTML";
+    o += esc(g("pwrgate_remote", ""));
+    o += R"HTML("></div></div>
+
+<div class="card"><div class="card-title">System</div>
+<div class="row"><label>Poll interval (seconds)</label><input type="number" name="poll_interval" min="1" value=")HTML";
+    o += esc(g("poll_interval", "5"));
+    o += R"HTML("></div>
+<div class="row"><label>Database path</label><input type="text" name="db_path" placeholder="default" value=")HTML";
+    o += esc(g("db_path", ""));
+    o += R"HTML("></div>
+<div class="row"><label>DB write interval (seconds)</label><input type="number" name="db_interval" min="0" value=")HTML";
+    o += esc(g("db_interval", "60"));
+    o += R"HTML("></div>
+<div class="row"><label><input type="checkbox" name="daemon")HTML";
+    o += chk("daemon");
+    o += R"HTML(> Run as daemon (background service)</label></div></div>
+<button type="submit" class="btn">Save settings</button><div id="msg" class="msg"></div>
+</form>
+<script>
+(function(){var n=document.querySelectorAll('nav a[href^="/"]');for(var i=0;i<n.length;i++){n[i].addEventListener('click',function(e){if(e.ctrlKey||e.metaKey||e.shiftKey)return;var h=this.getAttribute('href');if(!h)return;e.preventDefault();location.href=h})}})();
+document.getElementById('cfg-form').onsubmit=function(e){e.preventDefault();var f=e.target;var o={settings_initialized:'1'};
+['device_name','device_address','adapter_path','http_port','http_bind','log_file','verbose','shelly_host','shelly_enabled','shelly_battery_test_auto','shelly_battery_test_max_hours','shelly_battery_test_low_soc','maintenance_auto_timeout_minutes','serial_device','serial_baud','pwrgate_remote','poll_interval','db_path','db_interval','battery_purchased','rated_capacity_ah','tx_threshold','solar_enabled','solar_panel_watts','solar_system_efficiency','solar_zip_code','weather_api_key','weather_zip_code','daemon'].forEach(function(k){var el=f.elements[k];if(el)o[k]=el.type==='checkbox'?(el.checked?'1':'0'):el.value});
+fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(o)})
+.then(function(r){if(r.ok){document.getElementById('msg').textContent='Saved. Restart limonitor to apply hardware changes.';document.getElementById('msg').className='msg'}else{throw new Error()}})
+.catch(function(){document.getElementById('msg').textContent='Save failed.';document.getElementById('msg').className='msg err'})}
+function toggleTheme(){var isLight=document.documentElement.classList.toggle('light');var t=isLight?'light':'dark';document.getElementById('thm-btn').textContent=isLight?'\u263d':'\u263c';fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme:t})}).catch(function(){})}
+function refreshWx(){var m=document.getElementById('wx-msg');if(m)m.textContent='Refreshing\u2026';fetch('/api/weather_refresh').then(function(r){return r.json()}).then(function(d){if(m)m.textContent=d.ok?'Done! Visit the Solar page to see fresh data.':'Error: '+d.message;if(m)m.style.color=d.ok?'var(--green)':'#dc2626'}).catch(function(e){if(m){m.textContent='Error: '+e.message;m.style.color='#dc2626'}})}
+function $(id){return document.getElementById(id)}
+function fmt(n,p){return n==null||isNaN(n)?'\u2014':n.toFixed(p)}
+function showPowerReasonModal(opts,onConfirm){var title=opts.title||'Reason required';var desc=opts.desc||'';var confirmText=opts.confirmText||'Submit';var modal=$('pwr-reason-modal');var inp=$('pwr-reason-input');var err=$('pwr-modal-err');var submitBtn=$('pwr-modal-submit');if(!modal||!inp)return;$('pwr-modal-title').textContent=title;var descEl=$('pwr-modal-desc');descEl.textContent=desc;descEl.style.display=desc?'':'none';submitBtn.textContent=confirmText;inp.value='';err.style.display='none';submitBtn.disabled=true;modal.style.display='flex';inp.focus();function close(){modal.style.display='none';}$('pwr-modal-cancel').onclick=close;submitBtn.onclick=function(){var r=inp.value.trim();if(!r){err.style.display='';err.textContent='Please enter a reason.';return;}close();onConfirm(r);};inp.oninput=function(){submitBtn.disabled=!inp.value.trim();err.style.display='none';};inp.onkeydown=function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();if(inp.value.trim())submitBtn.click();}};modal.onclick=function(e){if(e.target===modal)close();};}
+function endTestFromBanner(){showPowerReasonModal({title:'End battery test',desc:'This will turn grid back on. A reason is required.',confirmText:'End test'},function(r){fetch('/api/shelly/relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({turn:'on',reason:r})}).then(function(x){return x.json()}).then(function(d){if(d.ok){var b=$('test-banner');if(b)b.classList.remove('show')}}).catch(function(){})})}
+function upTestBanner(){var b=$('test-banner');if(!b||!b.classList.contains('show'))return;fetch('/api/shelly/status').then(function(r){return r.json()}).then(function(s){if(!s.test_active){b.classList.remove('show');return}Promise.all([fetch('/api/status').then(function(r){return r.json()}),fetch('/api/analytics').then(function(r){return r.json()})]).then(function(arr){var st=arr[0],an=arr[1];var soc=$('tb-soc'),load=$('tb-load'),rt=$('tb-rt');if(soc)soc.textContent=st.valid?fmt(st.soc_pct,1):'\u2014';if(load)load.textContent=an.avg_discharge_24h_w>0?fmt(an.avg_discharge_24h_w,1):'\u2014';if(rt)rt.textContent=an.runtime_from_current_h>0?fmt(an.runtime_from_current_h,1):'\u2014'})})}
+fetch('/api/shelly/status').then(function(r){return r.json()}).then(function(s){if(s.test_active){var b=$('test-banner');if(b){b.classList.add('show');upTestBanner();setInterval(upTestBanner,5000)}}}).catch(function(){})
+)HTML";
+    o += grid_event_banner_js();
+    o += R"HTML(</script></body></html>)HTML";
     return o;
 }
 

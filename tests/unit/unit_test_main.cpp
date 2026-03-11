@@ -70,6 +70,7 @@ void test_test_runner_start_stop();
 void test_test_runner_refuses_low_soc();
 void test_test_runner_refuses_maintenance_mode();
 void test_test_runner_safety_limits();
+void test_test_schedules_crud();
 void test_system_event_deduplication();
 
 int main() {
@@ -157,6 +158,7 @@ int main() {
     test_test_runner_refuses_low_soc();
     test_test_runner_refuses_maintenance_mode();
     test_test_runner_safety_limits();
+    test_test_schedules_crud();
     test_system_event_deduplication();
     printf("PASS: Test runner\n");
 
