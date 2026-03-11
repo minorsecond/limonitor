@@ -64,7 +64,27 @@ done
 
 echo "=== build (using $BUILD_GENERATOR) ==="
 GIT_HASH=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-cmake -B build -G "$BUILD_GENERATOR" -DCMAKE_BUILD_TYPE=Release -DGIT_COMMIT_HASH="$GIT_HASH" -DBUILD_TESTING="$BUILD_TESTS"
+
+# Optimization: only run full cmake configuration if build directory doesn't exist 
+# or if BUILD_TESTING value has changed.
+RECONFIGURE=false
+if [[ ! -d "build" ]] || [[ ! -f "build/CMakeCache.txt" ]]; then
+    RECONFIGURE=true
+else
+    # Check if BUILD_TESTING matches what we want
+    CURRENT_TESTING=$(grep "BUILD_TESTING:BOOL=" build/CMakeCache.txt | cut -d= -f2 || echo "NONE")
+    if [[ "$CURRENT_TESTING" != "$BUILD_TESTS" ]]; then
+        RECONFIGURE=true
+    fi
+fi
+
+if [[ "$RECONFIGURE" == "true" ]]; then
+    cmake -B build -G "$BUILD_GENERATOR" -DCMAKE_BUILD_TYPE=Release -DGIT_COMMIT_HASH="$GIT_HASH" -DBUILD_TESTING="$BUILD_TESTS"
+else
+    # Just update the GIT_COMMIT_HASH in case it changed (fast)
+    cmake -B build -DGIT_COMMIT_HASH="$GIT_HASH"
+fi
+
 cmake --build build --target limonitor -j$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
 
 if [[ "$BUILD_TESTS" == "ON" ]]; then

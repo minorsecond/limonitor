@@ -15,6 +15,7 @@
 #include "shelly_client.hpp"
 #include "tui.hpp"
 
+#include "version.h"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -436,11 +437,9 @@ int main(int argc, char** argv) {
 
     // Logger: init after loading from DB so verbose/log_file come from DB
     Logger::instance().init(cfg.log_file, cfg.log_verbose, cfg.log_rotate_bytes);
-#ifdef GIT_COMMIT_HASH
+
     LOG_INFO("limonitor %s starting", GIT_COMMIT_HASH);
-#else
-    LOG_INFO("limonitor v1.0.0 starting");
-#endif
+
     if (!db->is_open())
         LOG_WARN("DB: running without persistence; config will not be migrated");
 

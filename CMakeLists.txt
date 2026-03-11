@@ -141,7 +141,8 @@ else()
 endif()
 
 if(DEFINED GIT_COMMIT_HASH)
-    add_compile_definitions(GIT_COMMIT_HASH="${GIT_COMMIT_HASH}")
+    configure_file(src/version.h.in "${CMAKE_BINARY_DIR}/version.h" @ONLY)
+    include_directories("${CMAKE_BINARY_DIR}")
 endif()
 
 add_executable(limonitor ${SOURCES})
