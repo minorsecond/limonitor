@@ -1423,6 +1423,15 @@ std::string HttpServer::charger_history_json(const std::vector<PwrGateSnapshot>&
     return o;
 }
 
+// Effective charger state: override "Charging"/"Float" to "Idle" when no current/PWM
+static std::string effective_charger_state(const PwrGateSnapshot& pg) {
+    if (!pg.valid) return "";
+    if ((pg.state == "Charging" || pg.state == "Float") &&
+        std::abs(pg.bat_a) < 0.05 && pg.pwm < 10)
+        return "Idle";
+    return pg.state;
+}
+
 std::string HttpServer::flow_json(const BatterySnapshot& bat, const PwrGateSnapshot& chg) {
     std::string o = "{\n";
     o += "  \"battery_voltage\": " + jdbl(bat.valid ? bat.total_voltage_v : 0) + ",\n";
@@ -1430,7 +1439,7 @@ std::string HttpServer::flow_json(const BatterySnapshot& bat, const PwrGateSnaps
     o += "  \"state_of_charge\": " + jdbl(bat.valid ? bat.soc_pct : 0, 1) + ",\n";
     o += "  \"solar_voltage\": " + jdbl(chg.valid ? chg.sol_v : 0) + ",\n";
     o += "  \"charger_voltage\": " + jdbl(chg.valid ? chg.ps_v : 0) + ",\n";
-    o += "  \"charger_state\": " + jstr(chg.valid ? chg.state : "") + ",\n";
+    o += "  \"charger_state\": " + jstr(effective_charger_state(chg)) + ",\n";
     double power_w = chg.valid ? (chg.bat_v * chg.bat_a) : (bat.valid ? bat.power_w : 0);
     o += "  \"power_watts\": " + jdbl(std::abs(power_w)) + "\n";
     o += "}\n";
@@ -1454,10 +1463,11 @@ std::string HttpServer::tx_events_json(const std::vector<TxEvent>& events) {
 
 std::string HttpServer::charger_json(const PwrGateSnapshot& pg) {
     if (!pg.valid) return "{\"valid\":false}\n";
+    std::string eff_state = effective_charger_state(pg);
     std::string o = "{\n";
     o += "  \"valid\": true,\n";
     o += "  \"timestamp\": " + jstr(iso8601(pg.timestamp)) + ",\n";
-    o += "  \"state\": "     + jstr(pg.state)    + ",\n";
+    o += "  \"state\": "     + jstr(eff_state)   + ",\n";
     o += "  \"ps_v\": "      + jdbl(pg.ps_v)     + ",\n";
     o += "  \"bat_v\": "     + jdbl(pg.bat_v)    + ",\n";
     o += "  \"bat_a\": "     + jdbl(pg.bat_a)    + ",\n";
@@ -1658,6 +1668,24 @@ html.light .flow-node-load{fill:#e2e8f0}
 @keyframes flow{from{stroke-dashoffset:24}to{stroke-dashoffset:0}}
 .flow-arrow-anim{animation:flow linear infinite}
 @media(max-width:640px){.flow-wrap{padding:1rem}.flow-diagram{max-width:100%}}
+/* ── Grid Control (Shelly) ── */
+.grid-control-wrap{margin-top:1rem;padding-top:1rem;border-top:1px solid var(--border);background:linear-gradient(135deg,rgba(251,146,60,.08) 0%,rgba(34,197,94,.06) 100%);border-radius:8px;padding:1rem;margin-bottom:0}
+html.light .grid-control-wrap{background:linear-gradient(135deg,rgba(234,88,12,.06) 0%,rgba(22,163,74,.05) 100%)}
+.grid-control-wrap .card-title{font-size:.9rem;font-weight:600;color:var(--text);margin-bottom:.4rem}
+.grid-control-desc{font-size:.8rem;line-height:1.45;color:var(--text);opacity:.92;margin-bottom:.9rem}
+.grid-control-btns{display:flex;gap:.5rem;flex-wrap:wrap}
+.grid-btn{font-family:inherit;font-size:.85rem;font-weight:600;padding:.5rem 1rem;border-radius:6px;cursor:pointer;border:none;transition:opacity .15s,transform .15s}
+.grid-btn:hover{opacity:.92}
+.grid-btn:active{transform:scale(.98)}
+.grid-btn:focus-visible{outline:2px solid var(--green);outline-offset:2px}
+.grid-btn-off{background:var(--orange);color:#fff}
+html.light .grid-btn-off{background:#ea580c;color:#fff}
+.grid-btn-on{background:var(--green);color:#fff}
+html.light .grid-btn-on{background:#16a34a;color:#fff}
+.grid-btn-test{background:var(--border);color:var(--text);font-size:.8rem}
+html.light .grid-btn-test{background:var(--border);color:var(--text)}
+#shelly-msg{margin-top:.5rem;font-size:.8rem;min-height:1.2em}
+@media(max-width:640px){.grid-control-btns{flex-direction:column}.grid-btn{min-height:44px;padding:.6rem 1rem;font-size:.9rem}}
 )HTML";
     o += ".main{display:flex;flex-direction:column;gap:.7rem}"
          "#bat-chart{height:200px}#chg-chart{height:180px}"
@@ -1819,8 +1847,9 @@ html.light .flow-node-load{fill:#e2e8f0}
         o += "<tr><td>" + std::string(k) + "</td><td id=\"" + id + "\">" + v + "</td></tr>\n";
     };
     if (pg.valid) {
-        const char* sc = (pg.state == "Charging" || pg.state == "Float") ? "ok" : "warn";
-        snprintf(buf, sizeof(buf), "<span class=\"%s\">%s</span>", sc, pg.state.c_str());
+        std::string eff = effective_charger_state(pg);
+        const char* sc = (eff == "Charging" || eff == "Float") ? "ok" : "warn";
+        snprintf(buf, sizeof(buf), "<span class=\"%s\">%s</span>", sc, eff.c_str());
         crow("chg-state", "State", buf);
         snprintf(buf, sizeof(buf), "%.2f V", pg.ps_v);  crow("chg-ps", "Power supply", buf);
         snprintf(buf, sizeof(buf), "%.2f V", pg.sol_v); crow("chg-sol", "Solar", buf);
@@ -1844,16 +1873,16 @@ html.light .flow-node-load{fill:#e2e8f0}
         crow("chg-tmp",   "Temp",         "—");
     }
     o += "</table>";
-    o += "<div id=\"grid-control-wrap\" style=\"display:none;margin-top:1rem;padding-top:1rem;border-top:1px solid var(--border)\">"
-         "<div class=\"card-title\" style=\"margin-bottom:.5rem\">Grid Control (Shelly)</div>"
-         "<p class=\"msg\" style=\"margin-bottom:.75rem\">Turn off grid power supply to run on battery only. Use for learning discharge data.</p>"
-         "<div style=\"display:flex;gap:.5rem;flex-wrap:wrap\">"
-         "<button type=\"button\" class=\"btn\" id=\"shelly-off-btn\" style=\"background:var(--orange,#f97316)\">Turn off grid</button>"
-         "<button type=\"button\" class=\"btn\" id=\"shelly-on-btn\">Turn on grid</button>"
-         "<button type=\"button\" class=\"btn\" id=\"shelly-test-start-btn\" style=\"background:var(--muted);font-size:.85rem\">Start battery test</button>"
-         "<button type=\"button\" class=\"btn\" id=\"shelly-test-end-btn\" style=\"background:var(--muted);font-size:.85rem;display:none\">End battery test</button>"
+    o += "<div id=\"grid-control-wrap\" class=\"grid-control-wrap\" style=\"display:none\">"
+         "<div class=\"card-title\">Grid Control (Shelly)</div>"
+         "<p class=\"grid-control-desc\">Turn off grid power supply to run on battery only. Use for learning discharge data.</p>"
+         "<div class=\"grid-control-btns\">"
+         "<button type=\"button\" class=\"grid-btn grid-btn-off\" id=\"shelly-off-btn\">Turn off grid</button>"
+         "<button type=\"button\" class=\"grid-btn grid-btn-on\" id=\"shelly-on-btn\">Turn on grid</button>"
+         "<button type=\"button\" class=\"grid-btn grid-btn-test\" id=\"shelly-test-start-btn\">Start battery test</button>"
+         "<button type=\"button\" class=\"grid-btn grid-btn-test\" id=\"shelly-test-end-btn\" style=\"display:none\">End battery test</button>"
          "</div>"
-         "<div id=\"shelly-msg\" class=\"msg\" style=\"margin-top:.5rem\"></div>"
+         "<div id=\"shelly-msg\" class=\"msg\"></div>"
          "</div></div>\n";
 
     o += "<div class=\"card\"><div class=\"card-title\">System Events</div>"
