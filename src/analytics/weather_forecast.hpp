@@ -62,6 +62,7 @@ struct SolarForecastWeekResult {
     double nominal_ah{0};
     double battery_voltage{0};
     bool realistic{false};       // true if charge acceptance taper was applied
+    bool realistic_from_history{false}; // true if taper came from measured data
 };
 
 class WeatherForecast {

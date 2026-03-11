@@ -541,10 +541,24 @@ std::vector<ChargeAcceptanceBucket> Database::get_charge_acceptance_profile(int 
     }
     sqlite3_finalize(stmt);
 
-    // Cap ratios to [0,1] range and fill empty buckets from nearest neighbor
     for (auto& b : result) {
         if (b.acceptance_ratio > 1.0) b.acceptance_ratio = 1.0;
         if (b.acceptance_ratio < 0.0) b.acceptance_ratio = 0.0;
+    }
+
+    // Fill empty buckets from nearest neighbor with data
+    for (int i = 0; i < 10; ++i) {
+        if (result[i].sample_count >= 3) continue;
+        for (int d = 1; d <= 9; ++d) {
+            if (i - d >= 0 && result[i - d].sample_count >= 3) {
+                result[i].acceptance_ratio = result[i - d].acceptance_ratio;
+                break;
+            }
+            if (i + d < 10 && result[i + d].sample_count >= 3) {
+                result[i].acceptance_ratio = result[i + d].acceptance_ratio;
+                break;
+            }
+        }
     }
 
     return result;

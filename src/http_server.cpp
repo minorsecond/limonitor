@@ -294,12 +294,32 @@ void HttpServer::handle(int fd) {
             double nom = snap.valid && snap.nominal_ah > 0 ? snap.nominal_ah : 100.0;
             bool want_realistic = query.find("realistic=1") != std::string::npos;
             std::vector<ChargeAcceptanceBucket> profile;
+            bool profile_from_db = false;
             if (want_realistic && db_)
                 profile = db_->get_charge_acceptance_profile(14);
+            if (want_realistic) {
+                int total_samples = 0;
+                for (const auto& b : profile) total_samples += b.sample_count;
+                profile_from_db = total_samples >= 10;
+            }
+            if (want_realistic && !profile_from_db) {
+                static constexpr double kDefaultTaper[] =
+                    {1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.95, 0.80, 0.45, 0.15};
+                profile.clear();
+                for (int i = 0; i < 10; ++i) {
+                    ChargeAcceptanceBucket b;
+                    b.soc_lo = i * 10;
+                    b.soc_hi = (i + 1) * 10;
+                    b.acceptance_ratio = kDefaultTaper[i];
+                    b.sample_count = 100;
+                    profile.push_back(b);
+                }
+            }
             auto r = ext->weather_forecast().get_forecast_week(
                 cfg.panel_watts, cfg.system_efficiency, max_a, v, nom,
                 snap.valid ? snap.soc_pct : 0,
                 want_realistic ? &profile : nullptr);
+            r.realistic_from_history = profile_from_db;
             if (!r.valid && !r.error.empty())
                 LOG_DEBUG("Solar /api/solar_forecast_week: %s", r.error.c_str());
             send_response(fd, 200, "application/json", solar_forecast_week_json(r));
@@ -748,6 +768,7 @@ std::string HttpServer::solar_forecast_week_json(const SolarForecastWeekResult& 
     std::string o = "{\n";
     o += "  \"valid\": " + jbool(r.valid) + ",\n";
     o += "  \"realistic\": " + jbool(r.realistic) + ",\n";
+    o += "  \"realistic_from_history\": " + jbool(r.realistic_from_history) + ",\n";
     o += "  \"week_total_kwh\": " + jdbl(r.week_total_kwh, 2) + ",\n";
     o += "  \"recovery_wh\": " + jdbl(r.recovery_wh, 0) + ",\n";
     o += "  \"days_to_full\": " + std::to_string(r.days_to_full) + ",\n";
@@ -2843,8 +2864,9 @@ td .rc-main{font-weight:600}
          "s+=\"<text x='\"+(PL/2)+\"' y='\"+(PT+CH/2)+\"' text-anchor='middle' font-size='9' font-family='monospace' fill='var(--muted)' transform='rotate(-90 \"+(PL/2)+\" \"+(PT+CH/2)+\")'>\"+unitLbl+\" per 3h slot</text>\";\n"
          "if(showCumul)s+=\"<text x='\"+(W-PR/2)+\"' y='\"+(PT+CH/2)+\"' text-anchor='middle' font-size='9' font-family='monospace' fill='var(--cyan)' transform='rotate(90 \"+(W-PR/2)+\" \"+(PT+CH/2)+\")'>\"+cumulLbl+\"</text>\";\n"
          "var isReal=lastDailyData&&lastDailyData.realistic;\n"
+         "var isHist=isReal&&lastDailyData.realistic_from_history;\n"
          "var lg=$('chart-legend');if(lg){var lh='';\n"
-         "lh+='<span class=lg><span class=swatch style=\"background:var(--green)\"></span><span class=dot style=\"background:var(--green)\"></span>Solar generation'+(isReal?' (realistic)':' (nominal)')+'<span class=tip>'+(isReal?'Solar energy adjusted for charge controller absorption/float taper derived from the last 14 days of historical charge data. At higher SoC, the charger reduces current, so less solar energy is actually accepted by the battery.':'Expected solar energy per 3-hour slot based on panel capacity, system efficiency, and cloud cover from OpenWeather forecast. Assumes constant max charge current (nominal).')+'</span></span>';\n"
+         "lh+='<span class=lg><span class=swatch style=\"background:var(--green)\"></span><span class=dot style=\"background:var(--green)\"></span>Solar generation'+(isReal?(isHist?' (realistic, measured)':' (realistic, default taper)'):' (nominal)')+'<span class=tip>'+(isReal?(isHist?'Solar energy adjusted for charge controller absorption/float taper derived from the last 14 days of historical charge data. At higher SoC, the charger reduces current, so less solar energy is actually accepted by the battery.':'Solar energy adjusted using a standard CC-CV taper model. At higher SoC the charger reduces current, so less energy is accepted. Connect a charge controller for measured taper data.'):'Expected solar energy per 3-hour slot based on panel capacity, system efficiency, and cloud cover from OpenWeather forecast. Assumes constant max charge current (nominal).')+'</span></span>';\n"
          "lh+='<span class=lg><span class=\"swatch-band\" style=\"background:linear-gradient(var(--green),transparent);opacity:.2\"></span>95% CI<span class=tip>Inner band: 95% confidence interval (\\u00b11.96\\u03c3). Based on cloud forecast uncertainty (CV\\u00a0=\\u00a010\\u201320%). The actual yield should fall within this band ~95% of the time.</span></span>';\n"
          "lh+='<span class=lg><span class=\"swatch-band\" style=\"background:linear-gradient(var(--green),transparent);opacity:.08\"></span>99% CI<span class=tip>Outer band: 99% confidence interval (\\u00b12.576\\u03c3). Very unlikely the actual yield falls outside this range\\u2014only ~1% of the time if the cloud model is well-calibrated.</span></span>';\n"
          "if(showUse)lh+='<span class=lg><span class=swatch style=\"background:var(--orange);border-top:1.5px dashed var(--orange)\"></span><span class=dot style=\"background:var(--orange)\"></span>Est. usage (7d)<span class=tip>Average power consumption per 3-hour time-of-day slot, computed from the last 7 days of battery discharge history. Shaded band shows the 95% CI from observed variability across days.</span></span>';\n"
@@ -3004,7 +3026,7 @@ td .rc-main{font-weight:600}
          "Promise.all([to(base+'/api/solar_forecast_week'+rlQ),to(base+'/api/solar_simulation'),to(base+'/api/solar_forecast')]).then(function(arr){\n"
          "var d=arr[0],sim=arr[1],fore=arr[2];\n"
          "if(!d.valid){$('week-kwh').textContent='—';$('days-full').textContent='—';$('best-day').textContent=d.error||'—';$('daily-table').innerHTML='<tr><td colspan=7 class=warn>'+d.error+'</td></tr>'}else{\n"
-         "$('week-kwh').textContent=fmt(d.week_total_kwh,2)+(d.realistic?' (realistic)':'');$('days-full').textContent=d.days_to_full>0?d.days_to_full:'—';$('best-day').textContent=d.best_day?fmtDate(d.best_day):'—';\n"
+         "$('week-kwh').textContent=fmt(d.week_total_kwh,2)+(d.realistic?(d.realistic_from_history?' (measured taper)':' (default taper)'):'');$('days-full').textContent=d.days_to_full>0?d.days_to_full:'—';$('best-day').textContent=d.best_day?fmtDate(d.best_day):'—';\n"
          "if(d.solar_perf_coeff>0){var pct=Math.round(d.solar_perf_coeff*100);$('solar-coeff').textContent=pct+'%';$('solar-coeff-detail').textContent=d.solar_perf_samples+' samples (30d)'}else{$('solar-coeff').textContent='—';$('solar-coeff-detail').textContent='collecting data'}\n"
          "var tbody=$('daily-table');if(!d.daily||!d.daily.length){tbody.innerHTML='<tr><td colspan=7 class=dim>No data</td></tr>'}else{lastDailyData=d;if(d.slots)lastSlots=d.slots;var cb=$('show-extended');if(cb)cb.checked=getSetting('show-extended','0')==='1';renderDaily();renderActiveChart();}}\n"
          "$('today-wh').textContent=sim.expected_today_wh>0?fmt(sim.expected_today_wh/1000,2)+' kilowatt-hours':'—';$('tomorrow-wh').textContent=fore.valid?fmt(fore.tomorrow_generation_wh/1000,1)+' kilowatt-hours':'—';$('bat-proj').textContent=sim.battery_projection||fore.expected_battery_state||'—';\n"
