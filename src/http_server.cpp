@@ -299,6 +299,13 @@ void HttpServer::handle(int fd) {
         }
         std::string theme = db_ ? db_->get_setting("theme") : "";
         send_response(fd, 200, "text/html", html_solar_page(init_settings, theme));
+    } else if (path == "/api/shelly/status") {
+        bool active = db_ && db_->get_setting("shelly_test_active") == "1";
+        std::string start = db_ ? db_->get_setting("shelly_test_start_ts") : "";
+        std::string out = "{\"test_active\":" + std::string(active ? "true" : "false");
+        if (!start.empty()) out += ",\"start_ts\":" + start;
+        out += "}\n";
+        send_response(fd, 200, "application/json", out);
     } else if (path == "/api/charger") {
         send_response(fd, 200, "application/json", charger_json(pg));
     } else if (path == "/api/status") {
@@ -1631,6 +1638,11 @@ html.light .flow-node-load{fill:#e2e8f0}
          "#bat-chart{height:280px}#chg-chart{height:260px}.card.card-bat,.card.card-chg{padding-bottom:1.5rem}"
          ".chart-svg{preserve-aspect-ratio:none}}";
     o += R"HTML(
+/* ── Test banner ── */
+.test-banner{display:none;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.5rem;padding:.6rem 1rem;margin-bottom:1rem;background:linear-gradient(135deg,#c2410c 0%,#ea580c 100%);color:#fff;border-radius:8px;font-size:.85rem}
+.test-banner.show{display:flex}
+.test-banner .tb-btn{background:#fff!important;color:#c2410c!important;border:none;padding:.35rem .8rem;font-weight:600;cursor:pointer;border-radius:4px}
+.test-banner .tb-btn:hover{opacity:.92}
 </style>
 <link rel="prefetch" href="/solar">
 </head><body><div class="wrap">
@@ -1670,6 +1682,9 @@ html.light .flow-node-load{fill:#e2e8f0}
          "<div class=\"set-row\"><label>Chart range</label><select id=\"set-range\" onchange=\"applySetting('range',this.value)\">"
          "<option value=\"0.5\">30 min</option><option value=\"1\">1 hour</option><option value=\"4\">4 hours</option><option value=\"24\">24 hours</option></select></div>"
          "<button class=\"btn\" onclick=\"toggleSettings()\" style=\"margin-top:.5rem\">Close</button></div></div>\n";
+    o += "<div id=\"test-banner\" class=\"test-banner\">"
+         "<span><strong>Battery test active</strong> &middot; SoC: <span id=\"tb-soc\">—</span>% &middot; Load: <span id=\"tb-load\">—</span> W &middot; Runtime: <span id=\"tb-rt\">—</span> h</span>"
+         "<button class=\"tb-btn\" onclick=\"endTestFromBanner()\">End test</button></div>\n";
 
     o += "<main class=\"main\">\n";
     o += "<div id=\"sys-status-panel\" class=\"card\" style=\"margin-bottom:.7rem\">"
@@ -2139,8 +2154,11 @@ function initAtabs(){
   })
 }
 (function(){var n=document.querySelectorAll('nav a[href^="/"]');for(var i=0;i<n.length;i++){n[i].addEventListener('click',function(e){if(e.ctrlKey||e.metaKey||e.shiftKey)return;var h=this.getAttribute('href');if(!h)return;e.preventDefault();location.href=h})}})();
+function endTestFromBanner(){fetch('/api/shelly/relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({turn:'on'})}).then(function(r){return r.json()}).then(function(d){if(d.ok){var b=$('test-banner');if(b)b.classList.remove('show');if(typeof lmSettings!=='undefined')lmSettings.shelly_test_active='0';var te=$('shelly-test-end-btn');var ts=$('shelly-test-start-btn');if(te)te.style.display='none';if(ts)ts.style.display='inline-block'}}).catch(function(){})}
+function upTestBanner(){var b=$('test-banner');if(!b||!b.classList.contains('show'))return;fetch('/api/shelly/status').then(function(r){return r.json()}).then(function(s){if(!s.test_active){b.classList.remove('show');if(typeof lmSettings!=='undefined')lmSettings.shelly_test_active='0';return}Promise.all([fetch('/api/status').then(function(r){return r.json()}),fetch('/api/analytics').then(function(r){return r.json()})]).then(function(arr){var st=arr[0],an=arr[1];var soc=$('tb-soc'),load=$('tb-load'),rt=$('tb-rt');if(soc)soc.textContent=st.valid?fmt(st.soc_pct,1):'—';if(load)load.textContent=an.avg_discharge_24h_w>0?fmt(an.avg_discharge_24h_w,1):'—';if(rt)rt.textContent=an.runtime_from_current_h>0?fmt(an.runtime_from_current_h,1):'—'})})})}
 initSettings()
 initAtabs()
+fetch('/api/shelly/status').then(function(r){return r.json()}).then(function(s){if(s.test_active){var b=$('test-banner');if(b){b.classList.add('show');upTestBanner();setInterval(upTestBanner,5000)}}}).catch(function(){})
 var gw=$('grid-control-wrap');if(gw){var sh=getSetting('shelly_host',''),se=getSetting('shelly_enabled','0');if(sh&&(se==='1'||se==='true')){gw.style.display='block';var offBtn=$('shelly-off-btn'),onBtn=$('shelly-on-btn'),testStart=$('shelly-test-start-btn'),testEnd=$('shelly-test-end-btn'),shellyMsg=$('shelly-msg');var testActive=getSetting('shelly_test_active','0')==='1';if(testActive&&testStart)testStart.style.display='none';if(testActive&&testEnd)testEnd.style.display='inline-block';function shellyReq(turn,isTest){if(shellyMsg)shellyMsg.textContent='';if(shellyMsg)shellyMsg.className='msg';var body={turn:turn};if(isTest)body.test=true;fetch('/api/shelly/relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json()}).then(function(d){if(d.ok){if(shellyMsg)shellyMsg.textContent='Done. Grid turned '+turn+'.';if(shellyMsg)shellyMsg.className='msg';if(turn==='off'){shellyTestActive=true;if(testStart)testStart.style.display='none';if(testEnd)testEnd.style.display='inline-block'}else{shellyTestActive=false;if(testStart)testStart.style.display='inline-block';if(testEnd)testEnd.style.display='none'}}else{if(shellyMsg){shellyMsg.textContent='Error: '+(d.error||'unknown');shellyMsg.className='msg err'}}}).catch(function(){if(shellyMsg){shellyMsg.textContent='Request failed.';shellyMsg.className='msg err'}})}if(offBtn)offBtn.onclick=function(){if(confirm('Turn off grid power supply? System will run on battery only.'))shellyReq('off')};if(onBtn)onBtn.onclick=function(){if(confirm('Turn on grid power supply?'))shellyReq('on')};if(testStart)testStart.onclick=function(){if(confirm('Start battery test? This will turn off grid to collect discharge data. Run for a few hours, then click End test.'))shellyReq('off',true)};if(testEnd){testEnd.onclick=function(){if(confirm('End battery test and turn grid back on?'))shellyReq('on')};testEnd.style.display='none'}}}}
 
 function upBat(){fetch('/api/status').then(function(r){return r.json()}).then(function(d){
@@ -2804,6 +2822,10 @@ td .rc-main{font-weight:600}
 .chart-legend .lg .dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;margin-left:-10px}
 .chart-legend .lg .tip{display:none;position:absolute;bottom:calc(100% + 6px);left:0;background:var(--card);border:1px solid var(--border);border-radius:6px;padding:.4rem .6rem;font-size:.68rem;line-height:1.35;white-space:normal;width:260px;z-index:200;box-shadow:0 4px 12px rgba(0,0,0,.3);color:var(--text);pointer-events:none}
 .chart-legend .lg:hover .tip{display:block}
+.test-banner{display:none;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.5rem;padding:.6rem 1rem;margin-bottom:1rem;background:linear-gradient(135deg,#c2410c 0%,#ea580c 100%);color:#fff;border-radius:8px;font-size:.85rem}
+.test-banner.show{display:flex}
+.test-banner .tb-btn{background:#fff!important;color:#c2410c!important;border:none;padding:.35rem .8rem;font-weight:600;cursor:pointer;border-radius:4px}
+.test-banner .tb-btn:hover{opacity:.92}
 </style>
 <link rel="prefetch" href="/"><link rel="prefetch" href="/settings">
 </head><body>
@@ -2820,6 +2842,9 @@ td .rc-main{font-weight:600}
          "<div class=\"set-row\"><label>Locale</label><select id=\"set-locale\" onchange=\"applySetting('locale',this.value)\">"
          "<option value=\"auto\">Auto (browser)</option><option value=\"en-US\">English (US)</option><option value=\"en-GB\">English (UK)</option><option value=\"de-DE\">Deutsch</option><option value=\"fr-FR\">Français</option><option value=\"es-ES\">Español</option></select></div>"
          "<button class=\"btn\" onclick=\"toggleSettings()\" style=\"margin-top:.5rem\">Close</button></div></div>";
+    o += "<div id=\"test-banner\" class=\"test-banner\">"
+         "<span><strong>Battery test active</strong> &middot; SoC: <span id=\"tb-soc\">—</span>% &middot; Load: <span id=\"tb-load\">—</span> W &middot; Runtime: <span id=\"tb-rt\">—</span> h</span>"
+         "<button class=\"tb-btn\" onclick=\"endTestFromBanner()\">End test</button></div>";
     o += "<h1>Solar Forecast</h1>";
     o += "<p class=\"sub\">";
     o += "<a href=\"/api/solar_forecast_week\">/api/solar_forecast_week</a> &nbsp;"
@@ -3289,8 +3314,11 @@ td .rc-main{font-weight:600}
          "function toggleTheme(){applyTheme(document.documentElement.classList.contains('light')?'dark':'light')}\n"
          "function toggleSettings(){var m=$('settings-modal');if(!m)return;m.style.display=m.style.display==='none'?'flex':'none';if(m.style.display==='flex'){var st=$('set-theme');if(st)st.value=getSetting('theme','dark');var se=$('set-time');if(se)se.value=getSetting('time','24');var sl=$('set-locale');if(sl)sl.value=getSetting('locale','auto')}}\n"
          "function applySetting(k,v){if(!lmSettings)lmSettings={};lmSettings[k]=v;fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(lmSettings)}).catch(function(){});if(k==='theme')applyTheme(v);else if(k==='time'||k==='locale')loadAll()}\n"
+         "function endTestFromBanner(){fetch('/api/shelly/relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({turn:'on'})}).then(function(r){return r.json()}).then(function(d){if(d.ok){var b=$('test-banner');if(b)b.classList.remove('show');if(typeof lmSettings!=='undefined')lmSettings.shelly_test_active='0'}}).catch(function(){})}\n"
+         "function upTestBanner(){var b=$('test-banner');if(!b||!b.classList.contains('show'))return;fetch('/api/shelly/status').then(function(r){return r.json()}).then(function(s){if(!s.test_active){b.classList.remove('show');if(typeof lmSettings!=='undefined')lmSettings.shelly_test_active='0';return}Promise.all([fetch('/api/status').then(function(r){return r.json()}),fetch('/api/analytics').then(function(r){return r.json()})]).then(function(arr){var st=arr[0],an=arr[1];var soc=$('tb-soc'),load=$('tb-load'),rt=$('tb-rt');if(soc)soc.textContent=st.valid?fmt(st.soc_pct,1):'—';if(load)load.textContent=an.avg_discharge_24h_w>0?fmt(an.avg_discharge_24h_w,1):'—';if(rt)rt.textContent=an.runtime_from_current_h>0?fmt(an.runtime_from_current_h,1):'—'})})})}\n"
          "(function(){var n=document.querySelectorAll('nav a[href^=\"/\"]');for(var i=0;i<n.length;i++){n[i].addEventListener('click',function(e){if(e.ctrlKey||e.metaKey||e.shiftKey)return;var h=this.getAttribute('href');if(!h)return;e.preventDefault();location.href=h})}})();\n"
          "initSettings();loadAll();setInterval(loadAll,300000)\n"
+         "fetch('/api/shelly/status').then(function(r){return r.json()}).then(function(s){if(s.test_active){var b=$('test-banner');if(b){b.classList.add('show');upTestBanner();setInterval(upTestBanner,5000)}}}).catch(function(){})\n"
          "</script></body></html>";
     return o;
 }
@@ -3347,10 +3375,15 @@ h1{font-size:1.35rem;font-weight:600;color:var(--green);margin-bottom:.25rem}
 .btn:hover{opacity:.92;transform:translateY(-1px)}
 .msg{font-size:.8rem;color:var(--muted);margin-top:.6rem}
 .err{color:#dc2626}
+.test-banner{display:none;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.5rem;padding:.6rem 1rem;margin-bottom:1rem;background:linear-gradient(135deg,#c2410c 0%,#ea580c 100%);color:#fff;border-radius:8px;font-size:.85rem}
+.test-banner.show{display:flex}
+.test-banner .tb-btn{background:#fff!important;color:#c2410c!important;border:none;padding:.35rem .8rem;font-weight:600;cursor:pointer;border-radius:4px}
+.test-banner .tb-btn:hover{opacity:.92}
 </style></head><body>
 <nav><a href="/">Dashboard</a><a href="/solar">Solar</a><a href="/settings" class="active">Settings</a><span class="spacer"></span><button class="thm" id="thm-btn" onclick="toggleTheme()" title="Toggle theme">)HTML";
     o += (theme == "light") ? "&#9788;" : "&#263d;";
     o += R"HTML(</button></nav>
+<div id="test-banner" class="test-banner"><span><strong>Battery test active</strong> &middot; SoC: <span id="tb-soc">—</span>% &middot; Load: <span id="tb-load">—</span> W &middot; Runtime: <span id="tb-rt">—</span> h</span><button class="tb-btn" onclick="endTestFromBanner()">End test</button></div>
 <h1>Settings</h1>
 <p class="sub">Application configuration. Restart limonitor after saving to apply hardware changes.</p>
 <form id="cfg-form" class="form-wrap">
@@ -3425,6 +3458,11 @@ h1{font-size:1.35rem;font-weight:600;color:var(--green);margin-bottom:.25rem}
          "}\n"
          "function toggleTheme(){var isLight=document.documentElement.classList.toggle('light');var t=isLight?'light':'dark';document.getElementById('thm-btn').textContent=isLight?'\u263d':'\u263c';fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme:t})}).catch(function(){})}\n"
          "function refreshWx(){var m=document.getElementById('wx-msg');if(m)m.textContent='Refreshing…';fetch('/api/weather_refresh').then(function(r){return r.json()}).then(function(d){if(m)m.textContent=d.ok?'Done! Cache cleared. Visit Solar page to see fresh data.':'Error: '+d.message;if(m)m.style.color=d.ok?'var(--green)':'#dc2626'}).catch(function(e){if(m){m.textContent='Error: '+e.message;m.style.color='#dc2626'}})}\n"
+         "function $(id){return document.getElementById(id)}\n"
+         "function fmt(n,p){return n==null||isNaN(n)?'—':n.toFixed(p)}\n"
+         "function endTestFromBanner(){fetch('/api/shelly/relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({turn:'on'})}).then(function(r){return r.json()}).then(function(d){if(d.ok){var b=$('test-banner');if(b)b.classList.remove('show')}}).catch(function(){})}\n"
+         "function upTestBanner(){var b=$('test-banner');if(!b||!b.classList.contains('show'))return;fetch('/api/shelly/status').then(function(r){return r.json()}).then(function(s){if(!s.test_active){b.classList.remove('show');return}Promise.all([fetch('/api/status').then(function(r){return r.json()}),fetch('/api/analytics').then(function(r){return r.json()})]).then(function(arr){var st=arr[0],an=arr[1];var soc=$('tb-soc'),load=$('tb-load'),rt=$('tb-rt');if(soc)soc.textContent=st.valid?fmt(st.soc_pct,1):'—';if(load)load.textContent=an.avg_discharge_24h_w>0?fmt(an.avg_discharge_24h_w,1):'—';if(rt)rt.textContent=an.runtime_from_current_h>0?fmt(an.runtime_from_current_h,1):'—'})})})}\n"
+         "fetch('/api/shelly/status').then(function(r){return r.json()}).then(function(s){if(s.test_active){var b=$('test-banner');if(b){b.classList.add('show');upTestBanner();setInterval(upTestBanner,5000)}}}).catch(function(){})\n"
          "</script></body></html>";
     return o;
 }
