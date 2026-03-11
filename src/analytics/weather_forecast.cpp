@@ -374,7 +374,8 @@ SolarForecastWeekResult WeatherForecast::get_forecast_week(double panel_watts, d
         by_day[day_key].push_back(t);
     }
 
-    double week_total = 0;
+    double week_total_nominal = 0;
+    double week_total_accepted = 0;
     double best_day_kwh = 0;
     double daily_projected_soc = current_soc_pct;
 
@@ -390,7 +391,8 @@ SolarForecastWeekResult WeatherForecast::get_forecast_week(double panel_watts, d
                       tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday);
         d.date = date_buf;
 
-        double day_kwh = 0;
+        double day_kwh_nominal = 0;
+        double day_kwh_accepted = 0;
         double cloud_sum = 0;
         int cloud_n = 0;
         int opt_start_idx = -1, opt_end_idx = -1;
@@ -402,16 +404,18 @@ SolarForecastWeekResult WeatherForecast::get_forecast_week(double panel_watts, d
             double slot_kwh = panel_watts * 3.0 * efficiency * (1.0 - cloud) / 1000.0;
             if (daytime) {
                 slot_kwh = std::min(slot_kwh, max_charge_w * 3.0 / 1000.0);
+                day_kwh_nominal += slot_kwh;
+                double accepted = slot_kwh;
                 if (realistic) {
                     double ar = acceptance_at_soc(charge_profile, daily_projected_soc);
-                    slot_kwh *= ar;
+                    accepted *= ar;
                 }
-                day_kwh += slot_kwh;
+                day_kwh_accepted += accepted;
                 cloud_sum += cloud;
                 ++cloud_n;
                 sun_hours += 3.0 * (1.0 - cloud);
                 if (realistic && cap_wh_total > 0) {
-                    daily_projected_soc += (slot_kwh * 1000.0 / cap_wh_total) * 100.0;
+                    daily_projected_soc += (accepted * 1000.0 / cap_wh_total) * 100.0;
                     if (daily_projected_soc > 100.0) daily_projected_soc = 100.0;
                 }
             }
@@ -421,12 +425,11 @@ SolarForecastWeekResult WeatherForecast::get_forecast_week(double panel_watts, d
             }
         }
 
-        d.kwh = day_kwh;
+        d.kwh = day_kwh_nominal;
         d.cloud_cover = cloud_n > 0 ? cloud_sum / cloud_n : 0;
         d.sun_hours_effective = sun_hours;
 
-        // Max recovery: Wh, Ah, % with 95% CI (uncertainty from cloud forecast)
-        double day_wh = day_kwh * 1000.0;
+        double day_wh = (realistic ? day_kwh_accepted : day_kwh_nominal) * 1000.0;
         double cap_wh = cap_ah * v;
         double headroom_pct = std::max(0.0, 100.0 - current_soc_pct);
         double cv = 0.10 + 0.10 * d.cloud_cover;  // 10–20% coefficient of variation
@@ -472,15 +475,16 @@ SolarForecastWeekResult WeatherForecast::get_forecast_week(double panel_watts, d
         }
 
         r.daily.push_back(d);
-        week_total += day_kwh;
-        if (day_kwh > best_day_kwh) {
-            best_day_kwh = day_kwh;
+        week_total_nominal += day_kwh_nominal;
+        week_total_accepted += day_kwh_accepted;
+        if (day_kwh_nominal > best_day_kwh) {
+            best_day_kwh = day_kwh_nominal;
             r.best_day = d.date;
         }
     }
 
-    r.week_total_kwh = week_total;
-    r.recovery_wh = week_total * 1000.0;
+    r.week_total_kwh = week_total_nominal;
+    r.recovery_wh = (realistic ? week_total_accepted : week_total_nominal) * 1000.0;
     r.valid = true;
 
     auto now_ext = std::chrono::steady_clock::now();
@@ -524,23 +528,24 @@ SolarForecastWeekResult WeatherForecast::get_forecast_week(double panel_watts, d
             ext.cloud_cover = cloud;
             double sun_h = daylight_h * (1.0 - cloud);
             ext.sun_hours_effective = sun_h;
-            double day_kwh = panel_watts * daylight_h * efficiency * (1.0 - cloud) / 1000.0;
-            day_kwh = std::min(day_kwh, max_charge_w * daylight_h / 1000.0);
+            double day_kwh_nom = panel_watts * daylight_h * efficiency * (1.0 - cloud) / 1000.0;
+            day_kwh_nom = std::min(day_kwh_nom, max_charge_w * daylight_h / 1000.0);
+            double day_kwh_acc = day_kwh_nom;
             if (realistic) {
                 double total_ar = 0;
                 int n_sub = 3;
                 for (int ss = 0; ss < n_sub; ++ss) {
-                    double sub_soc = daily_projected_soc + (ss * day_kwh * 1000.0 / (n_sub * cap_wh_total)) * 100.0;
+                    double sub_soc = daily_projected_soc + (ss * day_kwh_nom * 1000.0 / (n_sub * cap_wh_total)) * 100.0;
                     if (sub_soc > 100) sub_soc = 100;
                     total_ar += acceptance_at_soc(charge_profile, sub_soc);
                 }
-                day_kwh *= total_ar / n_sub;
+                day_kwh_acc = day_kwh_nom * total_ar / n_sub;
                 if (cap_wh_total > 0) {
-                    daily_projected_soc += (day_kwh * 1000.0 / cap_wh_total) * 100.0;
+                    daily_projected_soc += (day_kwh_acc * 1000.0 / cap_wh_total) * 100.0;
                     if (daily_projected_soc > 100) daily_projected_soc = 100;
                 }
             }
-            ext.kwh = day_kwh;
+            ext.kwh = day_kwh_nom;
             if (cloud < 0.7 && de.sunrise > 0 && de.sunset > de.sunrise) {
                 // Estimate optimal window from sunrise/sunset for partly-cloudy extended days
                 time_t sr_t = static_cast<time_t>(de.sunrise);
@@ -560,7 +565,7 @@ SolarForecastWeekResult WeatherForecast::get_forecast_week(double panel_watts, d
                 ext.optimal_reason = cloud >= 0.9 ? "Overcast" : "Mostly cloudy";
             }
             ext.is_extended = true;
-            double day_wh = day_kwh * 1000.0;
+            double day_wh = (realistic ? day_kwh_acc : day_kwh_nom) * 1000.0;
             double headroom_pct = std::max(0.0, 100.0 - current_soc_pct);
             double cv = 0.10 + 0.10 * ext.cloud_cover;
             double margin = 1.96 * cv;
@@ -576,11 +581,12 @@ SolarForecastWeekResult WeatherForecast::get_forecast_week(double panel_watts, d
             ext.max_recovery_pct_lo = ext_cap_wh > 0 ? std::max(0.0, std::min(headroom_pct, (day_wh * mult_lo / ext_cap_wh) * 100.0)) : 0;
             ext.max_recovery_pct_hi = ext_cap_wh > 0 ? std::min(headroom_pct, (day_wh * mult_hi / ext_cap_wh) * 100.0) : 0;
             r.daily.push_back(ext);
-            week_total += day_kwh;
-            r.week_total_kwh = week_total;
-            r.recovery_wh = week_total * 1000.0;
-            if (day_kwh > best_day_kwh) {
-                best_day_kwh = day_kwh;
+            week_total_nominal += day_kwh_nom;
+            week_total_accepted += day_kwh_acc;
+            r.week_total_kwh = week_total_nominal;
+            r.recovery_wh = (realistic ? week_total_accepted : week_total_nominal) * 1000.0;
+            if (day_kwh_nom > best_day_kwh) {
+                best_day_kwh = day_kwh_nom;
                 r.best_day = ext.date;
             }
         }
@@ -588,12 +594,12 @@ SolarForecastWeekResult WeatherForecast::get_forecast_week(double panel_watts, d
 
     double cumul = 0;
     for (const auto& d : r.daily) {
-        cumul += d.kwh * 1000.0;
+        cumul += d.max_recovery_wh;
         if (cumul >= energy_to_full && r.days_to_full == 0) {
             r.days_to_full = static_cast<int>(&d - &r.daily[0]) + 1;
         }
     }
-    if (r.days_to_full == 0 && week_total > 0)
+    if (r.days_to_full == 0 && week_total_nominal > 0)
         r.days_to_full = static_cast<int>(r.daily.size());
 
     if (db_) {

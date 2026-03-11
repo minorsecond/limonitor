@@ -2560,6 +2560,9 @@ h1{font-size:1.5rem;color:var(--green);margin-bottom:.5rem}
 .stat-best .stat-val{min-width:0;overflow:hidden;text-overflow:ellipsis;font-size:1rem}
 .stat-lbl{font-size:.6rem;color:var(--muted);text-transform:uppercase}
 .stat-val{font-size:1.4rem;font-weight:700;color:var(--green);margin-top:.2rem}
+.stat[title]{cursor:help}
+th[title]{cursor:help;text-decoration:underline dotted var(--muted);text-underline-offset:3px}
+td[title]{cursor:help}
 table{width:100%;border-collapse:collapse;font-size:.85rem}
 th,td{padding:.4rem .5rem;text-align:left;border-bottom:1px solid var(--border)}
 th{color:var(--muted);font-weight:500}
@@ -2622,31 +2625,42 @@ td .rc-main{font-weight:600}
          "<a href=\"/api/solar_performance\">/api/solar_performance</a></p>";
 
     o += "<div class=\"stats\" id=\"solar-stats\">";
-    o += "<div class=\"stat\"><div class=\"stat-lbl\">Week total</div><div class=\"stat-val\" id=\"week-kwh\">—</div><div class=\"stat-lbl\">kilowatt-hours</div></div>";
-    o += "<div class=\"stat\"><div class=\"stat-lbl\">Days to full</div><div class=\"stat-val\" id=\"days-full\">—</div><div class=\"stat-lbl\">solar only</div></div>";
-    o += "<div class=\"stat stat-best\"><div class=\"stat-lbl\">Best day</div><div class=\"stat-val\" id=\"best-day\">—</div><div class=\"stat-lbl\">highest yield</div></div>";
-    o += "<div class=\"stat\"><div class=\"stat-lbl\">Panel efficiency</div><div class=\"stat-val\" id=\"solar-coeff\">—</div><div class=\"stat-lbl\" id=\"solar-coeff-detail\">coefficient</div></div>";
+    o += "<div class=\"stat\" title=\"Total nominal panel output for the 7-day forecast period\"><div class=\"stat-lbl\">Week total</div><div class=\"stat-val\" id=\"week-kwh\">—</div><div class=\"stat-lbl\">kilowatt-hours</div></div>";
+    o += "<div class=\"stat\" title=\"Estimated days to reach full charge from solar alone\"><div class=\"stat-lbl\">Days to full</div><div class=\"stat-val\" id=\"days-full\">—</div><div class=\"stat-lbl\">solar only</div></div>";
+    o += "<div class=\"stat stat-best\" title=\"Day with the highest expected solar yield\"><div class=\"stat-lbl\">Best day</div><div class=\"stat-val\" id=\"best-day\">—</div><div class=\"stat-lbl\">highest yield</div></div>";
+    o += "<div class=\"stat\" title=\"Recent panel performance vs theoretical maximum, based on measured data\"><div class=\"stat-lbl\">Panel efficiency</div><div class=\"stat-val\" id=\"solar-coeff\">—</div><div class=\"stat-lbl\" id=\"solar-coeff-detail\">coefficient</div></div>";
     o += "</div>";
+    o += "<div style=\"margin:.5rem 0 .2rem;display:flex;align-items:center;gap:.6rem\">"
+         "<label style=\"font-size:.82rem;color:var(--text);cursor:pointer;display:flex;align-items:center;gap:.35rem\" title=\"Model real-world charge acceptance. Uses historical charge controller data when available, otherwise a default LiFePO4 taper curve. Affects recovery estimates and chart projections.\">"
+         "<input type=\"checkbox\" id=\"show-realistic\" onchange=\"toggleRealistic()\"> Realistic mode</label>"
+         "<span id=\"realistic-badge\" style=\"font-size:.68rem;color:var(--muted);display:none\"></span></div>";
 
-    o += "<div class=\"card\"><div class=\"card-title\">Daily Forecast</div>";
-    o += "<div style=\"margin-bottom:.5rem\"><label style=\"font-size:.8rem;color:var(--muted)\"><input type=\"checkbox\" id=\"show-extended\" onchange=\"applySetting('show-extended',this.checked?'1':'0');renderDaily();renderActiveChart()\"> Show extended (6–16 days, from 16-day API if available)</label></div>";
-    o += "<div style=\"overflow-x:auto\"><table><thead><tr><th></th><th>Date</th><th>Energy</th><th>Cloud</th><th>Sun hrs</th><th>Recovery (95% CI)</th><th>Optimal window</th></tr></thead>";
+    o += "<div class=\"card\"><div class=\"card-title\" title=\"Per-day breakdown of expected solar generation, battery recovery, and optimal charging windows\">Daily Forecast</div>";
+    o += "<div style=\"margin-bottom:.5rem\"><label style=\"font-size:.8rem;color:var(--muted)\" title=\"Extend forecast to 16 days using the long-range weather API (lower accuracy)\"><input type=\"checkbox\" id=\"show-extended\" onchange=\"applySetting('show-extended',this.checked?'1':'0');renderDaily();renderActiveChart()\"> Show extended (6–16 days, from 16-day API if available)</label></div>";
+    o += "<div style=\"overflow-x:auto\"><table><thead><tr>"
+         "<th></th>"
+         "<th>Date</th>"
+         "<th title=\"Nominal panel output (kWh) at rated capacity, adjusted for weather\">Energy</th>"
+         "<th title=\"Average cloud cover from weather forecast\">Cloud</th>"
+         "<th title=\"Effective sun hours, weighted by cloud cover\">Sun hrs</th>"
+         "<th title=\"Energy the battery can accept. In Realistic mode, accounts for charge taper at high SoC\">Recovery (95% CI)</th>"
+         "<th title=\"Consecutive daytime hours with the clearest skies\">Optimal window</th>"
+         "</tr></thead>";
     o += "<tbody id=\"daily-table\"><tr><td colspan=\"7\" class=\"dim\">Loading…</td></tr></tbody></table></div></div>";
 
     o += "<div class=\"card\"><div class=\"card-title\">Solar Energy Forecast</div>";
     o += "<div style=\"display:flex;align-items:center;gap:.5rem;flex-wrap:wrap\">"
          "<div class=\"chart-tabs\" id=\"solar-view-tabs\" style=\"margin-bottom:0\">"
-         "<button class=\"chart-tab active\" data-view=\"solar\" onclick=\"switchChartView('solar')\">Solar Forecast</button>"
-         "<button class=\"chart-tab\" data-view=\"balance\" onclick=\"switchChartView('balance')\">Daily Balance</button></div>"
+         "<button class=\"chart-tab active\" data-view=\"solar\" onclick=\"switchChartView('solar')\" title=\"Projected solar generation and cumulative energy\">Solar Forecast</button>"
+         "<button class=\"chart-tab\" data-view=\"balance\" onclick=\"switchChartView('balance')\" title=\"Daily generation vs estimated consumption\">Daily Balance</button></div>"
          "<span style=\"width:1px;height:16px;background:var(--border);margin:0 .1rem\"></span>"
          "<div class=\"chart-tabs\" id=\"solar-unit-tabs\" style=\"margin-bottom:0\">"
-         "<button class=\"chart-tab active\" data-unit=\"kwh\" onclick=\"switchChartUnit('kwh')\">kWh</button>"
-         "<button class=\"chart-tab\" data-unit=\"ah\" onclick=\"switchChartUnit('ah')\">Ah</button>"
-         "<button class=\"chart-tab\" data-unit=\"pct\" onclick=\"switchChartUnit('pct')\">Battery %</button></div>"
+         "<button class=\"chart-tab active\" data-unit=\"kwh\" onclick=\"switchChartUnit('kwh')\" title=\"Kilowatt-hours\">kWh</button>"
+         "<button class=\"chart-tab\" data-unit=\"ah\" onclick=\"switchChartUnit('ah')\" title=\"Amp-hours at nominal voltage\">Ah</button>"
+         "<button class=\"chart-tab\" data-unit=\"pct\" onclick=\"switchChartUnit('pct')\" title=\"Equivalent battery state-of-charge\">Battery %</button></div>"
          "<span style=\"flex:1\"></span>"
-         "<label style=\"font-size:.72rem;color:var(--muted);cursor:pointer\" title=\"Use historical charge controller data to model absorption/float taper. When off, assumes nominal (constant max current) charging.\"><input type=\"checkbox\" id=\"show-realistic\" onchange=\"toggleRealistic()\"> Realistic</label>"
-         "<label style=\"font-size:.72rem;color:var(--muted);cursor:pointer\"><input type=\"checkbox\" id=\"show-cumul\" onchange=\"renderActiveChart()\" checked> Cumulative</label>"
-         "<label style=\"font-size:.72rem;color:var(--muted);cursor:pointer\"><input type=\"checkbox\" id=\"show-usage\" onchange=\"renderActiveChart()\" checked> Est. usage</label></div>"
+         "<label style=\"font-size:.72rem;color:var(--muted);cursor:pointer\" title=\"Show running total of energy over the forecast period\"><input type=\"checkbox\" id=\"show-cumul\" onchange=\"renderActiveChart()\" checked> Cumulative</label>"
+         "<label style=\"font-size:.72rem;color:var(--muted);cursor:pointer\" title=\"Overlay estimated daily consumption from historical usage data\"><input type=\"checkbox\" id=\"show-usage\" onchange=\"renderActiveChart()\" checked> Est. usage</label></div>"
          "<div class=\"chart-wrap\" id=\"solar-chart-wrap\">"
          "<svg id=\"solar-chart\" class=\"chart-svg\" viewBox=\"0 0 900 340\">"
          "<text x=\"50%\" y=\"50%\" fill=\"var(--muted)\" font-size=\"12\" font-family=\"monospace\""
@@ -2654,10 +2668,10 @@ td .rc-main{font-weight:600}
          "</svg><div id=\"solar-tt\" class=\"chart-tooltip\" style=\"display:none\"></div></div>"
          "<div id=\"chart-legend\" class=\"chart-legend\"></div></div>\n";
 
-    o += "<div class=\"card\"><div class=\"card-title\">Today & Tomorrow (from /api/solar_simulation & /api/solar_forecast)</div>";
-    o += "<table><tr><td>Expected today</td><td id=\"today-wh\">—</td></tr>";
-    o += "<tr><td>Tomorrow</td><td id=\"tomorrow-wh\">—</td></tr>";
-    o += "<tr><td>Battery projection</td><td id=\"bat-proj\">—</td></tr></table></div>";
+    o += "<div class=\"card\"><div class=\"card-title\">Today & Tomorrow</div>";
+    o += "<table><tr><td title=\"Expected solar generation today from simulation model\">Expected today</td><td id=\"today-wh\">—</td></tr>";
+    o += "<tr><td title=\"Predicted generation for tomorrow from weather forecast\">Tomorrow</td><td id=\"tomorrow-wh\">—</td></tr>";
+    o += "<tr><td title=\"Projected battery state at end of day based on current usage and solar\">Battery projection</td><td id=\"bat-proj\">—</td></tr></table></div>";
 
     o += "<div class=\"footer\">Data from OpenWeather 5-day forecast. Cached 30 min. Optimal window = clearest daytime hours. "
          "<button onclick=\"refreshWeather()\" style=\"background:var(--green);color:#fff;border:none;padding:.25rem .7rem;border-radius:4px;cursor:pointer;font-size:.75rem;font-weight:600;vertical-align:middle\">&#8635; Refresh weather</button>"
@@ -3026,8 +3040,9 @@ td .rc-main{font-weight:600}
          "Promise.all([to(base+'/api/solar_forecast_week'+rlQ),to(base+'/api/solar_simulation'),to(base+'/api/solar_forecast')]).then(function(arr){\n"
          "var d=arr[0],sim=arr[1],fore=arr[2];\n"
          "if(!d.valid){$('week-kwh').textContent='—';$('days-full').textContent='—';$('best-day').textContent=d.error||'—';$('daily-table').innerHTML='<tr><td colspan=7 class=warn>'+d.error+'</td></tr>'}else{\n"
-         "$('week-kwh').textContent=fmt(d.week_total_kwh,2)+(d.realistic?(d.realistic_from_history?' (measured taper)':' (default taper)'):'');$('days-full').textContent=d.days_to_full>0?d.days_to_full:'—';$('best-day').textContent=d.best_day?fmtDate(d.best_day):'—';\n"
+         "$('week-kwh').textContent=fmt(d.week_total_kwh,2);$('days-full').textContent=d.days_to_full>0?d.days_to_full:'—';$('best-day').textContent=d.best_day?fmtDate(d.best_day):'—';\n"
          "if(d.solar_perf_coeff>0){var pct=Math.round(d.solar_perf_coeff*100);$('solar-coeff').textContent=pct+'%';$('solar-coeff-detail').textContent=d.solar_perf_samples+' samples (30d)'}else{$('solar-coeff').textContent='—';$('solar-coeff-detail').textContent='collecting data'}\n"
+         "var badge=$('realistic-badge');if(badge){if(d.realistic){badge.style.display='';badge.textContent=d.realistic_from_history?'using measured charge data':'using default LiFePO4 taper'}else{badge.style.display='none'}}\n"
          "var tbody=$('daily-table');if(!d.daily||!d.daily.length){tbody.innerHTML='<tr><td colspan=7 class=dim>No data</td></tr>'}else{lastDailyData=d;if(d.slots)lastSlots=d.slots;var cb=$('show-extended');if(cb)cb.checked=getSetting('show-extended','0')==='1';renderDaily();renderActiveChart();}}\n"
          "$('today-wh').textContent=sim.expected_today_wh>0?fmt(sim.expected_today_wh/1000,2)+' kilowatt-hours':'—';$('tomorrow-wh').textContent=fore.valid?fmt(fore.tomorrow_generation_wh/1000,1)+' kilowatt-hours':'—';$('bat-proj').textContent=sim.battery_projection||fore.expected_battery_state||'—';\n"
          "}).catch(function(err){try{console.error('Solar loadAll failed:',err);}catch(e){}var t=$('daily-table');if(t)t.innerHTML='<tr><td colspan=7 class=warn>Error loading data. Check solar_enabled and weather_api_key in Settings.</td></tr>';$('week-kwh').textContent='—';$('days-full').textContent='—';$('best-day').textContent='—';$('today-wh').textContent='—';$('tomorrow-wh').textContent='—';$('bat-proj').textContent='—'})}\n"
