@@ -91,7 +91,8 @@ void Database::checkpoint() {
     if (rc != SQLITE_OK && rc != SQLITE_BUSY) {
         LOG_WARN("DB: checkpoint: %s", sqlite3_errmsg(db_handle(db_)));
     } else {
-        insert_system_event({std::chrono::system_clock::now(), "Database WAL checkpoint (TRUNCATE) completed"});
+        // We use a internal helper to avoid recursive lock/deadlock
+        insert_system_event_internal({std::chrono::system_clock::now(), "Database WAL checkpoint (TRUNCATE) completed"});
     }
 }
 
@@ -104,7 +105,7 @@ bool Database::migrate() {
     // WAL mode: concurrent readers + writer, faster on flash storage
     if (!exec("PRAGMA journal_mode=WAL;")) return false;
     // EXTRA ensures every commit is durable even if power is lost.
-    if (!exec("PRAGMA synchronous=EXTRA;")) return false;
+    if (!exec("PRAGMA synchronous=NORMAL;")) return false; // NORMAL is best for WAL mode durability/performance balance
     // Use memory for temporary storage to reduce disk churn
     if (!exec("PRAGMA temp_store=MEMORY;")) return false;
     // Enable foreign key constraints
@@ -630,6 +631,10 @@ void Database::insert_charger_batch(const std::vector<PwrGateSnapshot>& batch) {
 
 void Database::insert_system_event(const SystemEvent& e) {
     std::lock_guard<std::mutex> lk(mu_);
+    insert_system_event_internal(e);
+}
+
+void Database::insert_system_event_internal(const SystemEvent& e) {
     if (!db_) return;
 
     auto ts = static_cast<sqlite3_int64>(
@@ -1753,9 +1758,9 @@ bool Database::backup(const std::string& dest_path) {
 
     if (rc != SQLITE_OK) {
         LOG_ERROR("DB: backup failed: %s", sqlite3_errmsg(pDest));
-        insert_system_event({std::chrono::system_clock::now(), "Database backup failed: " + std::string(sqlite3_errmsg(pDest))});
+        insert_system_event_internal({std::chrono::system_clock::now(), "Database backup failed: " + std::string(sqlite3_errmsg(pDest))});
     } else {
-        insert_system_event({std::chrono::system_clock::now(), "Database backup created: " + dest_path});
+        insert_system_event_internal({std::chrono::system_clock::now(), "Database backup created: " + dest_path});
     }
     sqlite3_close(pDest);
 
@@ -1772,7 +1777,7 @@ void Database::cleanup(int max_age_days, int system_event_max_age_days, int ops_
     int64_t threshold = now - (static_cast<int64_t>(max_age_days) * 86400);
 
     LOG_INFO("DB: Starting cleanup (max_age_days=%d, threshold=%lld)", max_age_days, (long long)threshold);
-    insert_system_event({std::chrono::system_clock::now(), "Database cleanup started"});
+    insert_system_event_internal({std::chrono::system_clock::now(), "Database cleanup started"});
 
     // List of tables and their timestamp columns to clean up
     struct CleanupTarget {
@@ -1837,5 +1842,5 @@ void Database::cleanup(int max_age_days, int system_event_max_age_days, int ops_
     // Finally, run an incremental vacuum if enabled, or just checkpoint.
     // Full VACUUM can be slow and block, so we prefer checkpoints and WAL space reuse.
     sqlite3_wal_checkpoint_v2(db, "main", SQLITE_CHECKPOINT_PASSIVE, nullptr, nullptr);
-    insert_system_event({std::chrono::system_clock::now(), "Database cleanup and WAL checkpoint finished"});
+    insert_system_event_internal({std::chrono::system_clock::now(), "Database cleanup and WAL checkpoint finished"});
 }

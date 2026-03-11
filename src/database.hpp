@@ -46,6 +46,7 @@ public:
     void insert_charger(const PwrGateSnapshot& p);
     void insert_charger_batch(const std::vector<PwrGateSnapshot>& batch);
     void insert_system_event(const SystemEvent& e);
+    void insert_system_event_internal(const SystemEvent& e);
     std::vector<SystemEvent> load_system_events(size_t n = 200) const;
 
     void insert_ops_event(const OpsEvent& e);

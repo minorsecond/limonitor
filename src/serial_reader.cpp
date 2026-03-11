@@ -87,31 +87,52 @@ void SerialReader::read_loop() {
     std::string line_buf;
     line_buf.reserve(256);
     std::string pending_status;
-    char rbuf[256];
+    char rbuf[1024];
+    size_t line_len = 0;
+    auto last_log_time = std::chrono::steady_clock::now();
 
     while (running_) {
         ssize_t nr = read(fd_, rbuf, sizeof(rbuf));
         if (nr < 0) {
             if (!running_) break;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
             LOG_WARN("Serial: read error: %s", strerror(errno));
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
         }
-        if (nr == 0) continue;
+        if (nr == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
 
         for (ssize_t i = 0; i < nr; ++i) {
             char c = rbuf[i];
             if (c == '\r') continue;
-            if (c != '\n') { line_buf += c; continue; }
+            if (c != '\n') {
+                if (line_len < 1024) {
+                    line_buf += c;
+                    line_len++;
+                }
+                continue;
+            }
 
             std::string line = std::move(line_buf);
             line_buf.clear();
+            line_len = 0;
 
-            LOG_DEBUG("Serial RX: [%s]", line.c_str());
+            // Throttled debug logging to avoid flooding and thread contention
+            auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_log_time).count() >= 500) {
+                LOG_DEBUG("Serial RX: [%s]", line.c_str());
+                last_log_time = now;
+            }
 
             if (!line.empty() && (line.back() == ':' || line.back() == '?')) {
                 const char* nl = "\r\n";
-                write(fd_, nl, 2);
+                (void)write(fd_, nl, 2);
                 continue;
             }
 

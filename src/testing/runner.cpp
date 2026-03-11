@@ -84,10 +84,11 @@ int64_t TestRunner::start_test(TestType type) {
 void TestRunner::stop_test() {
     if (!running_) return;
     stop_requested_ = true;
+    capture_running_ = false; // Ensure loop exits even if not through finish_test
     if (capture_thread_.joinable()) {
         capture_thread_.join();
     }
-    capture_running_ = false;
+    running_ = false;
 }
 
 TestRunner::ActiveStats TestRunner::active_stats() const {
@@ -119,7 +120,10 @@ void TestRunner::capture_loop() {
         }
         on_telemetry_tick(bat ? &*bat : nullptr, chg ? &*chg : nullptr,
                           load_w, tx_active, tx_power);
-        std::this_thread::sleep_for(std::chrono::seconds(TELEMETRY_INTERVAL_SEC));
+        // Sleep in smaller increments so stop() responds faster
+        for (int i = 0; i < TELEMETRY_INTERVAL_SEC * 10 && capture_running_ && running_; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
     }
 }
 
@@ -238,6 +242,7 @@ void TestRunner::finish_test(const std::string& result, const std::string& metad
     running_ = false;
     current_test_id_ = 0;
     stop_requested_ = false;
+    LOG_INFO("DEBUG: finish_test exit");
 }
 
 static int64_t compute_next_run(const std::string& freq, int hour, int min, int day) {

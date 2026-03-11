@@ -252,56 +252,75 @@ struct BleManager::Impl {
 
     void on_services_resolved() {
         set_state(BleState::DISCOVERING);
-        if (find_characteristics()) {
-            g_dbus_proxy_call(notify_char, "StartNotify",
-                nullptr, G_DBUS_CALL_FLAGS_NONE, 10000, cancel,
-                +[](GObject* src, GAsyncResult* res, gpointer ud) {
-                    GError* e = nullptr;
-                    g_autoptr(GVariant) r = g_dbus_proxy_call_finish(G_DBUS_PROXY(src), res, &e);
-                    auto* self = static_cast<Impl*>(ud);
-                    if (e) {
-                        if (!g_error_matches(e, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
-                            LOG_ERROR("BLE: StartNotify: %s", e->message);
-                            self->schedule_reconnect();
+        LOG_INFO("BLE: services resolved, starting characteristics discovery");
+
+        // Sometimes BlueZ reports services resolved before characteristics are in obj_mgr cache.
+        // Try up to 5 times with a 1s sleep.
+        for (int retry = 0; retry < 5; ++retry) {
+            if (find_characteristics()) {
+                LOG_INFO("BLE: characteristics found, starting notifications");
+                g_dbus_proxy_call(notify_char, "StartNotify",
+                    nullptr, G_DBUS_CALL_FLAGS_NONE, 10000, cancel,
+                    +[](GObject* src, GAsyncResult* res, gpointer ud) {
+                        GError* e = nullptr;
+                        g_autoptr(GVariant) r = g_dbus_proxy_call_finish(G_DBUS_PROXY(src), res, &e);
+                        auto* self = static_cast<Impl*>(ud);
+                        if (e) {
+                            if (!g_error_matches(e, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+                                LOG_ERROR("BLE: StartNotify: %s", e->message);
+                                self->schedule_reconnect();
+                            }
+                            g_error_free(e);
+                        } else {
+                            LOG_INFO("BLE: ready");
+                            self->set_state(BleState::READY);
+                            self->schedule_poll();
                         }
-                        g_error_free(e);
-                    } else {
-                        LOG_INFO("BLE: ready");
-                        self->set_state(BleState::READY);
-                        self->schedule_poll();
-                    }
-                }, this);
-        } else {
-            LOG_ERROR("BLE: characteristics not found");
-            schedule_reconnect(15);
+                    }, this);
+                return;
+            }
+            if (retry < 4) {
+                LOG_INFO("BLE: characteristics not found yet, retrying in 1s... (attempt %d/5)", retry + 1);
+                g_usleep(1000000);
+            }
         }
+
+        LOG_ERROR("BLE: characteristics not found");
+        schedule_reconnect(15);
     }
 
     bool find_characteristics() {
         std::string notify_path, write_path;
+        int char_count = 0;
         GList* objects = g_dbus_object_manager_get_objects(obj_mgr);
         for (GList* l = objects; l; l = l->next) {
             GDBusObject* obj = G_DBUS_OBJECT(l->data);
             const char* path = g_dbus_object_get_object_path(obj);
             if (device_path.empty() || strncmp(path, device_path.c_str(), device_path.size()) != 0)
-                continue; // obj ref owned by list — do NOT unref here
+                continue;
+
             GDBusInterface* iface = g_dbus_object_get_interface(obj, "org.bluez.GattCharacteristic1");
             if (iface) {
+                char_count++;
                 GDBusProxy* proxy = G_DBUS_PROXY(iface);
                 g_autoptr(GVariant) uv = g_dbus_proxy_get_cached_property(proxy, "UUID");
                 std::string uuid = gv_str(uv);
+                LOG_DEBUG("BLE: found char at %s: UUID=%s", path, uuid.c_str());
                 if (uuid == notify_uuid && notify_path.empty())
                     notify_path = path;
                 else if (uuid == write_uuid && write_path.empty())
                     write_path = path;
                 g_object_unref(iface);
             }
-            // obj ref owned by list — do NOT unref here
             if (!notify_path.empty() && !write_path.empty()) break;
         }
         g_list_free_full(objects, g_object_unref);
 
-        if (notify_path.empty() || write_path.empty()) return false;
+        if (notify_path.empty() || write_path.empty()) {
+            LOG_WARN("BLE: find_characteristics failed (found %d chars, notify=%s, write=%s)",
+                     char_count, notify_path.empty() ? "NO" : "YES", write_path.empty() ? "NO" : "YES");
+            return false;
+        }
 
         LOG_INFO("BLE: notify char: %s", notify_path.c_str());
         LOG_INFO("BLE: write  char: %s", write_path.c_str());

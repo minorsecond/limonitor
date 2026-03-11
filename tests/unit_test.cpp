@@ -61,7 +61,10 @@ static std::string http_request(const std::string& host, uint16_t port,
 
     char buf[8192];
     std::string response;
-    while (ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0)) {
+    struct timeval tv{5, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    while (true) {
+        ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
         if (n <= 0) break;
         buf[n] = '\0';
         response += buf;

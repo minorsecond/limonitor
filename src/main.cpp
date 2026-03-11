@@ -675,47 +675,84 @@ int main(int argc, char** argv) {
     // TUI — blocks until 'q' or signal
     if (cfg.daemon_mode) {
         LOG_INFO("Daemon mode: running headless (HTTP on port %d)", cfg.http_port);
-        auto last_checkpoint = std::chrono::steady_clock::now();
-        while (!g_quit) {
-            wait_quit(60);
-            if (db && db->is_open()) {
-                auto now = std::chrono::steady_clock::now();
-                shelly::check_test_conditions(db.get(), store);
-                testing::check_scheduled_tests(db.get(), store, &test_runner);
-                std::string mm = db->get_setting("maintenance_mode");
-                if (mm == "1") {
-                    std::string start_s = db->get_setting("maintenance_start_time");
-                    std::string timeout_s = db->get_setting("maintenance_auto_timeout_minutes");
-                    int timeout_min = 60;
-                    if (!timeout_s.empty()) { try { timeout_min = std::stoi(timeout_s); } catch (...) {} }
-                    if (!start_s.empty() && timeout_min > 0) {
-                        try {
-                            long start_ts = std::stol(start_s);
-                            auto sys_now = std::chrono::system_clock::now();
-                            auto now_ts = std::chrono::system_clock::to_time_t(sys_now);
-                            if (now_ts - start_ts >= timeout_min * 60) {
-                                db->set_setting("maintenance_mode", "0");
-                                db->set_setting("maintenance_end_time", std::to_string(static_cast<long>(now_ts)));
-                                auto snap_opt = store.latest();
-                                auto pg_opt = store.latest_pwrgate();
-                                OpsEvent ev;
-                                ev.timestamp = sys_now;
-                                ev.type = "maintenance_end";
-                                ev.subtype = "maintenance";
-                                ev.message = "Maintenance auto-ended (timeout)";
-                                ev.metadata_json = build_ops_snapshot_json(&snap_opt, &pg_opt);
-                                db->insert_ops_event(ev);
-                                LOG_INFO("Maintenance auto-ended after %d min timeout", timeout_min);
-                            }
-                        } catch (...) {}
+        
+        // Background maintenance thread for heavy DB tasks
+        std::thread maintenance_thread([&]() {
+            auto last_checkpoint = std::chrono::steady_clock::now();
+            auto last_cleanup = std::chrono::steady_clock::now();
+            auto last_backup = std::chrono::steady_clock::now();
+            
+            while (!g_quit) {
+                // Sleep in small increments to be responsive to shutdown
+                for (int i = 0; i < 60 && !g_quit; ++i) {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                }
+                if (g_quit) break;
+
+                if (db && db->is_open()) {
+                    auto now = std::chrono::steady_clock::now();
+                    
+                    // Frequent light maintenance
+                    shelly::check_test_conditions(db.get(), store);
+                    testing::check_scheduled_tests(db.get(), store, &test_runner);
+                    
+                    // Maintenance mode timeout check
+                    std::string mm = db->get_setting("maintenance_mode");
+                    if (mm == "1") {
+                        std::string start_s = db->get_setting("maintenance_start_time");
+                        std::string timeout_s = db->get_setting("maintenance_auto_timeout_minutes");
+                        int timeout_min = 60;
+                        if (!timeout_s.empty()) { try { timeout_min = std::stoi(timeout_s); } catch (...) {} }
+                        if (!start_s.empty() && timeout_min > 0) {
+                            try {
+                                long start_ts = std::stol(start_s);
+                                auto sys_now = std::chrono::system_clock::now();
+                                auto now_ts = std::chrono::system_clock::to_time_t(sys_now);
+                                if (now_ts - start_ts >= timeout_min * 60) {
+                                    db->set_setting("maintenance_mode", "0");
+                                    db->set_setting("maintenance_end_time", std::to_string(static_cast<long>(now_ts)));
+                                    auto snap_opt = store.latest();
+                                    auto pg_opt = store.latest_pwrgate();
+                                    OpsEvent ev;
+                                    ev.timestamp = sys_now;
+                                    ev.type = "maintenance_end";
+                                    ev.subtype = "maintenance";
+                                    ev.message = "Maintenance auto-ended (timeout)";
+                                    ev.metadata_json = build_ops_snapshot_json(&snap_opt, &pg_opt);
+                                    db->insert_ops_event(ev);
+                                    LOG_INFO("Maintenance auto-ended after %d min timeout", timeout_min);
+                                }
+                            } catch (...) {}
+                        }
+                    }
+
+                    // Periodic Checkpoint (every 5 mins)
+                    if (std::chrono::duration_cast<std::chrono::minutes>(now - last_checkpoint).count() >= 5) {
+                        db->checkpoint();
+                        last_checkpoint = now;
+                    }
+
+                    // Daily Cleanup and Backup
+                    if (std::chrono::duration_cast<std::chrono::hours>(now - last_cleanup).count() >= 24) {
+                        db->cleanup(cfg.data_retention_days, cfg.system_event_retention_days, cfg.ops_event_retention_days);
+                        last_cleanup = now;
+                    }
+                    if (std::chrono::duration_cast<std::chrono::hours>(now - last_backup).count() >= 24) {
+                        std::string bkp = db->path() + ".bak";
+                        db->backup(bkp);
+                        last_backup = now;
                     }
                 }
-                if (std::chrono::duration_cast<std::chrono::minutes>(now - last_checkpoint).count() >= 5) {
-                    db->checkpoint();
-                    last_checkpoint = now;
-                }
             }
+            LOG_DEBUG("Maintenance thread exiting");
+        });
+
+        // Main thread just waits for quit signal
+        while (!g_quit) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
+        
+        if (maintenance_thread.joinable()) maintenance_thread.join();
     } else {
         TUI tui(store, cfg.http_port);
         if (ble) {
