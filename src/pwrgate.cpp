@@ -27,7 +27,7 @@ static std::string first_word(const std::string& s) {
     
     // Valid states for EpicPowerGate 2
     static const char* VALID_STATES[] = {
-        "Charging", "Float", "Bulk", "Absorption", "Idle", "Off"
+        "Charging", "Float", "Bulk", "Absorption", "Idle", "Off", "Charged"
     };
     for (const char* valid : VALID_STATES) {
         if (word == valid) return word;
@@ -41,27 +41,30 @@ static std::string first_word(const std::string& s) {
     return word;
 }
 
-static std::string extract_state(const std::string& line) {
-    // Try to find one of the known states anywhere in the line.
+static std::string extract_state(const std::string& line1, const std::string& line2) {
+    // Try to find one of the known states anywhere in either line.
     // They are unique enough words and usually appear at the start of the line or
     // before the first key-value pair.
     static const char* VALID_STATES[] = {
-        "Charging", "Float", "Bulk", "Absorption", "Idle", "Off"
+        "Charging", "Float", "Bulk", "Absorption", "Idle", "Off", "Charged"
     };
 
     for (const char* valid : VALID_STATES) {
-        if (line.find(valid) != std::string::npos) return valid;
+        if (line1.find(valid) != std::string::npos || line2.find(valid) != std::string::npos)
+            return valid;
     }
 
-    // Fallback to first_word logic if no known state found
-    return first_word(line);
+    // Fallback to first_word logic if no known state found in either line
+    std::string w1 = first_word(line1);
+    if (w1 != "Idle") return w1;
+    return first_word(line2);
 }
 
 bool parse(const std::string& s1, const std::string& s2, PwrGateSnapshot& snap) {
     if (s1.find("PS=")      == std::string::npos) return false;
     if (s2.find("TargetV=") == std::string::npos) return false;
 
-    snap.state   = extract_state(s1);
+    snap.state   = extract_state(s1, s2);
     snap.ps_v    = extract_d(s1, "PS");
     snap.sol_v   = extract_d(s1, "Sol");
     snap.minutes = extract_i(s1, "Min");
