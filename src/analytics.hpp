@@ -67,12 +67,27 @@ struct AnalyticsSnapshot {
     double avg_discharge_24h_w{0};      // 24h average discharge (W), 0 = insufficient data
     std::vector<std::string> health_alerts;
 
-    // Self-monitoring
+    // Self-monitoring — process
     int64_t process_rss_kb{0};
     int64_t process_vsz_kb{0};
     double  process_cpu_pct{0};
     int64_t db_size_bytes{0};
     std::vector<std::pair<std::string, int64_t>> db_table_sizes;
+
+    // Self-monitoring — system health
+    double  sys_load_1m{-1};           // 1-min load average (-1 = unavailable)
+    double  sys_load_5m{-1};
+    double  sys_load_15m{-1};
+    int64_t sys_mem_total_kb{0};       // total system RAM
+    int64_t sys_mem_available_kb{0};   // available system RAM
+    int64_t disk_free_bytes{-1};       // free bytes on storage device
+    int64_t disk_total_bytes{-1};      // total bytes on storage device
+    int64_t cpu_freq_mhz{-1};         // current CPU frequency (-1 = unavailable)
+
+    // Self-monitoring — SSD health (via smartctl, cached)
+    int     ssd_wear_pct{-1};          // % used 0–100, -1 = unavailable
+    int64_t ssd_power_on_hours{-1};    // total power-on hours
+    int64_t ssd_data_written_gb{-1};   // total lifetime data written (GB)
 };
 
 // Forward declarations (avoid pulling in full headers)
