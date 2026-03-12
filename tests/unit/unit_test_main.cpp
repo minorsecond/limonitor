@@ -65,6 +65,11 @@ void test_regression_flat();
 void test_runtime_nominal_voltage();
 void test_daily_ci_variance_addition();
 
+void test_sys_load_available();
+void test_sys_mem_total_nonzero();
+void test_disk_free_valid();
+void test_cpu_freq_graceful();
+void test_ssd_metrics_graceful();
 void test_self_monitor_rss_nonzero();
 void test_self_monitor_db_populated();
 void test_analytics_api_self_monitor();
@@ -159,6 +164,11 @@ int main() {
 
     test_runtime_nominal_voltage();
     test_daily_ci_variance_addition();
+    test_sys_load_available();
+    test_sys_mem_total_nonzero();
+    test_disk_free_valid();
+    test_cpu_freq_graceful();
+    test_ssd_metrics_graceful();
     test_self_monitor_rss_nonzero();
     test_self_monitor_db_populated();
     printf("PASS: Misc analytics\n");

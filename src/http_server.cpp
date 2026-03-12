@@ -860,19 +860,12 @@ void HttpServer::handle(int fd) {
             send_response(fd, 200, "application/json", "{\"running\":false}\n");
         } else {
             auto st = test_runner_->active_stats();
-            auto bat = store_.latest();
-            auto chg = store_.latest_pwrgate();
-            double v = bat && bat->valid ? bat->total_voltage_v : 0;
-            double a = bat && bat->valid ? bat->current_a : 0;
-            double soc = bat && bat->valid ? bat->soc_pct : 0;
-            double load = bat && bat->valid && bat->current_a > 0
-                ? (bat->power_w > 0 ? bat->power_w : bat->total_voltage_v * bat->current_a) : 0;
-            double v_start = st.voltage_at_start > 0 ? st.voltage_at_start : v;
-            double v_min = v;
-            if (db_) {
-                double dbmin = db_->get_test_min_voltage(st.test_id);
-                if (dbmin > 0) v_min = dbmin;
-            }
+            double v = st.battery_voltage;
+            double a = st.battery_current;
+            double soc = st.battery_soc;
+            double load = st.load_power;
+            double v_start = st.voltage_at_start;
+            double v_min = st.min_voltage_seen;
             double sag = (v_start > 0 && v_min > 0 && v_start > v_min) ? (v_start - v_min) : 0;
             char buf[384];
             std::snprintf(buf, sizeof(buf),
@@ -881,7 +874,6 @@ void HttpServer::handle(int fd) {
                 "\"energy_delivered_wh\":%.1f,\"voltage_sag\":%.2f}\n",
                 (long long)st.test_id, st.test_type.c_str(), (long long)st.start_time, st.duration_seconds,
                 v, a, soc, load, st.energy_delivered_wh, sag);
-            (void)chg;
             send_response(fd, 200, "application/json", buf);
         }
     } else if (path == "/api/battery/health" || path == "/api/battery/diagnostics") {
@@ -1459,6 +1451,17 @@ std::string HttpServer::analytics_json(const AnalyticsSnapshot& a,
         o += jstr(a.db_table_sizes[i].first) + ":" + std::to_string(a.db_table_sizes[i].second);
     }
     o += "}";
+    o += ",\n  \"sys_load_1m\": "          + jdbl(a.sys_load_1m, 2);
+    o += ",\n  \"sys_load_5m\": "          + jdbl(a.sys_load_5m, 2);
+    o += ",\n  \"sys_load_15m\": "         + jdbl(a.sys_load_15m, 2);
+    o += ",\n  \"sys_mem_total_kb\": "     + std::to_string(a.sys_mem_total_kb);
+    o += ",\n  \"sys_mem_available_kb\": " + std::to_string(a.sys_mem_available_kb);
+    o += ",\n  \"disk_free_bytes\": "      + std::to_string(a.disk_free_bytes);
+    o += ",\n  \"disk_total_bytes\": "     + std::to_string(a.disk_total_bytes);
+    o += ",\n  \"cpu_freq_mhz\": "         + std::to_string(a.cpu_freq_mhz);
+    o += ",\n  \"ssd_wear_pct\": "         + std::to_string(a.ssd_wear_pct);
+    o += ",\n  \"ssd_power_on_hours\": "   + std::to_string(a.ssd_power_on_hours);
+    o += ",\n  \"ssd_data_written_gb\": "  + std::to_string(a.ssd_data_written_gb);
     if (store) {
         auto now_s = std::chrono::steady_clock::now();
         auto uptime = std::chrono::duration_cast<std::chrono::seconds>(
@@ -4481,10 +4484,17 @@ h1{font-size:1.25rem;color:var(--green);margin-bottom:.75rem}
 <table style="width:100%;border-collapse:collapse;font-size:.85rem">
 <tr><td style="color:var(--muted);padding:.2rem 0">Server CPU</td><td id="diag-cpu" style="text-align:right">—</td></tr>
 <tr><td style="color:var(--muted);padding:.2rem 0">Server RAM</td><td id="diag-mem" style="text-align:right">—</td></tr>
+<tr><td style="color:var(--muted);padding:.2rem 0">System RAM</td><td id="diag-sys-mem" style="text-align:right">—</td></tr>
+<tr><td style="color:var(--muted);padding:.2rem 0">Load Average</td><td id="diag-load" style="text-align:right">—</td></tr>
+<tr><td style="color:var(--muted);padding:.2rem 0">CPU Frequency</td><td id="diag-cpufreq" style="text-align:right">—</td></tr>
 <tr><td style="color:var(--muted);padding:.2rem 0">UI Latency</td><td id="diag-lat" style="text-align:right">—</td></tr>
 <tr><td style="color:var(--muted);padding:.2rem 0">Uptime</td><td id="diag-uptime" style="text-align:right">—</td></tr>
+<tr><td style="color:var(--muted);padding:.2rem 0">Disk Free</td><td id="diag-disk" style="text-align:right">—</td></tr>
 <tr><td style="color:var(--muted);padding:.2rem 0">Database File</td><td id="diag-db-size" style="text-align:right">—</td></tr>
 <tr><td style="color:var(--muted);padding:.2rem 0;vertical-align:top">Table Row Counts</td><td id="diag-db-tables" style="text-align:right;font-size:.78rem;line-height:1.5">—</td></tr>
+<tr><td style="color:var(--muted);padding:.2rem 0">SSD Wear</td><td id="diag-ssd-wear" style="text-align:right">—</td></tr>
+<tr><td style="color:var(--muted);padding:.2rem 0">SSD Power-On</td><td id="diag-ssd-hours" style="text-align:right">—</td></tr>
+<tr><td style="color:var(--muted);padding:.2rem 0">SSD Written</td><td id="diag-ssd-written" style="text-align:right">—</td></tr>
 </table>
 </div>
 <div class="ops-card">

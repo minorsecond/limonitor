@@ -550,6 +550,30 @@ int main(int argc, char** argv) {
     // Test runner for battery/system testing
     testing::TestRunner test_runner(store, db->is_open() ? db.get() : nullptr);
 
+    // Register test runner as store observer for live telemetry
+    store.on_update([&test_runner, &store](const BatterySnapshot& bat) {
+        if (test_runner.is_running()) {
+            auto chg = store.latest_pwrgate();
+            double load_w = bat.valid && bat.current_a > 0
+                ? (bat.power_w > 0 ? bat.power_w : bat.total_voltage_v * bat.current_a)
+                : 0;
+            
+            // Check for radio TX in recent events
+            bool tx_active = false;
+            double tx_power = 0;
+            auto tx_evs = store.tx_events(5);
+            for (const auto& e : tx_evs) {
+                if (e.peak_current > 0.5) { 
+                    tx_active = true; 
+                    tx_power = e.peak_power; 
+                    break; 
+                }
+            }
+
+            test_runner.on_telemetry_tick(&bat, chg ? &*chg : nullptr, load_w, tx_active, tx_power);
+        }
+    });
+
     // HTTP server (pass db for settings persistence; works even when db->open() failed, via file fallback)
     HttpServer http(store, db.get(), cfg.http_bind, cfg.http_port, cfg.poll_interval_s, &test_runner);
     if (!http.start()) {
