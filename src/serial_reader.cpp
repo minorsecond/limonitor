@@ -11,7 +11,8 @@
 #include <unistd.h>
 #ifdef __linux__
 #include <linux/usbdevice_fs.h>
-#include <stdlib.h>  // realpath
+#include <cstdlib>   // realpath
+#include <climits>   // PATH_MAX
 #endif
 
 // ---------------------------------------------------------------------------
