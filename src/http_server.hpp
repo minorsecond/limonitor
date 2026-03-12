@@ -70,7 +70,8 @@ private:
     static std::string tx_events_json(const std::vector<TxEvent>& events);
     static std::string system_events_json(const std::vector<SystemEvent>& events);
     static std::string analytics_json(const AnalyticsSnapshot& a,
-                                      const DataStore* store = nullptr);
+                                      const DataStore* store = nullptr,
+                                      Database* db = nullptr);
     static std::string anomalies_json(const std::vector<AnomalyEvent>& anomalies);
     static std::string solar_simulation_json(const SolarSimResult& r);
     static std::string battery_resistance_json(double mohm, const std::string& trend,

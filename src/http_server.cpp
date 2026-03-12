@@ -792,7 +792,7 @@ void HttpServer::handle(int fd) {
             }
         }
         send_response(fd, 200, "application/json",
-                      analytics_json(an, &store_));
+                      analytics_json(an, &store_, db_));
     } else if (path == "/api/events") {
         size_t count = 50;
         auto ni = query.find("n=");
@@ -1406,7 +1406,8 @@ std::string HttpServer::maintenance_status_json(Database* db) {
 }
 
 std::string HttpServer::analytics_json(const AnalyticsSnapshot& a,
-                                       const DataStore* store) {
+                                       const DataStore* store,
+                                       Database* db) {
     std::string o;
     o.reserve(4096);
     o += "{\n";
@@ -1510,11 +1511,23 @@ std::string HttpServer::analytics_json(const AnalyticsSnapshot& a,
         // System load calibration — runtime estimates from user's measured component data
         const auto& slc = store->system_load_config();
         if (!slc.empty()) {
-            // Find the first component with TX levels (radio)
+            // Active TX selection from DB settings (defaults to first component with TX, level 0)
             int tx_comp = -1;
-            int tx_level = 1;  // default to second level (10W RF) if available
-            for (int ci = 0; ci < static_cast<int>(slc.components.size()); ++ci) {
-                if (!slc.components[ci].tx_levels.empty()) { tx_comp = ci; break; }
+            int tx_level = 0;
+            if (db) {
+                std::string sc = db->get_setting("active_tx_comp_idx");
+                std::string sl = db->get_setting("active_tx_level_idx");
+                if (!sc.empty()) { try { tx_comp  = std::stoi(sc); } catch (...) {} }
+                if (!sl.empty()) { try { tx_level = std::stoi(sl); } catch (...) {} }
+            }
+            // Validate; if invalid, fall back to first component with TX levels
+            if (tx_comp < 0 || tx_comp >= static_cast<int>(slc.components.size()) ||
+                slc.components[tx_comp].tx_levels.empty()) {
+                tx_comp = -1;
+                for (int ci = 0; ci < static_cast<int>(slc.components.size()); ++ci) {
+                    if (!slc.components[ci].tx_levels.empty()) { tx_comp = ci; break; }
+                }
+                tx_level = 0;
             }
             if (tx_comp >= 0 && tx_level >= static_cast<int>(slc.components[tx_comp].tx_levels.size()))
                 tx_level = 0;
@@ -1531,19 +1544,28 @@ std::string HttpServer::analytics_json(const AnalyticsSnapshot& a,
                 if (usable_wh < 0) usable_wh = 0;
             }
 
-            double rx_h   = slc.runtime_receive_h(usable_wh);
-            double tx10_h = (tx_comp >= 0) ? slc.runtime_with_tx_h(usable_wh, 10.0, tx_comp, tx_level) : 0;
+            double rx_h  = slc.runtime_receive_h(usable_wh);
+            double tx_h  = (tx_comp >= 0) ? slc.runtime_with_tx_h(usable_wh, 10.0, tx_comp, tx_level) : 0;
             std::string tx_label = (tx_comp >= 0)
                 ? slc.components[tx_comp].tx_levels[tx_level].label : "";
+            // Total system watts during active TX level (radio-only + rest of system idle)
+            double total_tx_w = 0;
+            if (tx_comp >= 0) {
+                const auto& tc = slc.components[tx_comp];
+                total_tx_w = slc.total_idle_w() - tc.idle_w + tc.tx_levels[tx_level].dc_in_w;
+            }
 
             o += ",\n  \"system_load\": {";
             o += "\n    \"total_idle_w\": " + jdbl(slc.total_idle_w(), 2);
             o += ",\n    \"total_idle_a\": " + jdbl(slc.total_idle_a(), 3);
             o += ",\n    \"runtime_receive_h\": " + jdbl(rx_h, 1);
             o += ",\n    \"runtime_receive_d\": " + jdbl(rx_h / 24.0, 2);
-            o += ",\n    \"runtime_tx10_h\": " + jdbl(tx10_h, 1);
-            o += ",\n    \"runtime_tx10_d\": " + jdbl(tx10_h / 24.0, 2);
+            o += ",\n    \"runtime_tx_h\": " + jdbl(tx_h, 1);
+            o += ",\n    \"runtime_tx_d\": " + jdbl(tx_h / 24.0, 2);
             o += ",\n    \"tx_label\": " + jstr(tx_label);
+            o += ",\n    \"total_tx_w\": " + jdbl(total_tx_w, 1);
+            o += ",\n    \"active_tx_comp\": " + std::to_string(tx_comp);
+            o += ",\n    \"active_tx_level\": " + std::to_string(tx_level);
             o += ",\n    \"usable_wh\": " + jdbl(usable_wh, 0);
             o += "\n  }";
         }
@@ -5081,10 +5103,16 @@ h1{font-size:1.35rem;font-weight:600;color:var(--green);margin-bottom:.25rem}
 
 <div id="tab-components" class="tab-panel">
 )HTML";
-    // Inject current system load config as JSON for the tab's JS
+    // Inject current system load config and active TX selection
     {
         auto slc = db ? db->get_system_load_config() : SystemLoadConfig::default_config();
-        o += "<script>var initSysLoad=" + slc.to_json() + ";</script>\n";
+        std::string act_comp = db ? db->get_setting("active_tx_comp_idx") : "";
+        std::string act_lvl  = db ? db->get_setting("active_tx_level_idx") : "";
+        if (act_comp.empty()) act_comp = "-1";
+        if (act_lvl.empty())  act_lvl  = "0";
+        o += "<script>var initSysLoad=" + slc.to_json() + ";"
+             "var initActiveTxComp=" + act_comp + ";"
+             "var initActiveTxLevel=" + act_lvl + ";</script>\n";
     }
     o += R"HTML(
 <div class="card">
@@ -5159,24 +5187,26 @@ function renderComponents(){
       +'</div>';
     // TX levels table
     if(c.tx_levels&&c.tx_levels.length>0){
-      var totalIdleOther=totalIdleW()-c.idle_w;
+      var nonRadioIdle=totalIdleW()-c.idle_w;
       var tbl='<table style="width:100%;margin-top:.6rem;font-size:.8rem;border-collapse:collapse">'
         +'<thead><tr style="color:var(--muted)">'
         +'<th style="text-align:left;padding:.2rem .4rem">Level</th>'
         +'<th style="text-align:right;padding:.2rem .4rem">RF out</th>'
-        +'<th style="text-align:right;padding:.2rem .4rem">System A</th>'
-        +'<th style="text-align:right;padding:.2rem .4rem">System W</th>'
-        +'<th style="text-align:right;padding:.2rem .4rem">Radio eff.</th>'
+        +'<th style="text-align:right;padding:.2rem .4rem">Radio A</th>'
+        +'<th style="text-align:right;padding:.2rem .4rem">Radio W</th>'
+        +'<th style="text-align:right;padding:.2rem .4rem">Total W</th>'
+        +'<th style="text-align:right;padding:.2rem .4rem">Eff.</th>'
         +'<th style="width:2rem"></th>'
         +'</tr></thead><tbody>';
       c.tx_levels.forEach(function(tx,ti){
-        var radioDC=tx.dc_in_w-totalIdleOther;
-        var eff=radioDC>0.01?(tx.rf_out_w/radioDC*100):0;
+        var eff=tx.dc_in_w>0.01?(tx.rf_out_w/tx.dc_in_w*100):0;
+        var totalW=nonRadioIdle+tx.dc_in_w;
         tbl+='<tr style="border-top:1px solid var(--border)">'
           +'<td style="padding:.2rem .4rem">'+escH(tx.label)+'</td>'
           +'<td style="text-align:right;padding:.2rem .4rem">'+tx.rf_out_w.toFixed(0)+' W</td>'
-          +'<td style="text-align:right;padding:.2rem .4rem">'+tx.dc_in_a.toFixed(1)+' A</td>'
+          +'<td style="text-align:right;padding:.2rem .4rem">'+tx.dc_in_a.toFixed(2)+' A</td>'
           +'<td style="text-align:right;padding:.2rem .4rem">'+tx.dc_in_w.toFixed(1)+' W</td>'
+          +'<td style="text-align:right;padding:.2rem .4rem;color:var(--muted)">'+totalW.toFixed(1)+' W</td>'
           +'<td style="text-align:right;padding:.2rem .4rem">'+eff.toFixed(1)+'%</td>'
           +'<td style="text-align:center;padding:.2rem">'
           +'<button type="button" class="btn btn-sm" style="padding:.15rem .4rem;font-size:.7rem" onclick="editTxLevel('+ci+','+ti+')">&#x270F;</button>'
@@ -5211,18 +5241,22 @@ function updateSummary(){
 
 function buildTxLevelSel(){
   var sel=document.getElementById('tx-level-sel');
+  var prev=sel.value;
   sel.innerHTML='';
   var found=false;
   (sysLoad.components||[]).forEach(function(c,ci){
     (c.tx_levels||[]).forEach(function(tx,ti){
       var o=document.createElement('option');
       o.value=ci+':'+ti;
-      o.textContent=c.name+' — '+tx.label+' ('+tx.dc_in_w.toFixed(1)+'W total)';
+      var nonRadioIdle=totalIdleW()-c.idle_w;
+      var totalW=(nonRadioIdle+tx.dc_in_w).toFixed(1);
+      o.textContent=c.name+' \u2014 '+tx.label+' ('+tx.rf_out_w.toFixed(0)+'W RF \u2192 '+totalW+'W system)';
       sel.appendChild(o);
       found=true;
     });
   });
   if(!found){var o=document.createElement('option');o.value='';o.textContent='No TX levels defined';sel.appendChild(o);}
+  if(prev)sel.value=prev;
 }
 
 function updateRtEstimates(){
@@ -5239,17 +5273,17 @@ function computeRt(){
   fetch('/api/analytics').then(function(r){return r.json()}).then(function(d){
     var sl=d.system_load;
     var rxH=sl?sl.runtime_receive_h:0;
-    var txH=sl?sl.runtime_tx10_h:0;
+    var txH=sl?sl.runtime_tx_h:0;
     var txLbl=sl?sl.tx_label:'';
+    var totalTxW=sl?sl.total_tx_w:0;
     var html='<div><span class="hint">Receive only</span><br><strong>'+
       (rxH>0?rxH.toFixed(1)+'h':'—')+'</strong>'+(rxH>0?' / '+(rxH/24).toFixed(1)+'d':'')+'</div>';
     if(txH>0)html+='<div><span class="hint">10% TX @ '+escH(txLbl)+'</span><br><strong>'+
-      txH.toFixed(1)+'h</strong> / '+(txH/24).toFixed(1)+'d</div>';
-    html+='<div><span class="hint" style="display:block">Idle: '+idleW.toFixed(2)+'W</span>'
-      +'<span class="hint">'+totalIdleA().toFixed(3)+'A</span></div>';
+      txH.toFixed(1)+'h</strong> / '+(txH/24).toFixed(1)+'d'
+      +(totalTxW>0?' <span class="hint">('+totalTxW.toFixed(1)+'W system)</span>':'')+'</div>';
+    html+='<div><span class="hint" style="display:block">Idle: '+idleW.toFixed(2)+'W / '+totalIdleA().toFixed(3)+'A</span></div>';
     div.innerHTML=html;
   }).catch(function(){
-    // Offline calc without real SoC
     var idleW=totalIdleW();
     div.innerHTML='<div><span class="hint">Idle load</span><br><strong>'+idleW.toFixed(2)+' W</strong></div>';
   });
@@ -5290,8 +5324,8 @@ function addTxLevel(ci){
   var label=prompt('TX level label (e.g. "10W RF"):','');
   if(!label)return;
   var rfOut=parseFloat(prompt('RF output (W):','10')||'10');
-  var dcA=parseFloat(prompt('Total system current during TX (A):','5')||'5');
-  var dcW=parseFloat(prompt('Total system power during TX (W):','68.6')||'68.6');
+  var dcA=parseFloat(prompt('Radio DC amps during TX\n(radio only — not including Pi, PwrGate, etc.):','4.7')||'4.7');
+  var dcW=parseFloat(prompt('Radio DC watts during TX\n(radio only — not including Pi, PwrGate, etc.):','62.6')||'62.6');
   sysLoad.components[ci].tx_levels.push({label:label,rf_out_w:rfOut,dc_in_a:dcA,dc_in_w:dcW});
   renderComponents();
 }
@@ -5300,20 +5334,42 @@ function editTxLevel(ci,ti){
   var tx=sysLoad.components[ci].tx_levels[ti];
   var label=prompt('Label:',tx.label)||tx.label;
   var rfOut=parseFloat(prompt('RF output (W):',tx.rf_out_w)||String(tx.rf_out_w));
-  var dcA=parseFloat(prompt('Total system amps during TX:',tx.dc_in_a)||String(tx.dc_in_a));
-  var dcW=parseFloat(prompt('Total system watts during TX:',tx.dc_in_w)||String(tx.dc_in_w));
+  var dcA=parseFloat(prompt('Radio DC amps during TX\n(radio only — not including Pi, PwrGate, etc.):',tx.dc_in_a)||String(tx.dc_in_a));
+  var dcW=parseFloat(prompt('Radio DC watts during TX\n(radio only — not including Pi, PwrGate, etc.):',tx.dc_in_w)||String(tx.dc_in_w));
   sysLoad.components[ci].tx_levels[ti]={label:label,rf_out_w:rfOut,dc_in_a:dcA,dc_in_w:dcW};
   renderComponents();
 }
 
 function saveComponents(){
+  var sel=document.getElementById('tx-level-sel');
+  var activeParts=(sel&&sel.value)?sel.value.split(':'):[];
+  var activeTxComp=activeParts.length===2?activeParts[0]:'-1';
+  var activeTxLevel=activeParts.length===2?activeParts[1]:'0';
+  // Save component config
   fetch('/api/system_load',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(sysLoad)})
-  .then(function(r){if(r.ok){var m=document.getElementById('comp-msg');if(m){m.textContent='Saved.';m.className='msg'}}else{throw new Error()}})
+  .then(function(r){
+    if(!r.ok)throw new Error();
+    // Save active TX level selection to settings
+    return fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({active_tx_comp_idx:activeTxComp,active_tx_level_idx:activeTxLevel})});
+  })
+  .then(function(r){
+    var m=document.getElementById('comp-msg');
+    if(m){m.textContent='Saved.';m.className='msg'}
+  })
   .catch(function(){var m=document.getElementById('comp-msg');if(m){m.textContent='Save failed.';m.className='msg err'}});
 }
 
 // Init
 renderComponents();
+// Restore active TX level selection
+(function(){
+  var sel=document.getElementById('tx-level-sel');
+  if(sel&&initActiveTxComp>=0){
+    var v=initActiveTxComp+':'+initActiveTxLevel;
+    for(var i=0;i<sel.options.length;i++){if(sel.options[i].value===v){sel.value=v;break;}}
+  }
+})();
 </script>
 <script>
 (function(){var n=document.querySelectorAll('nav a[href^="/"]');for(var i=0;i<n.length;i++){n[i].addEventListener('click',function(e){if(e.ctrlKey||e.metaKey||e.shiftKey)return;var h=this.getAttribute('href');if(!h)return;e.preventDefault();location.href=h})}})();

@@ -3,16 +3,16 @@
 #include <vector>
 
 // One TX power level for a transmitting component (e.g. a radio)
-// dc_in_a / dc_in_w store the TOTAL SYSTEM draw from the battery during TX.
+// dc_in_a / dc_in_w store the RADIO'S OWN DC draw during TX (not total system).
+// The app adds back the rest of system idle to compute total draw.
 struct TxLevel {
     std::string label;      // "5W RF", "10W RF", "55W RF"
     double rf_out_w{0};     // RF output power (watts)
-    double dc_in_a{0};      // Total system DC amps from battery during TX (measured)
-    double dc_in_w{0};      // Total system DC watts from battery during TX (measured)
+    double dc_in_a{0};      // Radio's own DC amps during TX (measured, not including Pi/PwrGate)
+    double dc_in_w{0};      // Radio's own DC watts during TX (measured, not including Pi/PwrGate)
 
-    // Radio efficiency: RF out / (total_tx_draw - other_system_idle)
-    // base_idle_w = total_idle_w of all OTHER components (not this one)
-    double efficiency_pct(double base_idle_w = 0.0) const;
+    // Radio efficiency: RF out / radio DC in (dc_in_w is already radio-only)
+    double efficiency_pct() const;
 };
 
 // A named system component (PwrGate, Pi, radio, …)
@@ -36,7 +36,8 @@ struct SystemLoadConfig {
     // Effective average load given TX duty cycle at one specific TX level.
     //   comp_idx  — index into components[] that has TX levels (-1 = no TX)
     //   level_idx — which TxLevel in that component (0-based)
-    // Formula: total_idle_w * (1 - duty/100) + tx_dc_in_w * (duty/100)
+    // Formula: total_idle_w * (1 - duty/100) + total_tx_system_w * (duty/100)
+    // where total_tx_system_w = total_idle_w - comp.idle_w + tx.dc_in_w
     double effective_load_w(double tx_duty_pct,
                             int comp_idx = -1,
                             int level_idx = 0) const;

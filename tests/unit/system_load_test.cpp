@@ -9,37 +9,35 @@
 void test_tx_level_efficiency_basic() {
     TxLevel tx;
     tx.rf_out_w = 10.0;
-    tx.dc_in_w  = 68.6;
-    // base_idle_w = total_system_idle - radio_idle = (0.55 + 5.45) = 6.0
-    double base = 6.0;
-    double eff = tx.efficiency_pct(base);
-    // radio_dc = 68.6 - 6.0 = 62.6; eff = 10/62.6*100 = 15.97%
+    tx.dc_in_w  = 62.6;  // radio-only DC watts (not total system)
+    double eff = tx.efficiency_pct();
+    // eff = 10/62.6*100 = 15.97%
     ASSERT(approx_eq(eff, 15.97, 0.1), "10W RF efficiency ~16%");
 }
 
 void test_tx_level_efficiency_zero_base() {
     TxLevel tx;
     tx.rf_out_w = 5.0;
-    tx.dc_in_w  = 50.2;
-    double eff = tx.efficiency_pct(0.0);
-    // radio_dc = 50.2; eff = 5/50.2*100 = 9.96%
-    ASSERT(approx_eq(eff, 9.96, 0.1), "5W RF efficiency with zero base ~10%");
+    tx.dc_in_w  = 50.2;  // radio-only; eff = 5/50.2*100 = 9.96%
+    double eff = tx.efficiency_pct();
+    ASSERT(approx_eq(eff, 9.96, 0.1), "5W RF efficiency ~10%");
 }
 
 void test_tx_level_efficiency_zero_draw() {
     TxLevel tx;
     tx.rf_out_w = 5.0;
     tx.dc_in_w  = 0.0;
-    double eff = tx.efficiency_pct(0.0);
+    double eff = tx.efficiency_pct();
     ASSERT(approx_eq(eff, 0.0), "Zero draw returns 0% efficiency");
 }
 
 void test_tx_level_efficiency_larger_base_than_draw() {
+    // Tests near-zero dc_in_w returns 0 (renamed from "larger base than draw")
     TxLevel tx;
     tx.rf_out_w = 5.0;
-    tx.dc_in_w  = 3.0;  // shouldn't happen, but should not crash
-    double eff = tx.efficiency_pct(6.0);  // base > dc_in_w
-    ASSERT(approx_eq(eff, 0.0), "Base larger than draw returns 0%");
+    tx.dc_in_w  = 0.005;  // below 0.01 threshold
+    double eff = tx.efficiency_pct();
+    ASSERT(approx_eq(eff, 0.0), "Near-zero draw returns 0%");
 }
 
 // ─── SystemLoadConfig totals ─────────────────────────────────────────────────
@@ -246,7 +244,8 @@ void test_default_config_radio_tx_levels() {
     // Radio is the last component (idx 2)
     ASSERT(cfg.components[2].tx_levels.size() == 3, "Radio has 3 TX levels");
     ASSERT(approx_eq(cfg.components[2].tx_levels[1].rf_out_w, 10.0, 0.01), "10W RF output");
-    ASSERT(approx_eq(cfg.components[2].tx_levels[1].dc_in_w, 68.6, 0.01), "10W RF dc_in_w");
+    // dc_in_w is radio-only: 68.6W total - 6.0W non-radio idle = 62.6W
+    ASSERT(approx_eq(cfg.components[2].tx_levels[1].dc_in_w, 62.6, 0.01), "10W RF dc_in_w (radio-only)");
 }
 
 void test_default_config_not_empty() {

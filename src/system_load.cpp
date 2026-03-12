@@ -164,10 +164,9 @@ static std::string extract_array_field(const std::string& obj, const std::string
 
 // ─── TxLevel ────────────────────────────────────────────────────────────────
 
-double TxLevel::efficiency_pct(double base_idle_w) const {
-    double radio_dc = dc_in_w - base_idle_w;
-    if (radio_dc < 0.01) return 0.0;
-    return (rf_out_w / radio_dc) * 100.0;
+double TxLevel::efficiency_pct() const {
+    if (dc_in_w < 0.01) return 0.0;
+    return (rf_out_w / dc_in_w) * 100.0;
 }
 
 // ─── SystemLoadConfig ───────────────────────────────────────────────────────
@@ -192,8 +191,10 @@ double SystemLoadConfig::effective_load_w(double tx_duty_pct,
     const auto& comp = components[comp_idx];
     if (level_idx < 0 || level_idx >= static_cast<int>(comp.tx_levels.size())) return idle;
     double duty = std::max(0.0, std::min(100.0, tx_duty_pct)) / 100.0;
-    double tx_dc_w = comp.tx_levels[level_idx].dc_in_w;
-    return idle * (1.0 - duty) + tx_dc_w * duty;
+    // dc_in_w is radio-only; add back non-radio system idle to get total TX draw
+    double radio_dc_w = comp.tx_levels[level_idx].dc_in_w;
+    double total_tx_w = idle - comp.idle_w + radio_dc_w;
+    return idle * (1.0 - duty) + total_tx_w * duty;
 }
 
 double SystemLoadConfig::runtime_receive_h(double usable_wh) const {
@@ -273,9 +274,10 @@ SystemLoadConfig SystemLoadConfig::default_config() {
     //   PwrGate standby:           0.042 A /  0.55 W
     //   Pi on (no radio):          0.455 A /  6.00 W  → Pi delta: 0.413 A / 5.45 W
     //   Pi + radio receive:        0.745 A /  9.80 W  → Radio delta: 0.290 A / 3.80 W
-    //   TX  5W RF total system:    3.800 A / 50.20 W
-    //   TX 10W RF total system:    5.200 A / 68.60 W
-    //   TX 55W RF total system:   >10.0 A / >132.0 W (estimated)
+    //   Non-radio system idle:     0.455 A /  6.00 W  (PwrGate + Pi)
+    //   TX  5W RF radio-only:      3.345 A / 44.20 W  (total - non-radio: 3.8 - 0.455, 50.2 - 6.0)
+    //   TX 10W RF radio-only:      4.745 A / 62.60 W  (5.2 - 0.455, 68.6 - 6.0)
+    //   TX 55W RF radio-only:      9.545 A /126.00 W  (estimated: 10.0 - 0.455, 132.0 - 6.0)
 
     SystemComponent pwrgate;
     pwrgate.name    = "PwrGate EPG2";
@@ -300,20 +302,20 @@ SystemLoadConfig SystemLoadConfig::default_config() {
     TxLevel tx5;
     tx5.label    = "5W RF";
     tx5.rf_out_w = 5.0;
-    tx5.dc_in_a  = 3.8;    // total system amps during TX
-    tx5.dc_in_w  = 50.2;   // total system watts during TX
+    tx5.dc_in_a  = 3.345;   // radio-only amps during TX (measured 3.8A - 0.455A non-radio)
+    tx5.dc_in_w  = 44.2;    // radio-only watts during TX (measured 50.2W - 6.0W non-radio)
 
     TxLevel tx10;
     tx10.label    = "10W RF";
     tx10.rf_out_w = 10.0;
-    tx10.dc_in_a  = 5.2;
-    tx10.dc_in_w  = 68.6;
+    tx10.dc_in_a  = 4.745;  // radio-only (5.2 - 0.455)
+    tx10.dc_in_w  = 62.6;   // radio-only (68.6 - 6.0)
 
     TxLevel tx55;
     tx55.label    = "55W RF";
     tx55.rf_out_w = 55.0;
-    tx55.dc_in_a  = 10.0;   // estimated (OL on meter)
-    tx55.dc_in_w  = 132.0;  // estimated
+    tx55.dc_in_a  = 9.545;  // estimated radio-only (10.0 - 0.455)
+    tx55.dc_in_w  = 126.0;  // estimated radio-only (132.0 - 6.0)
 
     radio.tx_levels = {tx5, tx10, tx55};
     cfg.components.push_back(std::move(radio));

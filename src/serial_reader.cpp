@@ -149,6 +149,36 @@ void SerialReader::read_loop() {
     size_t line_len = 0;
     auto last_log_time = std::chrono::steady_clock::now();
     bool reconfigure_sent = false; // send 'S' at most once per session
+    int consecutive_errors = 0;
+
+    // Helper: close and reopen the port, re-send DTR wake pulse
+    auto reconnect = [&]() -> bool {
+        LOG_INFO("Serial: reconnecting to %s...", device_.c_str());
+        close(fd_);
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        fd_ = open_port();
+        if (fd_ < 0) {
+            LOG_WARN("Serial: reconnect to %s failed, retrying in 30s", device_.c_str());
+            std::this_thread::sleep_for(std::chrono::seconds(30));
+            return false;
+        }
+        // Re-send DTR wake pulse on reconnect
+        int modem = 0;
+        ioctl(fd_, TIOCMGET, &modem);
+        modem &= ~(TIOCM_DTR | TIOCM_RTS);
+        ioctl(fd_, TIOCMSET, &modem);
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        tcflush(fd_, TCIFLUSH);
+        modem |= (TIOCM_DTR | TIOCM_RTS);
+        ioctl(fd_, TIOCMSET, &modem);
+        consecutive_errors = 0;
+        reconfigure_sent = false;
+        line_buf.clear();
+        line_len = 0;
+        pending_status.clear();
+        LOG_INFO("Serial: reconnected to %s", device_.c_str());
+        return true;
+    };
 
     // Returns true if the line is a prompt that was handled (caller should not
     // process it further as streaming data).
@@ -168,10 +198,12 @@ void SerialReader::read_loop() {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
             }
-            LOG_WARN("Serial: read error: %s", strerror(errno));
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            LOG_WARN("Serial: read error on %s: %s", device_.c_str(), strerror(errno));
+            if (++consecutive_errors >= 5) reconnect();
+            else std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
         }
+        consecutive_errors = 0;
         if (nr == 0) {
             // Device stopped sending. If we have an unterminated 'S'-menu prompt
             // in line_buf (these never end with '\n'), respond to it now.
