@@ -4578,12 +4578,20 @@ function loadDiagnostics(){
     var lat=Math.round(performance.now()-t0);
     var rss=d.process_rss_kb||0,cpu=d.process_cpu_pct||0;
     function sv(id,v){var e=$(id);if(e)e.textContent=v}
+    function fmtBytes(b){if(b<0)return'—';var gb=b/1073741824;return gb>=1?gb.toFixed(1)+' GB':(b/1048576).toFixed(0)+' MB'}
     sv('diag-cpu',cpu.toFixed(1)+'%');
     sv('diag-mem',(rss/1024).toFixed(1)+' MB');
+    if(d.sys_mem_total_kb>0){var avail=(d.sys_mem_available_kb/1024).toFixed(0),total=(d.sys_mem_total_kb/1024).toFixed(0);sv('diag-sys-mem',avail+' / '+total+' MB free')}
+    if(d.sys_load_1m>=0)sv('diag-load',d.sys_load_1m.toFixed(2)+' / '+d.sys_load_5m.toFixed(2)+' / '+d.sys_load_15m.toFixed(2));
+    if(d.cpu_freq_mhz>0){var f=d.cpu_freq_mhz;sv('diag-cpufreq',f>=1000?(f/1000).toFixed(2)+' GHz':f+' MHz')}
     sv('diag-lat',lat+'ms');
     if(d.uptime_sec!=null){var u=d.uptime_sec,dy=Math.floor(u/86400),hr=Math.floor((u%86400)/3600),mn=Math.floor((u%3600)/60);sv('diag-uptime',dy+'d '+hr+'h '+mn+'m')}
+    if(d.disk_total_bytes>0)sv('diag-disk',fmtBytes(d.disk_free_bytes)+' / '+fmtBytes(d.disk_total_bytes)+' free');
     if(d.db_size_bytes>0)sv('diag-db-size',(d.db_size_bytes/1024/1024).toFixed(2)+' MB');
     if(d.db_table_sizes){var tbls=Object.entries(d.db_table_sizes).map(function(kv){return kv[0]+': '+kv[1]}).join('\n');var e=$('diag-db-tables');if(e)e.style.whiteSpace='pre';sv('diag-db-tables',tbls||'—')}
+    if(d.ssd_wear_pct>=0)sv('diag-ssd-wear',d.ssd_wear_pct+'% used');
+    if(d.ssd_power_on_hours>=0){var ph=d.ssd_power_on_hours;sv('diag-ssd-hours',ph>=24?Math.floor(ph/24)+'d '+ph%24+'h':ph+'h')}
+    if(d.ssd_data_written_gb>=0)sv('diag-ssd-written',d.ssd_data_written_gb>=1000?(d.ssd_data_written_gb/1000).toFixed(1)+' TB':d.ssd_data_written_gb+' GB');
   }).catch(function(){})
 }
 setInterval(loadDiagnostics,10000);loadDiagnostics();
