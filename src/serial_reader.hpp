@@ -29,7 +29,8 @@ inline bool needs_reconfigure(double target_a) { return target_a < 9.9; }
 // EpicPowerGate 2 serial reader, background thread
 class SerialReader {
 public:
-    using SnapCb = std::function<void(const PwrGateSnapshot&)>;
+    using SnapCb     = std::function<void(const PwrGateSnapshot&)>;
+    using RecoveryCb = std::function<void(const std::string& reason)>;
 
     SerialReader(std::string device, int baud = 115200);
     ~SerialReader();
@@ -37,10 +38,15 @@ public:
     bool start();
     void stop();
 
-    void set_callback(SnapCb cb) { cb_ = std::move(cb); }
+    void set_callback(SnapCb cb)         { cb_          = std::move(cb); }
+    void set_recovery_callback(RecoveryCb cb) { recovery_cb_ = std::move(cb); }
 
-    bool        connected() const { return fd_ >= 0; }
-    const std::string& device()  const { return device_; }
+    bool        connected()    const { return fd_ >= 0; }
+    const std::string& device() const { return device_; }
+
+    // Recovery stats (reset on stop/start)
+    int  charger_recovery_count()  const { return charger_recovery_count_.load(); }
+    int  reconnect_count()         const { return reconnect_count_.load(); }
 
 private:
     std::string       device_;
@@ -49,6 +55,10 @@ private:
     std::atomic<bool> running_{false};
     std::thread       thread_;
     SnapCb            cb_;
+    RecoveryCb        recovery_cb_;
+
+    std::atomic<int>  charger_recovery_count_{0};
+    std::atomic<int>  reconnect_count_{0};
 
     int  open_port();
     void read_loop();

@@ -2134,9 +2134,10 @@ std::string HttpServer::charger_history_json(const std::vector<PwrGateSnapshot>&
 // then override "Charging"/"Float" to "Idle" when no current/PWM.
 static std::string effective_charger_state(const PwrGateSnapshot& pg) {
     if (!pg.valid) return "";
-    // If state contains '=' it is a raw telemetry token from old firmware — infer state
     std::string state = pg.state;
-    if (state.find('=') != std::string::npos) {
+    // "PS" = legacy firmware: "power supply active" — infer from measurements
+    // Also handles states containing '=' (raw telemetry tokens from very old firmware)
+    if (state == "PS" || state.find('=') != std::string::npos) {
         if (pg.bat_a > 0.05)
             state = (pg.bat_v >= pg.target_v - 0.10) ? "Float" : "Charging";
         else

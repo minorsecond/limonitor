@@ -656,6 +656,18 @@ int main(int argc, char** argv) {
             LOG_DEBUG("PwrGate: %s  PS=%.2fV  Bat=%.2fV %.2fA  Sol=%.2fV",
                 snap.state.c_str(), snap.ps_v, snap.bat_v, snap.bat_a, snap.sol_v);
         });
+        serial->set_recovery_callback([&db](const std::string& reason) {
+            LOG_WARN("PwrGate recovery: %s", reason.c_str());
+            if (db && db->is_open()) {
+                OpsEvent ev;
+                ev.timestamp = std::chrono::system_clock::now();
+                ev.type      = "system_event";
+                ev.subtype   = "pwrgate_recovery";
+                ev.message   = "PwrGate auto-recovery";
+                ev.notes     = reason;
+                db->insert_ops_event(ev);
+            }
+        });
         if (!serial->start())
             LOG_WARN("Serial: failed to open %s — charger data unavailable", cfg.serial_device.c_str());
     }

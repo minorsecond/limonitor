@@ -147,9 +147,24 @@ void SerialReader::read_loop() {
     std::string pending_status;
     char rbuf[1024];
     size_t line_len = 0;
-    auto last_log_time = std::chrono::steady_clock::now();
-    bool reconfigure_sent = false; // send 'S' at most once per session
-    int consecutive_errors = 0;
+    auto last_log_time        = std::chrono::steady_clock::now();
+    auto last_snap_time       = std::chrono::steady_clock::now(); // optimistic: assume fresh at start
+    bool reconfigure_sent     = false; // send 'S' at most once per session
+    int  consecutive_errors   = 0;
+
+    // ── Charger stuck watchdog state ────────────────────────────────────────
+    // "Stuck" = PSU present but charger not running and battery not full.
+    // After STUCK_TIMEOUT_S we send 'S\r' to enter settings menu; the
+    // auto-responder (handle_prompt) walks through all prompts which forces
+    // the device to restart its charge cycle on exit.
+    static constexpr long STUCK_TIMEOUT_S    = 900;  // 15 min before first recovery
+    static constexpr long RECOVERY_COOLDOWN_S = 1800; // 30 min between attempts
+    static constexpr long STALE_RECONNECT_S  = 300;  // 5 min without any data → reconnect
+
+    bool charger_was_stuck     = false;
+    auto charger_stuck_since   = std::chrono::steady_clock::time_point{};
+    auto last_charger_recovery = std::chrono::steady_clock::time_point{};
+    auto last_stale_reconnect  = std::chrono::steady_clock::time_point{};
 
     // Helper: close and reopen the port, re-send DTR wake pulse
     auto reconnect = [&]() -> bool {
@@ -173,10 +188,12 @@ void SerialReader::read_loop() {
         ioctl(fd_, TIOCMSET, &modem);
         consecutive_errors = 0;
         reconfigure_sent = false;
+        charger_was_stuck = false;
         line_buf.clear();
         line_len = 0;
         pending_status.clear();
-        LOG_INFO("Serial: reconnected to %s", device_.c_str());
+        ++reconnect_count_;
+        LOG_INFO("Serial: reconnected to %s (reconnect #%d)", device_.c_str(), reconnect_count_.load());
         return true;
     };
 
@@ -213,6 +230,26 @@ void SerialReader::read_loop() {
                     line_len = 0;
                 }
             }
+
+            // ── Stale data watchdog ──────────────────────────────────────────
+            // VTIME=10 gives ~1s read timeout, so this runs roughly each second.
+            {
+                auto now_w = std::chrono::steady_clock::now();
+                auto stale_s = std::chrono::duration_cast<std::chrono::seconds>(
+                    now_w - last_snap_time).count();
+                auto since_reconnect = std::chrono::duration_cast<std::chrono::seconds>(
+                    now_w - last_stale_reconnect).count();
+                if (stale_s >= STALE_RECONNECT_S && since_reconnect >= STALE_RECONNECT_S) {
+                    LOG_WARN("Serial: no PwrGate data from %s for %llds — reconnecting",
+                             device_.c_str(), static_cast<long long>(stale_s));
+                    last_stale_reconnect = now_w;
+                    last_snap_time = now_w; // prevent rapid retrigger on reconnect failure
+                    if (recovery_cb_)
+                        recovery_cb_("No data for " + std::to_string(static_cast<long long>(stale_s)) + "s — reconnected");
+                    reconnect();
+                }
+            }
+
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
@@ -248,13 +285,61 @@ void SerialReader::read_loop() {
                 PwrGateSnapshot snap;
                 if (pwrgate::parse(pending_status, line, snap) && cb_) {
                     cb_(snap);
-                    // If the device was reset by its jumper (target_a reverts to
-                    // default 1A), reconfigure it via the 'S' settings menu.
-                    if (!reconfigure_sent && snap.target_a < 9.9) {
+                    auto now_s = std::chrono::steady_clock::now();
+                    last_snap_time = now_s;
+
+                    // ── Charger reconfiguration (jumper reset) ───────────────
+                    if (!reconfigure_sent && serial_prompts::needs_reconfigure(snap.target_a)) {
                         LOG_INFO("Serial: target_a=%.2fA, sending 'S' to reconfigure",
                                  snap.target_a);
                         (void)write(fd_, "S\r", 2);
                         reconfigure_sent = true;
+                    }
+
+                    // ── Charger stuck watchdog ───────────────────────────────
+                    // Stuck = PSU present, battery not near full, charger PWM=0,
+                    // no charge current.  After STUCK_TIMEOUT_S we enter the
+                    // settings menu which forces a charge-cycle restart on exit.
+                    bool psu_present   = snap.ps_v > 12.5;
+                    bool batt_not_full = (snap.target_v > 0.1)
+                                         ? snap.bat_v < snap.target_v - 0.30
+                                         : snap.bat_v < 14.0;
+                    bool charger_off   = std::abs(snap.bat_a) < 0.05 && snap.pwm < 5;
+                    bool stuck = psu_present && batt_not_full && charger_off;
+
+                    if (stuck) {
+                        if (!charger_was_stuck) {
+                            charger_stuck_since = now_s;
+                            charger_was_stuck = true;
+                            LOG_DEBUG("Serial: charger idle with PSU %.2fV bat %.2fV — monitoring",
+                                      snap.ps_v, snap.bat_v);
+                        }
+                        long stuck_s = std::chrono::duration_cast<std::chrono::seconds>(
+                            now_s - charger_stuck_since).count();
+                        long since_rec = std::chrono::duration_cast<std::chrono::seconds>(
+                            now_s - last_charger_recovery).count();
+
+                        if (stuck_s >= STUCK_TIMEOUT_S && since_rec >= RECOVERY_COOLDOWN_S) {
+                            ++charger_recovery_count_;
+                            std::string reason = "Charger idle for " + std::to_string(stuck_s) +
+                                "s (PSU " + std::to_string(static_cast<int>(snap.ps_v * 100) / 100.0) +
+                                "V, bat " + std::to_string(static_cast<int>(snap.bat_v * 100) / 100.0) +
+                                "V, PWM=0) — recovery #" + std::to_string(charger_recovery_count_.load());
+                            LOG_WARN("Serial: %s — sending 'S' to restart charge cycle",
+                                     reason.c_str());
+                            (void)write(fd_, "S\r", 2);
+                            last_charger_recovery = now_s;
+                            charger_stuck_since   = now_s; // reset so next window is another STUCK_TIMEOUT_S
+                            if (recovery_cb_) recovery_cb_(reason);
+                        }
+                    } else {
+                        if (charger_was_stuck) {
+                            long stuck_s = std::chrono::duration_cast<std::chrono::seconds>(
+                                now_s - charger_stuck_since).count();
+                            LOG_INFO("Serial: charger resumed after %lds (bat_a=%.2fA PWM=%d)",
+                                     stuck_s, snap.bat_a, snap.pwm);
+                        }
+                        charger_was_stuck = false;
                     }
                 }
                 pending_status.clear();
