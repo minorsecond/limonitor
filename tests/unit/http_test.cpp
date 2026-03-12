@@ -247,3 +247,70 @@ void test_analytics_api_self_monitor() {
 
     server.stop();
 }
+
+void test_dashboard_visibility() {
+    DataStore store;
+    std::string db_path = "/tmp/test_visibility_" + std::to_string(getpid()) + ".db";
+    remove(db_path.c_str());
+    Database db(db_path);
+    db.open();
+    db.set_setting("shelly_host", "1.2.3.4");
+    db.set_setting("settings_initialized", "1");
+    db.set_setting("device_name", "test-device");
+    db.set_setting("pwrgate_remote", "localhost:8081");
+    
+    HttpServer server(store, &db, "127.0.0.1", 8094);
+    server.start();
+    usleep(100000); // 100ms
+    
+    BatterySnapshot bat;
+    bat.valid = true;
+    bat.total_voltage_v = 13.1;
+    bat.current_a = 5.5; // Discharging
+    bat.power_w = 72.0;
+    bat.soc_pct = 85.0;
+    bat.remaining_ah = 85.0;
+    bat.nominal_ah = 100.0;
+    bat.timestamp = std::chrono::system_clock::now();
+    store.update(bat);
+    
+    std::string resp = http_request("127.0.0.1", 8094, "GET", "/", "");
+    ASSERT(parse_http_status(resp) == 200, "GET / returns 200");
+    
+    // Check for new UI elements
+    ASSERT(resp.find("grid-status-badge") != std::string::npos, "Should have grid status badge placeholder");
+    ASSERT(resp.find("shelly-status-text") != std::string::npos, "Should have shelly status text placeholder");
+    ASSERT(resp.find("discharging") != std::string::npos, "Should show discharging status");
+    
+    server.stop();
+    remove(db_path.c_str());
+}
+
+void test_shelly_api_visibility() {
+    DataStore store;
+    std::string db_path = "/tmp/test_shelly_api_" + std::to_string(getpid()) + ".db";
+    remove(db_path.c_str());
+    Database db(db_path);
+    db.open();
+    db.set_setting("shelly_host", "1.2.3.4");
+    
+    HttpServer server(store, &db, "127.0.0.1", 8095);
+    server.start();
+    usleep(100000);
+    
+    BatterySnapshot bat;
+    bat.valid = true;
+    bat.current_a = 5.0;
+    bat.power_w = 65.0;
+    bat.timestamp = std::chrono::system_clock::now();
+    store.update(bat);
+    
+    // API should show grid info
+    std::string resp = http_request("127.0.0.1", 8095, "GET", "/api/flow", "");
+    ASSERT(parse_http_status(resp) == 200, "GET /api/flow returns 200");
+    ASSERT(resp.find("grid_enabled") != std::string::npos, "Flow API has grid_enabled");
+    ASSERT(resp.find("grid_relay_on") != std::string::npos, "Flow API has grid_relay_on");
+    
+    server.stop();
+    remove(db_path.c_str());
+}

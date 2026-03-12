@@ -2541,7 +2541,8 @@ html.light .pwr-modal-submit{background:#16a34a}
 
     o += "<main class=\"main\">\n";
     o += "<div id=\"sys-status-panel\" class=\"card\" style=\"margin-bottom:.7rem\">"
-         "<div class=\"card-title\">System Status</div>"
+         "<div class=\"card-title\" style=\"display:flex;justify-content:space-between\">"
+         "<span>System Status</span><span id=\"grid-status-badge\" style=\"font-size:.6rem;text-transform:uppercase;letter-spacing:.1em\"></span></div>"
          "<div id=\"sys-status-lines\" style=\"font-size:.85rem;line-height:1.6\">—</div>"
          "<div id=\"sys-status-alerts\" style=\"margin-top:.5rem\"></div>"
          "</div>\n";
@@ -2693,7 +2694,8 @@ html.light .pwr-modal-submit{background:#16a34a}
     }
     o += "</table>";
     o += "<div id=\"grid-control-wrap\" class=\"grid-control-wrap\" style=\"display:none\">"
-         "<div class=\"card-title\">Grid Control (Shelly)</div>"
+         "<div class=\"card-title\" style=\"display:flex;justify-content:space-between\">"
+         "<span>Grid Control (Shelly)</span><span id=\"shelly-status-text\" class=\"dim\"></span></div>"
          "<p class=\"grid-control-desc\">Turn off grid power supply to run on battery only. Use for learning discharge data.</p>"
          "<div class=\"grid-control-btns\">"
          "<button type=\"button\" class=\"grid-btn grid-btn-off\" id=\"shelly-off-btn\">Turn off grid</button>"
@@ -3078,7 +3080,11 @@ function upBat(){fetch('/api/status').then(function(r){return r.json()}).then(fu
   var adir=a>0.01?'discharging':a<-0.01?'charging':'idle'
   $('sa').textContent=fmt(aa,2)
   $('sa-wrap').className='sv '+(a>0.01?'warn':a<-0.01?'ok':'dim')
-  $('sa-sub').textContent=adir
+  if(a>0.01 && window.lastSocRate < 0) {
+    $('sa-sub').textContent=adir+' \xb7 '+Math.abs(window.lastSocRate).toFixed(2)+'%/h'
+  } else {
+    $('sa-sub').textContent=adir
+  }
   $('ssoc').textContent=fmt(d.soc_pct,1)
   $('soc-bar').style.width=Math.max(0,Math.min(100,d.soc_pct))+'%'
   var v=d.voltage_v||0;if(v<1)v=51.2
@@ -3127,10 +3133,35 @@ function upChg(){fetch('/api/charger').then(function(r){return r.json()}).then(f
   if($('chg-tmp'))$('chg-tmp').textContent=d.temp+' (raw)'
 }).catch(function(){})}
 
-window.lastBatV = 13.3;
-window.lastBatPwr = 0;
-window.lastBatPwrIn = false;
-window.lastChgPwr = 0;
+function updateGridStatus() {
+  var s = window.lastShelly;
+  if (!s) return;
+  var b = $('grid-status-badge');
+  if (b) {
+    if (!s.ok) {
+      b.textContent = 'Shelly Offline';
+      b.className = 'err';
+    } else if (!s.on) {
+      b.textContent = 'Grid Off';
+      b.className = 'warn';
+    } else {
+      b.textContent = 'Grid On';
+      b.className = 'ok';
+    }
+  }
+  var t = $('shelly-status-text');
+  if (t) {
+    if (!s.ok) {
+      t.textContent = 'Offline';
+      t.className = 'err';
+    } else {
+      t.textContent = (s.on ? 'ON' : 'OFF') + (s.pwr > 0 ? ' (' + fmt(s.pwr, 1) + 'W)' : '');
+      t.className = s.on ? 'ok' : 'warn';
+    }
+  }
+}
+window.lastShelly = null;
+window.lastSocRate = 0;
 
 function updatePowerStat() {
   var loadW = (window.lastChgPwr || 0) + (window.lastBatPwr || 0);
@@ -3196,6 +3227,8 @@ upBat(); upChg()
 
 function upFlow(){fetch('/api/flow').then(function(r){return r.json()}).then(function(d){
   lastFlowData=d;renderFlowDiagram(d)
+  window.lastShelly = {ok: d.grid_enabled, on: d.grid_relay_on, pwr: d.grid_power_w};
+  updateGridStatus();
   if(d.battery_current !== undefined) {
     window.lastBatV = d.battery_voltage;
     window.lastBatPwr = d.battery_power_w;
@@ -3316,13 +3349,20 @@ function upAnalytics(){fetch('/api/analytics').then(function(r){return r.json()}
   }
   var socTrend=d.soc_trend||''
   var socRate=d.soc_rate_pct_per_h||0
+  window.lastSocRate = socRate;
   var ste=$('ssoc-trend');if(ste){
     ste.textContent=socTrend==='up'?'\u2191':socTrend==='down'?'\u2193':''
     ste.title=socTrend==='up'?'Increasing: +'+socRate.toFixed(2)+'%/h over last ~1 min':
       socTrend==='down'?'Decreasing: '+socRate.toFixed(2)+'%/h over last ~1 min':
       socTrend==='stable'?'Steady: '+socRate.toFixed(2)+'%/h (no significant change)':''
   }
-  var sl=$('sys-status-lines');if(sl)sl.innerHTML=(d.system_status||'\u2014').replace(/\u00b7 /g,'<br>')
+  var sl=$('sys-status-lines');if(sl) {
+    var status = d.system_status || '\u2014';
+    if (window.lastShelly && !window.lastShelly.on) {
+      status = 'Running on Battery \u00b7 ' + status;
+    }
+    sl.innerHTML=status.replace(/\u00b7 /g,'<br>');
+  }
   var sa=$('sys-status-alerts');var pan=$('sys-status-panel');if(sa&&pan){
     var alerts=d.health_alerts||[]
     if(alerts.length){sa.innerHTML='<span class=\"warn\">'+alerts.join(' \u00b7 ')+'</span>';sa.style.display='';pan.style.borderColor='var(--orange)'}

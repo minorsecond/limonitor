@@ -73,6 +73,8 @@ void test_ssd_metrics_graceful();
 void test_self_monitor_rss_nonzero();
 void test_self_monitor_db_populated();
 void test_analytics_api_self_monitor();
+void test_dashboard_visibility();
+void test_shelly_api_visibility();
 
 void test_parse_test_type();
 void test_test_type_str();
@@ -112,6 +114,8 @@ int main() {
     test_charger_history_api_with_data();
     test_charger_history_persistence_via_store();
     test_analytics_api_self_monitor();
+    test_dashboard_visibility();
+    test_shelly_api_visibility();
     printf("PASS: HTTP APIs\n");
 
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
