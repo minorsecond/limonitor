@@ -76,6 +76,36 @@ void test_analytics_api_self_monitor();
 void test_dashboard_visibility();
 void test_shelly_api_visibility();
 
+void test_prompt_response_generic_colon();
+void test_prompt_response_generic_question();
+void test_prompt_response_max_charge_current();
+void test_prompt_response_max_charge_current_trailing_spaces();
+void test_prompt_response_reset_to_default();
+void test_prompt_response_battery_save_mode();
+void test_prompt_response_battery_type_accepts_default();
+void test_prompt_response_streaming_line_not_prompt();
+void test_prompt_response_jumpers_line_not_prompt();
+void test_prompt_response_empty_not_prompt();
+void test_prompt_response_whitespace_only_not_prompt();
+void test_prompt_response_targetv_line_not_prompt();
+
+void test_unterminated_prompt_colon_after_angle_bracket();
+void test_unterminated_prompt_question_after_angle_bracket();
+void test_unterminated_prompt_with_trailing_space();
+void test_unterminated_prompt_jumpers_line_rejected();
+void test_unterminated_prompt_partial_streaming_rejected();
+void test_unterminated_prompt_empty_rejected();
+void test_unterminated_prompt_single_char_rejected();
+void test_unterminated_prompt_two_chars_no_angle_bracket();
+void test_unterminated_prompt_battery_partial_rejected();
+
+void test_needs_reconfigure_default_1a();
+void test_needs_reconfigure_below_threshold();
+void test_needs_reconfigure_just_below_threshold();
+void test_needs_reconfigure_at_threshold();
+void test_needs_reconfigure_at_10a();
+void test_needs_reconfigure_above_10a();
+
 void test_pwrgate_parse_known_state_preserved();
 void test_pwrgate_parse_float_state_preserved();
 void test_pwrgate_parse_state_inferred_charging();
@@ -201,6 +231,35 @@ int main() {
     test_charging_stage_float_from_voltage();
     test_charging_stage_not_idle_when_current_flows();
     printf("PASS: PwrGate parser\n");
+
+    test_prompt_response_generic_colon();
+    test_prompt_response_generic_question();
+    test_prompt_response_max_charge_current();
+    test_prompt_response_max_charge_current_trailing_spaces();
+    test_prompt_response_reset_to_default();
+    test_prompt_response_battery_save_mode();
+    test_prompt_response_battery_type_accepts_default();
+    test_prompt_response_streaming_line_not_prompt();
+    test_prompt_response_jumpers_line_not_prompt();
+    test_prompt_response_empty_not_prompt();
+    test_prompt_response_whitespace_only_not_prompt();
+    test_prompt_response_targetv_line_not_prompt();
+    test_unterminated_prompt_colon_after_angle_bracket();
+    test_unterminated_prompt_question_after_angle_bracket();
+    test_unterminated_prompt_with_trailing_space();
+    test_unterminated_prompt_jumpers_line_rejected();
+    test_unterminated_prompt_partial_streaming_rejected();
+    test_unterminated_prompt_empty_rejected();
+    test_unterminated_prompt_single_char_rejected();
+    test_unterminated_prompt_two_chars_no_angle_bracket();
+    test_unterminated_prompt_battery_partial_rejected();
+    test_needs_reconfigure_default_1a();
+    test_needs_reconfigure_below_threshold();
+    test_needs_reconfigure_just_below_threshold();
+    test_needs_reconfigure_at_threshold();
+    test_needs_reconfigure_at_10a();
+    test_needs_reconfigure_above_10a();
+    printf("PASS: Serial prompt handler\n");
 
     test_parse_test_type();
     test_test_type_str();

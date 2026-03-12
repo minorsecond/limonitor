@@ -2039,13 +2039,22 @@ std::string HttpServer::charger_history_json(const std::vector<PwrGateSnapshot>&
     return o;
 }
 
-// Effective charger state: override "Charging"/"Float" to "Idle" when no current/PWM
+// Effective charger state: re-infer from measurements if state is a raw firmware string,
+// then override "Charging"/"Float" to "Idle" when no current/PWM.
 static std::string effective_charger_state(const PwrGateSnapshot& pg) {
     if (!pg.valid) return "";
-    if ((pg.state == "Charging" || pg.state == "Float") &&
+    // If state contains '=' it is a raw telemetry token from old firmware — infer state
+    std::string state = pg.state;
+    if (state.find('=') != std::string::npos) {
+        if (pg.bat_a > 0.05)
+            state = (pg.bat_v >= pg.target_v - 0.10) ? "Float" : "Charging";
+        else
+            state = "Idle";
+    }
+    if ((state == "Charging" || state == "Float") &&
         std::abs(pg.bat_a) < 0.05 && pg.pwm < 10)
         return "Idle";
-    return pg.state;
+    return state;
 }
 
 std::string HttpServer::grid_event_banner_js() {
@@ -2219,8 +2228,12 @@ std::string HttpServer::tx_events_json(const std::vector<TxEvent>& events) {
 std::string HttpServer::charger_json(const PwrGateSnapshot& pg) {
     if (!pg.valid) return "{\"valid\":false}\n";
     std::string eff_state = effective_charger_state(pg);
+    auto age_s = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now() - pg.timestamp).count();
+    bool stale = age_s >= 300;
     std::string o = "{\n";
     o += "  \"valid\": true,\n";
+    o += "  \"stale\": " + std::string(stale ? "true" : "false") + ",\n";
     o += "  \"timestamp\": " + jstr(iso8601(pg.timestamp)) + ",\n";
     o += "  \"state\": "     + jstr(eff_state)   + ",\n";
     o += "  \"ps_v\": "      + jdbl(pg.ps_v)     + ",\n";
@@ -2251,7 +2264,11 @@ std::string HttpServer::html_dashboard(const BatterySnapshot& s, const std::stri
 
     // When the BMS reports ~0 A but the charger is actively pushing current,
     // treat the system as charging for display purposes.
-    bool chg_active = pg.valid && pg.bat_a > 0.05;
+    // Only use charger data if it's fresh (< 5 minutes old).
+    auto chg_age_s = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now() - pg.timestamp).count();
+    bool chg_fresh = pg.valid && (chg_age_s < 300);
+    bool chg_active = chg_fresh && pg.bat_a > 0.05;
     const char* cur_cls = s.current_a >  0.01 ? "sv warn" :
                           (s.current_a < -0.01 || chg_active) ? "sv ok" : "sv dim";
     const char* cur_dir = s.current_a >  0.01 ? "discharging" :
@@ -2640,8 +2657,14 @@ html.light .pwr-modal-submit{background:#16a34a}
     double rem_h = s.time_remaining_h;
     if (chg_active && rem_h < 0.01 && s.nominal_ah > 0.1 && pg.bat_a > 0.05)
         rem_h = (s.nominal_ah - s.remaining_ah) / pg.bat_a;
-    snprintf(buf, sizeof(buf), "%.1f h %s", rem_h, rem_dir);
-    o += "<tr><td>Est. remaining</td><td id=\"bat-rem\">" + std::string(buf) + "</td></tr>\n";
+    // When idle (no current, no charger), show dash rather than "0.0 h to empty"
+    bool truly_idle = std::abs(s.current_a) < 0.05 && !chg_active;
+    if (truly_idle)
+        o += "<tr><td>Est. remaining</td><td id=\"bat-rem\">\xe2\x80\x94</td></tr>\n";
+    else {
+        snprintf(buf, sizeof(buf), "%.1f h %s", rem_h, rem_dir);
+        o += "<tr><td>Est. remaining</td><td id=\"bat-rem\">" + std::string(buf) + "</td></tr>\n";
+    }
     {
         const char* dc = s.cell_delta_v > 0.05 ? "warn" : s.cell_delta_v > 0.02 ? "" : "ok";
         snprintf(buf, sizeof(buf), "<span class=\"%s\">%.0f mV</span>", dc, s.cell_delta_v * 1000.0);
@@ -3110,7 +3133,8 @@ function upBat(){fetch('/api/status').then(function(r){return r.json()}).then(fu
   var remH=d.time_remaining_h
   if(chgActive&&remH<0.01&&d.nominal_ah>0.1&&(window.lastChgBatA||0)>0.05)
     remH=(d.nominal_ah-d.remaining_ah)/(window.lastChgBatA)
-  $('bat-rem').textContent=fmt(remH,1)+' h '+rd
+  var trulyIdle=Math.abs(a)<0.05&&!chgActive
+  $('bat-rem').textContent=trulyIdle?'\u2014':fmt(remH,1)+' h '+rd
   if(d.cells&&d.cells.length){
     var vs=d.cells.map(function(c){return c.voltage_v})
     var mn=Math.min.apply(null,vs),mx=Math.max.apply(null,vs)
@@ -3130,11 +3154,13 @@ function upBat(){fetch('/api/status').then(function(r){return r.json()}).then(fu
 
 function upChg(){fetch('/api/charger').then(function(r){return r.json()}).then(function(d){
   if(!d.valid)return
-  window.lastChgPwr = (d.bat_v * d.bat_a);
-  window.lastChgBatA = d.bat_a;
+  // Stale data: don't use for chg_active; zero out lastChgBatA so battery stats show correctly
+  if(d.stale){window.lastChgBatA=0;window.lastChgPwr=0;}
+  else{window.lastChgPwr=(d.bat_v*d.bat_a);window.lastChgBatA=d.bat_a;}
   updatePowerStat();
   var sc=d.state==='Charging'||d.state==='Float'?'ok':'warn'
-  if($('chg-state'))$('chg-state').innerHTML='<span class="'+sc+'">'+d.state+'</span>'
+  var staleNote=d.stale?' <span class="dim" title="Last update was >5 min ago">(stale)</span>':''
+  if($('chg-state'))$('chg-state').innerHTML='<span class="'+sc+'">'+d.state+'</span>'+staleNote
   if($('chg-ps'))$('chg-ps').textContent=fmt(d.ps_v,2)+' V'
   if($('chg-sol'))$('chg-sol').textContent=fmt(d.sol_v,2)+' V'
   if($('chg-bat'))$('chg-bat').textContent=fmt(d.bat_v,2)+' V \xb7 '+fmt(d.bat_a,2)+' A'

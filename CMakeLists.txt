@@ -210,6 +210,7 @@ if(BUILD_TESTING)
         tests/unit/http_test.cpp
         tests/unit/analytics_test.cpp
         tests/unit/pwrgate_test.cpp
+        tests/unit/serial_reader_test.cpp
         tests/unit/test_runner_test.cpp
         src/logger.cpp
         src/analytics.cpp
