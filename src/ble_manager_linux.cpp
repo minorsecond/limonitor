@@ -62,6 +62,8 @@ struct BleManager::Impl {
     gulong              char_sig{0};
     guint               poll_src{0};
     guint               reconnect_src{0};
+    guint               char_find_src{0};
+    int                 char_find_attempt{0};
 
     std::thread thread;
 
@@ -141,6 +143,7 @@ struct BleManager::Impl {
 
         g_main_loop_run(gloop);
 
+        if (char_find_src) { g_source_remove(char_find_src); char_find_src = 0; }
         if (poll_src)      { g_source_remove(poll_src);      poll_src = 0; }
         if (reconnect_src) { g_source_remove(reconnect_src); reconnect_src = 0; }
         if (notify_char) {
@@ -253,40 +256,51 @@ struct BleManager::Impl {
     void on_services_resolved() {
         set_state(BleState::DISCOVERING);
         LOG_INFO("BLE: services resolved, starting characteristics discovery");
+        char_find_attempt = 0;
+        schedule_char_find();
+    }
 
-        // Sometimes BlueZ reports services resolved before characteristics are in obj_mgr cache.
-        // Try up to 5 times with a 1s sleep.
-        for (int retry = 0; retry < 5; ++retry) {
-            if (find_characteristics()) {
-                LOG_INFO("BLE: characteristics found, starting notifications");
-                g_dbus_proxy_call(notify_char, "StartNotify",
-                    nullptr, G_DBUS_CALL_FLAGS_NONE, 10000, cancel,
-                    +[](GObject* src, GAsyncResult* res, gpointer ud) {
-                        GError* e = nullptr;
-                        g_autoptr(GVariant) r = g_dbus_proxy_call_finish(G_DBUS_PROXY(src), res, &e);
-                        auto* self = static_cast<Impl*>(ud);
-                        if (e) {
-                            if (!g_error_matches(e, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
-                                LOG_ERROR("BLE: StartNotify: %s", e->message);
-                                self->schedule_reconnect();
-                            }
-                            g_error_free(e);
-                        } else {
-                            LOG_INFO("BLE: ready");
-                            self->set_state(BleState::READY);
-                            self->schedule_poll();
+    void schedule_char_find(int delay_s = 0) {
+        if (char_find_src) { g_source_remove(char_find_src); char_find_src = 0; }
+        GSource* src = delay_s > 0
+            ? g_timeout_source_new_seconds(delay_s)
+            : g_idle_source_new();
+        g_source_set_callback(src, cb_try_find_chars, this, nullptr);
+        char_find_src = g_source_attach(src, gctx);
+        g_source_unref(src);
+    }
+
+    void do_find_chars() {
+        if (find_characteristics()) {
+            LOG_INFO("BLE: characteristics found, starting notifications");
+            g_dbus_proxy_call(notify_char, "StartNotify",
+                nullptr, G_DBUS_CALL_FLAGS_NONE, 10000, cancel,
+                +[](GObject* src, GAsyncResult* res, gpointer ud) {
+                    GError* e = nullptr;
+                    g_autoptr(GVariant) r = g_dbus_proxy_call_finish(G_DBUS_PROXY(src), res, &e);
+                    auto* self = static_cast<Impl*>(ud);
+                    if (e) {
+                        if (!g_error_matches(e, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+                            LOG_ERROR("BLE: StartNotify: %s", e->message);
+                            self->schedule_reconnect();
                         }
-                    }, this);
-                return;
-            }
-            if (retry < 4) {
-                LOG_INFO("BLE: characteristics not found yet, retrying in 1s... (attempt %d/5)", retry + 1);
-                g_usleep(1000000);
-            }
+                        g_error_free(e);
+                    } else {
+                        LOG_INFO("BLE: ready");
+                        self->set_state(BleState::READY);
+                        self->schedule_poll();
+                    }
+                }, this);
+            return;
         }
-
-        LOG_ERROR("BLE: characteristics not found");
-        schedule_reconnect(15);
+        if (char_find_attempt < 4) {
+            LOG_INFO("BLE: characteristics not found yet, retrying in 1s... (attempt %d/5)", char_find_attempt + 1);
+            char_find_attempt++;
+            schedule_char_find(1);
+        } else {
+            LOG_ERROR("BLE: characteristics not found");
+            schedule_reconnect(15);
+        }
     }
 
     bool find_characteristics() {
@@ -398,6 +412,7 @@ struct BleManager::Impl {
     }
 
     void schedule_reconnect(int delay_s = 5) {
+        if (char_find_src) { g_source_remove(char_find_src); char_find_src = 0; }
         if (reconnect_src) { g_source_remove(reconnect_src); reconnect_src = 0; }
         if (poll_src)      { g_source_remove(poll_src);      poll_src = 0; }
         if (notify_char) {
@@ -480,6 +495,9 @@ struct BleManager::Impl {
             self->data_cb(std::vector<uint8_t>(d, d + n));
     }
 
+    static gboolean cb_try_find_chars(gpointer ud) {
+        auto* self = static_cast<Impl*>(ud); self->char_find_src = 0; self->do_find_chars(); return G_SOURCE_REMOVE;
+    }
     static gboolean cb_poll(gpointer ud) {
         auto* self = static_cast<Impl*>(ud); self->poll_src = 0; self->do_poll(); return G_SOURCE_REMOVE;
     }
