@@ -3645,7 +3645,10 @@ function loadCharts(){
   }).catch(function(){})
   fetch('/api/charger/history?n='+chgN)
     .then(function(r){return r.json()})
-    .then(function(d){renderChgChart(d.filter(function(p){return new Date(p.ts).getTime()>=cutoff}))})
+    .then(function(d){
+      var filtered=d.filter(function(p){return new Date(p.ts).getTime()>=cutoff});
+      renderChgChart(filtered.length>=2?filtered:d);
+    })
     .catch(function(){})
 }
 

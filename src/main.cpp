@@ -623,21 +623,10 @@ int main(int argc, char** argv) {
     std::unique_ptr<SerialReader> serial;
     if (!cfg.serial_device.empty()) {
         serial = std::make_unique<SerialReader>(cfg.serial_device, cfg.serial_baud);
-        int pg_interval = std::max(1, cfg.db_write_interval_s / 5);
-        serial->set_callback([&store, db, pg_interval](const PwrGateSnapshot& snap) {
+        serial->set_callback([&store](const PwrGateSnapshot& snap) {
             store.update_pwrgate(snap);
             LOG_DEBUG("PwrGate: %s  PS=%.2fV  Bat=%.2fV %.2fA  Sol=%.2fV",
                 snap.state.c_str(), snap.ps_v, snap.bat_v, snap.bat_a, snap.sol_v);
-            if (db && db->is_open()) {
-                using clock = std::chrono::steady_clock;
-                static auto last = clock::time_point{};
-                auto now = clock::now();
-                if (std::chrono::duration_cast<std::chrono::seconds>(now - last).count()
-                        >= pg_interval) {
-                    db->insert_charger(snap);
-                    last = now;
-                }
-            }
         });
         if (!serial->start())
             LOG_WARN("Serial: failed to open %s — charger data unavailable", cfg.serial_device.c_str());
@@ -655,19 +644,8 @@ int main(int argc, char** argv) {
             : 8080;
 
         pgclient = std::make_unique<PwrGateClient>(pg_host, pg_port, cfg.poll_interval_s);
-        int pg_interval = std::max(1, cfg.db_write_interval_s / 5);
-        pgclient->set_callback([&store, db, pg_interval](const PwrGateSnapshot& snap) {
+        pgclient->set_callback([&store](const PwrGateSnapshot& snap) {
             store.update_pwrgate(snap);
-            if (db && db->is_open()) {
-                using clock = std::chrono::steady_clock;
-                static auto last = clock::time_point{};
-                auto now = clock::now();
-                if (std::chrono::duration_cast<std::chrono::seconds>(now - last).count()
-                        >= pg_interval) {
-                    db->insert_charger(snap);
-                    last = now;
-                }
-            }
         });
         pgclient->start();
     }

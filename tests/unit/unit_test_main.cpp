@@ -22,6 +22,9 @@ void test_http_solar_page_theme();
 void test_http_tests_api();
 void test_http_tests_start_stop_with_battery();
 void test_http_tests_telemetry_and_notes();
+void test_charger_history_api_empty();
+void test_charger_history_api_with_data();
+void test_charger_history_persistence_via_store();
 
 void test_weather_forecast_empty_api_key();
 void test_parse_daily_entries_cloud_cover();
@@ -96,6 +99,9 @@ int main() {
     test_http_tests_api();
     test_http_tests_start_stop_with_battery();
     test_http_tests_telemetry_and_notes();
+    test_charger_history_api_empty();
+    test_charger_history_api_with_data();
+    test_charger_history_persistence_via_store();
     printf("PASS: HTTP APIs\n");
 
     std::this_thread::sleep_for(std::chrono::milliseconds(500));

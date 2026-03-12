@@ -161,3 +161,73 @@ void test_http_tests_telemetry_and_notes() {
     server.stop();
     remove(db_path.c_str());
 }
+
+void test_charger_history_api_empty() {
+    DataStore store;
+    HttpServer server(store, nullptr, "127.0.0.1", 8091);
+    server.start();
+
+    std::string resp = http_request("127.0.0.1", 8091, "GET", "/api/charger/history", "");
+    ASSERT(parse_http_status(resp) == 200, "GET /api/charger/history returns 200");
+    ASSERT(resp.find('[') != std::string::npos, "Response is a JSON array");
+    ASSERT(resp.find("{\"ts\"") == std::string::npos, "Empty store yields no entries");
+
+    server.stop();
+}
+
+void test_charger_history_api_with_data() {
+    DataStore store;
+    HttpServer server(store, nullptr, "127.0.0.1", 8092);
+    server.start();
+
+    for (int i = 0; i < 3; ++i) {
+        PwrGateSnapshot snap;
+        snap.bat_v = 13.2 + i * 0.1;
+        snap.bat_a = 5.0;
+        snap.sol_v = 14.5;
+        snap.valid = true;
+        snap.timestamp = std::chrono::system_clock::now();
+        store.update_pwrgate(snap);
+    }
+
+    std::string resp = http_request("127.0.0.1", 8092, "GET", "/api/charger/history?n=10", "");
+    ASSERT(parse_http_status(resp) == 200, "GET /api/charger/history returns 200 with data");
+    ASSERT(resp.find("\"ts\"") != std::string::npos, "History contains ts field");
+    ASSERT(resp.find("\"bat_v\"") != std::string::npos, "History contains bat_v field");
+    ASSERT(resp.find("\"bat_a\"") != std::string::npos, "History contains bat_a field");
+    ASSERT(resp.find("\"sol_v\"") != std::string::npos, "History contains sol_v field");
+    int count = 0;
+    size_t pos = 0;
+    while ((pos = resp.find("{\"ts\"", pos)) != std::string::npos) { ++count; ++pos; }
+    ASSERT(count == 3, "History returns all 3 entries");
+
+    server.stop();
+}
+
+void test_charger_history_persistence_via_store() {
+    std::string db_path = "/tmp/test_charger_persist_" + std::to_string(getpid()) + ".db";
+    remove(db_path.c_str());
+    Database db(db_path);
+    db.open();
+
+    DataStore store;
+    store.set_database(&db);
+
+    PwrGateSnapshot snap;
+    snap.bat_v = 13.2;
+    snap.bat_a = 5.5;
+    snap.sol_v = 14.1;
+    snap.valid = true;
+    snap.timestamp = std::chrono::system_clock::now();
+    store.update_pwrgate(snap);
+    store.flush_db();
+
+    auto rows = db.load_charger_history(10);
+    ASSERT(rows.size() == 1, "One charger row persisted via store buffer");
+    ASSERT(std::abs(rows[0].bat_v - 13.2) < 0.001, "bat_v round-trips through DB");
+    ASSERT(std::abs(rows[0].bat_a - 5.5) < 0.001, "bat_a round-trips through DB");
+    ASSERT(std::abs(rows[0].sol_v - 14.1) < 0.001, "sol_v round-trips through DB");
+    ASSERT(rows[0].valid, "Loaded row has valid=true");
+
+    remove(db_path.c_str());
+}
