@@ -434,27 +434,46 @@ void SerialReader::read_loop() {
 
             if (handle_prompt(line)) continue;
 
+            auto process_snapshot = [&](PwrGateSnapshot& snap) {
+                // Persistent target metrics: if the status update omitted them
+                // (they are 0), use the last known values. If they ARE present,
+                // update our cache.
+                if (snap.target_v > 0.01) last_target_v_ = snap.target_v;
+                else snap.target_v = last_target_v_;
+
+                if (snap.target_a > 0.01) last_target_a_ = snap.target_a;
+                else snap.target_a = last_target_a_;
+
+                if (snap.stop_a > 0.01)   last_stop_a_ = snap.stop_a;
+                else snap.stop_a = last_stop_a_;
+
+                if (snap.temp != 0)      last_temp_ = snap.temp;
+                else snap.temp = last_temp_;
+
+                if (snap.pss != 0)       last_pss_ = snap.pss;
+                else snap.pss = last_pss_;
+
+                if (cb_) cb_(snap);
+                last_snap_time = std::chrono::steady_clock::now();
+                stale_reconnects_since_data = 0;
+                process_charger_logic(snap, last_snap_time);
+            };
+
             if (line.find("PS=") != std::string::npos) {
                 // If we already have a pending status, it never got a TargetV line.
                 // Process it now as a single-line update.
                 if (!pending_status.empty()) {
                     PwrGateSnapshot snap;
-                    if (pwrgate::parse(pending_status, pending_status, snap) && cb_) {
-                        cb_(snap);
-                        last_snap_time = std::chrono::steady_clock::now();
-                        stale_reconnects_since_data = 0;
-                        process_charger_logic(snap, last_snap_time);
+                    if (pwrgate::parse(pending_status, pending_status, snap)) {
+                        process_snapshot(snap);
                     }
                 }
 
                 // Check if this line ALSO has TargetV= (single-line status)
                 if (line.find("TargetV=") != std::string::npos) {
                     PwrGateSnapshot snap;
-                    if (pwrgate::parse(line, line, snap) && cb_) {
-                        cb_(snap);
-                        last_snap_time = std::chrono::steady_clock::now();
-                        stale_reconnects_since_data = 0;
-                        process_charger_logic(snap, last_snap_time);
+                    if (pwrgate::parse(line, line, snap)) {
+                        process_snapshot(snap);
                     }
                     pending_status.clear();
                 } else {
@@ -463,12 +482,8 @@ void SerialReader::read_loop() {
             } else if (!pending_status.empty() &&
                        line.find("TargetV=") != std::string::npos) {
                 PwrGateSnapshot snap;
-                if (pwrgate::parse(pending_status, line, snap) && cb_) {
-                    cb_(snap);
-                    auto now_s = std::chrono::steady_clock::now();
-                    last_snap_time = now_s;
-                    stale_reconnects_since_data = 0; // data is flowing, reset escalation counter
-                    process_charger_logic(snap, now_s);
+                if (pwrgate::parse(pending_status, line, snap)) {
+                    process_snapshot(snap);
                 }
                 pending_status.clear();
             }

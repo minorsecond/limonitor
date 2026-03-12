@@ -69,6 +69,13 @@ private:
     std::chrono::steady_clock::time_point charger_stuck_since_;
     std::chrono::steady_clock::time_point last_charger_recovery_;
 
+    // Last seen target values to persist when status updates omit them
+    double last_target_v_{0.0};
+    double last_target_a_{0.0};
+    double last_stop_a_{0.0};
+    int    last_temp_{0};
+    int    last_pss_{0};
+
     static constexpr long STUCK_TIMEOUT_S    = 900;  // 15 min before first recovery
     static constexpr long RECOVERY_COOLDOWN_S = 1800; // 30 min between attempts
     static constexpr long STALE_RECONNECT_S  = 300;  // 5 min without any data → reconnect
