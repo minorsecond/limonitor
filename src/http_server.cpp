@@ -3055,15 +3055,15 @@ html.light .pwr-modal-submit{background:#16a34a}
 
     if (s.protection.any()) {
         o += "<div class=\"alert\"><b>Protection Active:</b>";
-        if (s.protection.cell_overvoltage)      o += " Cell&nbsp;OV";
-        if (s.protection.cell_undervoltage)     o += " Cell&nbsp;UV";
-        if (s.protection.pack_overvoltage)      o += " Pack&nbsp;OV";
-        if (s.protection.pack_undervoltage)     o += " Pack&nbsp;UV";
-        if (s.protection.charge_overtemp)       o += " Chg&nbsp;OT";
-        if (s.protection.discharge_overtemp)    o += " Dchg&nbsp;OT";
-        if (s.protection.charge_overcurrent)    o += " Chg&nbsp;OC";
-        if (s.protection.discharge_overcurrent) o += " Dchg&nbsp;OC";
-        if (s.protection.short_circuit)         o += " Short&nbsp;Circuit";
+        if (s.protection.cell_overvoltage)      o += " <span title=\"Individual cell voltage too high. Balancing or reducing charge voltage recommended.\">Cell&nbsp;OV</span>";
+        if (s.protection.cell_undervoltage)     o += " <span title=\"Individual cell voltage too low. Immediate recharge needed.\">Cell&nbsp;UV</span>";
+        if (s.protection.pack_overvoltage)      o += " <span title=\"Total battery voltage too high. Charge disabled.\">Pack&nbsp;OV</span>";
+        if (s.protection.pack_undervoltage)     o += " <span title=\"Total battery voltage too low. Load disconnected to prevent damage.\">Pack&nbsp;UV</span>";
+        if (s.protection.charge_overtemp)       o += " <span title=\"Battery too hot to charge. Charging disabled until temperature drops.\">Chg&nbsp;OT</span>";
+        if (s.protection.discharge_overtemp)    o += " <span title=\"Battery too hot to discharge. Loads may be disconnected.\">Dchg&nbsp;OT</span>";
+        if (s.protection.charge_overcurrent)    o += " <span title=\"Charging current exceeds safety limit. Charging slowed or disabled.\">Chg&nbsp;OC</span>";
+        if (s.protection.discharge_overcurrent) o += " <span title=\"Discharge current exceeds safety limit. Load may be disconnected.\">Dchg&nbsp;OC</span>";
+        if (s.protection.short_circuit)         o += " <span title=\"Heavy current surge detected. BMS has disconnected for safety.\">Short&nbsp;Circuit</span>";
         o += "</div>\n";
     }
 
