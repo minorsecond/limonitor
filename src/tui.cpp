@@ -112,8 +112,8 @@ void TUI::draw(const BatterySnapshot& snap, const std::string& ble_st,
     attron(COLOR_PAIR(C_HEADER) | A_BOLD);
     mvhline(0, 0, ' ', cols);
     mvprintw(0, 1, " limonitor  |  BLE: %-14s", ble_st.c_str());
-    if (!snap.device_name.empty())
-        mvprintw(0, 30, "  %s  %s", snap.device_name.c_str(), snap.ble_address.c_str());
+    if (snap.device && !snap.device->device_name.empty())
+        mvprintw(0, 30, "  %s  %s", snap.device->device_name.c_str(), snap.device->ble_address.c_str());
     attroff(COLOR_PAIR(C_HEADER) | A_BOLD);
 
     int row = 2;
@@ -126,14 +126,14 @@ void TUI::draw(const BatterySnapshot& snap, const std::string& ble_st,
         auto pg_opt = store_.latest_pwrgate();
         if (pg_opt && pg_opt->valid && content_ok()) {
             const auto& pg = *pg_opt;
-            attron(A_BOLD); mvprintw(row++, 1, "Charger   %s", pg.state.c_str()); attroff(A_BOLD);
+            attron(A_BOLD); mvprintw(row++, 1, "Charger   %s", pg.state ? pg.state->c_str() : ""); attroff(A_BOLD);
             if (content_ok())
-                mvprintw(row++, 3, "PS      : %6.2f V       Solar : %.2f V", pg.ps_v, pg.sol_v);
+                mvprintw(row++, 3, "PS      : %6.2f V       Solar : %.2f V", static_cast<double>(pg.ps_v), static_cast<double>(pg.sol_v));
             if (content_ok())
-                mvprintw(row++, 3, "Bat     : %6.2f V  %5.2f A  (charger-measured)", pg.bat_v, pg.bat_a);
+                mvprintw(row++, 3, "Bat     : %6.2f V  %5.2f A  (charger-measured)", static_cast<double>(pg.bat_v), static_cast<double>(pg.bat_a));
             if (content_ok())
                 mvprintw(row++, 3, "Target  : %.2f V / %.2f A   stop @ %.2f A",
-                         pg.target_v, pg.target_a, pg.stop_a);
+                         static_cast<double>(pg.target_v), static_cast<double>(pg.target_a), static_cast<double>(pg.stop_a));
             if (content_ok()) {
                 int pwm_pct = pg.pwm * 100 / 1023;
                 mvprintw(row++, 3, "PWM     : %4d (%3d%%)   Elapsed: %d min   Temp: %d",
@@ -151,25 +151,25 @@ void TUI::draw(const BatterySnapshot& snap, const std::string& ble_st,
 
     attron(A_BOLD); mvprintw(row, 1, "Pack"); attroff(A_BOLD);
     row++;
-    if (content_ok()) mvprintw(row++, 3, "Voltage  : %.3f V", snap.total_voltage_v);
-    const char* dir = snap.current_a >  0.01 ? "-> DISCHARGE" :
-                      snap.current_a < -0.01 ? "<- CHARGE   " : "   IDLE     ";
-    if (content_ok()) mvprintw(row++, 3, "Current  : %+.2f A  %s", snap.current_a, dir);
-    if (content_ok()) mvprintw(row++, 3, "Power    : %+.1f W",     snap.power_w);
+    if (content_ok()) mvprintw(row++, 3, "Voltage  : %.3f V", static_cast<double>(snap.total_voltage_v));
+    const char* dir = snap.current_a >  0.01f ? "-> DISCHARGE" :
+                      snap.current_a < -0.01f ? "<- CHARGE   " : "   IDLE     ";
+    if (content_ok()) mvprintw(row++, 3, "Current  : %+.2f A  %s", static_cast<double>(snap.current_a), dir);
+    if (content_ok()) mvprintw(row++, 3, "Power    : %+.1f W",     static_cast<double>(snap.power_w));
 
     if (content_ok()) {
-        double soc = snap.soc_pct / 100.0;
+        double soc = static_cast<double>(snap.soc_pct) / 100.0;
         int soc_color = soc > 0.5 ? C_GREEN : (soc > 0.2 ? C_YELLOW : C_RED);
-        mvprintw(row, 3, "SoC      : %5.1f %%  [", snap.soc_pct);
+        mvprintw(row, 3, "SoC      : %5.1f %%  [", static_cast<double>(snap.soc_pct));
         int bar_start = 24, bar_w = std::min(cols - bar_start - 2, 40);
         draw_bar(row, bar_start, bar_w, soc, soc_color);
         mvprintw(row, bar_start + bar_w, "]");
         row++;
     }
-    if (content_ok()) mvprintw(row++, 3, "Capacity : %.2f / %.2f Ah", snap.remaining_ah, snap.nominal_ah);
-    if (content_ok() && snap.time_remaining_h > 0.0) {
-        const char* time_lbl = snap.current_a < -0.01 ? "to full" : "to empty";
-        mvprintw(row++, 3, "Est. Time: %.1f h %s", snap.time_remaining_h, time_lbl);
+    if (content_ok()) mvprintw(row++, 3, "Capacity : %.2f / %.2f Ah", static_cast<double>(snap.remaining_ah), static_cast<double>(snap.nominal_ah));
+    if (content_ok() && snap.time_remaining_h > 0.0f) {
+        const char* time_lbl = snap.current_a < -0.01f ? "to full" : "to empty";
+        mvprintw(row++, 3, "Est. Time: %.1f h %s", static_cast<double>(snap.time_remaining_h), time_lbl);
     }
     if (content_ok()) mvprintw(row++, 3, "Cycles   : %u", snap.cycle_count);
     if (content_ok() && (snap.charge_mosfet || snap.discharge_mosfet))
@@ -182,7 +182,7 @@ void TUI::draw(const BatterySnapshot& snap, const std::string& ble_st,
         int start   = std::max(0, (int)hist.size() - spark_w);
         double vlo = 1e9, vhi = 0;
         for (int i = start; i < (int)hist.size(); ++i) {
-            double v = hist[i].total_voltage_v;
+            double v = static_cast<double>(hist[i].total_voltage_v);
             if (v < vlo) vlo = v;
             if (v > vhi) vhi = v;
         }
@@ -191,7 +191,7 @@ void TUI::draw(const BatterySnapshot& snap, const std::string& ble_st,
         static const char spark_ch[] = {'_', '.', ',', '-', '=', '+', '*', '#'};
         mvprintw(row, 3, "Volt hist: ");
         for (int i = start; i < (int)hist.size(); ++i) {
-            int lv = static_cast<int>((hist[i].total_voltage_v - vlo) / rng * 7.0 + 0.5);
+            int lv = static_cast<int>((static_cast<double>(hist[i].total_voltage_v) - vlo) / rng * 7.0 + 0.5);
             if (lv < 0) lv = 0;
             if (lv > 7) lv = 7;
             mvaddch(row, 14 + (i - start), spark_ch[lv]);
@@ -203,7 +203,7 @@ void TUI::draw(const BatterySnapshot& snap, const std::string& ble_st,
     if (!snap.cell_voltages_v.empty() && content_ok()) {
         attron(A_BOLD);
         mvprintw(row, 1, "Cells   min=%.3fV  max=%.3fV  delta=%.1fmV",
-            snap.cell_min_v, snap.cell_max_v, snap.cell_delta_v * 1000.0);
+            static_cast<double>(snap.cell_min_v), static_cast<double>(snap.cell_max_v), static_cast<double>(snap.cell_delta_v) * 1000.0);
         attroff(A_BOLD);
         row++;
         int cell_bar_w = std::min(cols / 2 - 14, 30);
@@ -211,7 +211,7 @@ void TUI::draw(const BatterySnapshot& snap, const std::string& ble_st,
             static_cast<size_t>(content_rows + 2 - row) : 0;
         size_t n_show = std::min(snap.cell_voltages_v.size(), max_cells);
         for (size_t i = 0; i < n_show && content_ok(); ++i) {
-            double cv = snap.cell_voltages_v[i];
+            double cv = static_cast<double>(snap.cell_voltages_v[i]);
             bool bad_spread = snap.cell_delta_v > 0.010; // only warn if >10mV spread
             bool is_min = bad_spread && (std::abs(cv - snap.cell_min_v) < 0.0005);
             bool is_max = bad_spread && (std::abs(cv - snap.cell_max_v) < 0.0005);
@@ -257,16 +257,16 @@ void TUI::draw(const BatterySnapshot& snap, const std::string& ble_st,
         if (pg_opt && pg_opt->valid && content_ok()) {
             const auto& pg = *pg_opt;
             row++;
-            attron(A_BOLD); mvprintw(row++, 1, "Charger   %s", pg.state.c_str()); attroff(A_BOLD);
+            attron(A_BOLD); mvprintw(row++, 1, "Charger   %s", pg.state ? pg.state->c_str() : ""); attroff(A_BOLD);
             if (content_ok())
                 mvprintw(row++, 3, "PS      : %6.2f V       Solar : %.2f V",
-                         pg.ps_v, pg.sol_v);
+                         static_cast<double>(pg.ps_v), static_cast<double>(pg.sol_v));
             if (content_ok())
                 mvprintw(row++, 3, "Bat     : %6.2f V  %5.2f A  (charger-measured)",
-                         pg.bat_v, pg.bat_a);
+                         static_cast<double>(pg.bat_v), static_cast<double>(pg.bat_a));
             if (content_ok())
                 mvprintw(row++, 3, "Target  : %.2f V / %.2f A   stop @ %.2f A",
-                         pg.target_v, pg.target_a, pg.stop_a);
+                         static_cast<double>(pg.target_v), static_cast<double>(pg.target_a), static_cast<double>(pg.stop_a));
             if (content_ok()) {
                 int pwm_pct = pg.pwm * 100 / 1023;
                 mvprintw(row++, 3, "PWM     : %4d (%3d%%)   Elapsed: %d min   Temp: %d",
@@ -287,7 +287,7 @@ void TUI::draw(const BatterySnapshot& snap, const std::string& ble_st,
     attron(COLOR_PAIR(C_HEADER));
     mvhline(rows - 1, 0, ' ', cols);
     mvprintw(rows - 1, 1, " q=quit  s=settings  ?=help  sw_ver=%s  http://localhost:%d/",
-             snap.sw_version.c_str(), http_port_);
+             snap.device ? snap.device->sw_version.c_str() : "", http_port_);
     attroff(COLOR_PAIR(C_HEADER));
 
     refresh();

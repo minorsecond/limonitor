@@ -38,7 +38,7 @@ void test_make_telemetry_sample() {
 
     auto s = make_telemetry_sample(123, &bat, &chg, 15.0, true, 25.0);
     ASSERT(s.test_id == 123, "Sample test_id matches");
-    ASSERT(s.battery_voltage == 13.2, "Sample voltage matches");
+    ASSERT(std::abs(s.battery_voltage - 13.2) < 0.001, "Sample voltage matches");
 }
 
 void test_test_runner_start_stop() {
@@ -89,7 +89,7 @@ void test_test_runner_refuses_maintenance_mode() {
     store.update(bat);
 
     PwrGateSnapshot chg;
-    chg.state = "Maintenance";
+    chg.state = std::make_shared<std::string>("Maintenance");
     chg.valid = true;
     store.update_pwrgate(chg);
 

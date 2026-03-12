@@ -48,21 +48,21 @@ TestTelemetrySample make_telemetry_sample(
         std::chrono::system_clock::to_time_t(bat->timestamp)) : 0;
 
     if (bat && bat->valid) {
-        s.battery_voltage = bat->total_voltage_v;
-        s.battery_current = bat->current_a;
-        s.battery_soc = bat->soc_pct;
-        s.load_power = load_w > 0 ? load_w : (bat->power_w > 0 ? bat->power_w : 0);
-        s.cell_delta = bat->cell_delta_v;
-        s.temperature = bat->temperatures_c.empty() ? 0 : bat->temperatures_c[0];
+        s.battery_voltage = static_cast<double>(bat->total_voltage_v);
+        s.battery_current = static_cast<double>(bat->current_a);
+        s.battery_soc = static_cast<double>(bat->soc_pct);
+        s.load_power = load_w > 0 ? load_w : (static_cast<double>(bat->power_w) > 0 ? static_cast<double>(bat->power_w) : 0);
+        s.cell_delta = static_cast<double>(bat->cell_delta_v);
+        s.temperature = bat->temperatures_c.empty() ? 0 : static_cast<double>(bat->temperatures_c[0]);
     }
 
     if (chg && chg->valid) {
-        s.grid_voltage = chg->ps_v;
-        s.solar_voltage = chg->sol_v;
-        s.solar_current = chg->bat_a > 0 ? chg->bat_a : 0;  // charge current when solar
-        s.charger_state = chg->state;
-        s.charger_voltage = chg->bat_v;
-        s.charger_current = chg->bat_a;
+        s.grid_voltage = static_cast<double>(chg->ps_v);
+        s.solar_voltage = static_cast<double>(chg->sol_v);
+        s.solar_current = chg->bat_a > 0.0f ? static_cast<double>(chg->bat_a) : 0;  // charge current when solar
+        s.charger_state = chg->state ? *chg->state : "";
+        s.charger_voltage = static_cast<double>(chg->bat_v);
+        s.charger_current = static_cast<double>(chg->bat_a);
     }
 
     s.radio_tx_active = tx_active;

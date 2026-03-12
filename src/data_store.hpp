@@ -125,6 +125,9 @@ private:
     Database* db_{nullptr};
     bool loading_history_{false};
 
+    std::shared_ptr<DeviceInfo> shared_device_info_;
+    std::shared_ptr<std::string> shared_pwrgate_state_;
+
     void process_system_events(const BatterySnapshot& snap,
                               const std::optional<PwrGateSnapshot>& pg,
                               const AnalyticsSnapshot& an);

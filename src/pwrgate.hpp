@@ -2,22 +2,24 @@
 #include <chrono>
 #include <string>
 
+#include <memory>
+
 // EpicPowerGate 2 status snapshot
 struct PwrGateSnapshot {
     std::chrono::system_clock::time_point timestamp;
     bool valid{false};
 
-    std::string state;      // "Charging", "Float", "Idle", ...
-    double ps_v{0.0};       // Power-supply / charger input voltage
-    double bat_v{0.0};      // Battery voltage (charger-measured)
-    double bat_a{0.0};      // Charge current (A)
-    double sol_v{0.0};      // Solar panel voltage
+    std::shared_ptr<std::string> state; // Shared string for memory efficiency
+    float ps_v{0.0f};       // Power-supply / charger input voltage
+    float bat_v{0.0f};      // Battery voltage (charger-measured)
+    float bat_a{0.0f};      // Charge current (A)
+    float sol_v{0.0f};      // Solar panel voltage
     int    minutes{0};      // Elapsed charge time (min)
     int    pwm{0};          // PWM duty cycle (0-1023)
     int    adc{0};          // ADC raw reading
-    double target_v{0.0};   // Target (absorption) voltage
-    double target_a{0.0};   // Max charge current
-    double stop_a{0.0};     // Tail-current threshold (charge stop)
+    float target_v{0.0f};   // Target (absorption) voltage
+    float target_a{0.0f};   // Max charge current
+    float stop_a{0.0f};     // Tail-current threshold (charge stop)
     int    temp{0};         // Temperature sensor raw
     int    pss{0};          // Power-supply-state flag
 };

@@ -140,21 +140,23 @@ int main(int argc, char** argv) {
     ble.stop();
 
     printf("\n=== Battery Snapshot ===\n");
-    printf("  Device:      %s  (%s)\n", snap.device_name.c_str(), snap.ble_address.c_str());
-    printf("  Voltage:     %.3f V\n",   snap.total_voltage_v);
-    printf("  Current:     %+.3f A\n",  snap.current_a);
-    printf("  Power:       %+.1f W\n",  snap.power_w);
-    printf("  SoC:         %.1f %%\n",  snap.soc_pct);
-    printf("  Remaining:   %.2f / %.2f Ah\n", snap.remaining_ah, snap.nominal_ah);
+    printf("  Device:      %s  (%s)\n",
+           snap.device ? snap.device->device_name.c_str() : "",
+           snap.device ? snap.device->ble_address.c_str() : "");
+    printf("  Voltage:     %.3f V\n",   static_cast<double>(snap.total_voltage_v));
+    printf("  Current:     %+.3f A\n",  static_cast<double>(snap.current_a));
+    printf("  Power:       %+.1f W\n",  static_cast<double>(snap.power_w));
+    printf("  SoC:         %.1f %%\n",  static_cast<double>(snap.soc_pct));
+    printf("  Remaining:   %.2f / %.2f Ah\n", static_cast<double>(snap.remaining_ah), static_cast<double>(snap.nominal_ah));
     printf("  Cells (%zu):", snap.cell_voltages_v.size());
-    for (double v : snap.cell_voltages_v) printf("  %.3f", v);
+    for (float v : snap.cell_voltages_v) printf("  %.3f", static_cast<double>(v));
     printf("\n");
-    printf("  Cell delta:  %.3f V\n",   snap.cell_delta_v);
+    printf("  Cell delta:  %.3f V\n",   static_cast<double>(snap.cell_delta_v));
     printf("  Temps (°C):");
-    for (double t : snap.temperatures_c) printf("  %.1f", t);
+    for (float t : snap.temperatures_c) printf("  %.1f", static_cast<double>(t));
     printf("\n");
-    if (snap.time_remaining_h > 0.0)
-        printf("  Time left:   %.2f h\n", snap.time_remaining_h);
+    if (snap.time_remaining_h > 0.0f)
+        printf("  Time left:   %.2f h\n", static_cast<double>(snap.time_remaining_h));
 
     printf("\n=== Checks ===\n");
     std::vector<Check> checks;

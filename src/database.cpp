@@ -480,19 +480,19 @@ void Database::insert_battery(const BatterySnapshot& s) {
         LOG_WARN("DB: prepare battery: %s", sqlite3_errmsg(db)); return;
     }
     sqlite3_bind_int64(stmt,  1, ts);
-    sqlite3_bind_text(stmt,   2, s.device_name.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_double(stmt, 3, s.total_voltage_v);
-    sqlite3_bind_double(stmt, 4, s.current_a);
-    sqlite3_bind_double(stmt, 5, s.soc_pct);
-    sqlite3_bind_double(stmt, 6, s.remaining_ah);
-    sqlite3_bind_double(stmt, 7, s.nominal_ah);
-    sqlite3_bind_double(stmt, 8, s.power_w);
-    sqlite3_bind_double(stmt, 9, s.cell_min_v);
-    sqlite3_bind_double(stmt,10, s.cell_max_v);
-    sqlite3_bind_double(stmt,11, s.cell_delta_v);
+    sqlite3_bind_text(stmt,   2, s.device ? s.device->device_name.c_str() : "", -1, SQLITE_TRANSIENT);
+    sqlite3_bind_double(stmt, 3, static_cast<double>(s.total_voltage_v));
+    sqlite3_bind_double(stmt, 4, static_cast<double>(s.current_a));
+    sqlite3_bind_double(stmt, 5, static_cast<double>(s.soc_pct));
+    sqlite3_bind_double(stmt, 6, static_cast<double>(s.remaining_ah));
+    sqlite3_bind_double(stmt, 7, static_cast<double>(s.nominal_ah));
+    sqlite3_bind_double(stmt, 8, static_cast<double>(s.power_w));
+    sqlite3_bind_double(stmt, 9, static_cast<double>(s.cell_min_v));
+    sqlite3_bind_double(stmt,10, static_cast<double>(s.cell_max_v));
+    sqlite3_bind_double(stmt,11, static_cast<double>(s.cell_delta_v));
     sqlite3_bind_text(stmt,  12, cells.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_double(stmt,13, t1);
-    sqlite3_bind_double(stmt,14, t2);
+    sqlite3_bind_double(stmt,13, static_cast<double>(t1));
+    sqlite3_bind_double(stmt,14, static_cast<double>(t2));
 
     if (sqlite3_step(stmt) != SQLITE_DONE)
         LOG_WARN("DB: insert battery: %s", sqlite3_errmsg(db));
@@ -535,19 +535,19 @@ void Database::insert_battery_batch(const std::vector<BatterySnapshot>& batch) {
         double t2 = s.temperatures_c.size() > 1 ? s.temperatures_c[1] : 0.0;
 
         sqlite3_bind_int64(stmt,  1, ts);
-        sqlite3_bind_text(stmt,   2, s.device_name.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_double(stmt, 3, s.total_voltage_v);
-        sqlite3_bind_double(stmt, 4, s.current_a);
-        sqlite3_bind_double(stmt, 5, s.soc_pct);
-        sqlite3_bind_double(stmt, 6, s.remaining_ah);
-        sqlite3_bind_double(stmt, 7, s.nominal_ah);
-        sqlite3_bind_double(stmt, 8, s.power_w);
-        sqlite3_bind_double(stmt, 9, s.cell_min_v);
-        sqlite3_bind_double(stmt,10, s.cell_max_v);
-        sqlite3_bind_double(stmt,11, s.cell_delta_v);
+        sqlite3_bind_text(stmt,   2, s.device ? s.device->device_name.c_str() : "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_double(stmt, 3, static_cast<double>(s.total_voltage_v));
+        sqlite3_bind_double(stmt, 4, static_cast<double>(s.current_a));
+        sqlite3_bind_double(stmt, 5, static_cast<double>(s.soc_pct));
+        sqlite3_bind_double(stmt, 6, static_cast<double>(s.remaining_ah));
+        sqlite3_bind_double(stmt, 7, static_cast<double>(s.nominal_ah));
+        sqlite3_bind_double(stmt, 8, static_cast<double>(s.power_w));
+        sqlite3_bind_double(stmt, 9, static_cast<double>(s.cell_min_v));
+        sqlite3_bind_double(stmt,10, static_cast<double>(s.cell_max_v));
+        sqlite3_bind_double(stmt,11, static_cast<double>(s.cell_delta_v));
         sqlite3_bind_text(stmt,  12, cells.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_double(stmt,13, t1);
-        sqlite3_bind_double(stmt,14, t2);
+        sqlite3_bind_double(stmt,13, static_cast<double>(t1));
+        sqlite3_bind_double(stmt,14, static_cast<double>(t2));
 
         if (sqlite3_step(stmt) != SQLITE_DONE) {
             LOG_WARN("DB: insert battery batch item: %s", sqlite3_errmsg(db));
@@ -577,14 +577,14 @@ void Database::insert_charger(const PwrGateSnapshot& p) {
         LOG_WARN("DB: prepare charger: %s", sqlite3_errmsg(db)); return;
     }
     sqlite3_bind_int64(stmt,  1, ts);
-    sqlite3_bind_text(stmt,   2, p.state.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_double(stmt, 3, p.ps_v);
-    sqlite3_bind_double(stmt, 4, p.bat_v);
-    sqlite3_bind_double(stmt, 5, p.bat_a);
-    sqlite3_bind_double(stmt, 6, p.sol_v);
-    sqlite3_bind_double(stmt, 7, p.target_v);
-    sqlite3_bind_double(stmt, 8, p.target_a);
-    sqlite3_bind_double(stmt, 9, p.stop_a);
+    sqlite3_bind_text(stmt,   2, p.state ? p.state->c_str() : "", -1, SQLITE_TRANSIENT);
+    sqlite3_bind_double(stmt, 3, static_cast<double>(p.ps_v));
+    sqlite3_bind_double(stmt, 4, static_cast<double>(p.bat_v));
+    sqlite3_bind_double(stmt, 5, static_cast<double>(p.bat_a));
+    sqlite3_bind_double(stmt, 6, static_cast<double>(p.sol_v));
+    sqlite3_bind_double(stmt, 7, static_cast<double>(p.target_v));
+    sqlite3_bind_double(stmt, 8, static_cast<double>(p.target_a));
+    sqlite3_bind_double(stmt, 9, static_cast<double>(p.stop_a));
     sqlite3_bind_int(stmt,   10, p.pwm);
     sqlite3_bind_int(stmt,   11, p.minutes);
     sqlite3_bind_int(stmt,   12, p.temp);
@@ -620,14 +620,14 @@ void Database::insert_charger_batch(const std::vector<PwrGateSnapshot>& batch) {
         auto ts = static_cast<sqlite3_int64>(std::chrono::system_clock::to_time_t(p.timestamp));
 
         sqlite3_bind_int64(stmt,  1, ts);
-        sqlite3_bind_text(stmt,   2, p.state.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_double(stmt, 3, p.ps_v);
-        sqlite3_bind_double(stmt, 4, p.bat_v);
-        sqlite3_bind_double(stmt, 5, p.bat_a);
-        sqlite3_bind_double(stmt, 6, p.sol_v);
-        sqlite3_bind_double(stmt, 7, p.target_v);
-        sqlite3_bind_double(stmt, 8, p.target_a);
-        sqlite3_bind_double(stmt, 9, p.stop_a);
+        sqlite3_bind_text(stmt,   2, p.state ? p.state->c_str() : "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_double(stmt, 3, static_cast<double>(p.ps_v));
+        sqlite3_bind_double(stmt, 4, static_cast<double>(p.bat_v));
+        sqlite3_bind_double(stmt, 5, static_cast<double>(p.bat_a));
+        sqlite3_bind_double(stmt, 6, static_cast<double>(p.sol_v));
+        sqlite3_bind_double(stmt, 7, static_cast<double>(p.target_v));
+        sqlite3_bind_double(stmt, 8, static_cast<double>(p.target_a));
+        sqlite3_bind_double(stmt, 9, static_cast<double>(p.stop_a));
         sqlite3_bind_int(stmt,   10, p.pwm);
         sqlite3_bind_int(stmt,   11, p.minutes);
         sqlite3_bind_int(stmt,   12, p.temp);
@@ -788,34 +788,42 @@ std::vector<BatterySnapshot> Database::load_battery_history(size_t n) const {
     auto* db = db_handle(db_);
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return result;
 
+    std::shared_ptr<DeviceInfo> shared_device;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         BatterySnapshot s;
         s.timestamp = std::chrono::system_clock::from_time_t(
             static_cast<time_t>(sqlite3_column_int64(stmt, 0)));
-        if (auto* t = sqlite3_column_text(stmt, 1)) s.device_name = reinterpret_cast<const char*>(t);
-        s.total_voltage_v = sqlite3_column_double(stmt, 2);
-        s.current_a       = sqlite3_column_double(stmt, 3);
-        s.soc_pct         = sqlite3_column_double(stmt, 4);
-        s.remaining_ah    = sqlite3_column_double(stmt, 5);
-        s.nominal_ah      = sqlite3_column_double(stmt, 6);
-        s.power_w         = sqlite3_column_double(stmt, 7);
-        s.cell_min_v      = sqlite3_column_double(stmt, 8);
-        s.cell_max_v      = sqlite3_column_double(stmt, 9);
-        s.cell_delta_v    = sqlite3_column_double(stmt, 10);
+        if (auto* t = sqlite3_column_text(stmt, 1)) {
+            const char* dname = reinterpret_cast<const char*>(t);
+            if (!shared_device || shared_device->device_name != dname) {
+                shared_device = std::make_shared<DeviceInfo>();
+                shared_device->device_name = dname;
+            }
+            s.device = shared_device;
+        }
+        s.total_voltage_v = static_cast<float>(sqlite3_column_double(stmt, 2));
+        s.current_a       = static_cast<float>(sqlite3_column_double(stmt, 3));
+        s.soc_pct         = static_cast<float>(sqlite3_column_double(stmt, 4));
+        s.remaining_ah    = static_cast<float>(sqlite3_column_double(stmt, 5));
+        s.nominal_ah      = static_cast<float>(sqlite3_column_double(stmt, 6));
+        s.power_w         = static_cast<float>(sqlite3_column_double(stmt, 7));
+        s.cell_min_v      = static_cast<float>(sqlite3_column_double(stmt, 8));
+        s.cell_max_v      = static_cast<float>(sqlite3_column_double(stmt, 9));
+        s.cell_delta_v    = static_cast<float>(sqlite3_column_double(stmt, 10));
         if (auto* c = sqlite3_column_text(stmt, 11)) {
             const char* p = reinterpret_cast<const char*>(c);
             while (*p) {
                 char* end;
-                double v = std::strtod(p, &end);
+                float v = std::strtof(p, &end);
                 if (end == p) break;
                 s.cell_voltages_v.push_back(v);
                 p = (*end == ',') ? end + 1 : end;
             }
         }
-        double t1 = sqlite3_column_double(stmt, 12);
-        double t2 = sqlite3_column_double(stmt, 13);
-        if (t1 != 0.0) s.temperatures_c.push_back(t1);
-        if (t2 != 0.0) s.temperatures_c.push_back(t2);
+        float t1 = static_cast<float>(sqlite3_column_double(stmt, 12));
+        float t2 = static_cast<float>(sqlite3_column_double(stmt, 13));
+        if (t1 != 0.0f) s.temperatures_c.push_back(t1);
+        if (t2 != 0.0f) s.temperatures_c.push_back(t2);
         s.valid = true;
         result.push_back(std::move(s));
     }
@@ -840,18 +848,25 @@ std::vector<PwrGateSnapshot> Database::load_charger_history(size_t n) const {
     auto* db = db_handle(db_);
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return result;
 
+    std::shared_ptr<std::string> shared_state;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         PwrGateSnapshot p;
         p.timestamp = std::chrono::system_clock::from_time_t(
             static_cast<time_t>(sqlite3_column_int64(stmt, 0)));
-        if (auto* t = sqlite3_column_text(stmt, 1)) p.state = reinterpret_cast<const char*>(t);
-        p.ps_v     = sqlite3_column_double(stmt, 2);
-        p.bat_v    = sqlite3_column_double(stmt, 3);
-        p.bat_a    = sqlite3_column_double(stmt, 4);
-        p.sol_v    = sqlite3_column_double(stmt, 5);
-        p.target_v = sqlite3_column_double(stmt, 6);
-        p.target_a = sqlite3_column_double(stmt, 7);
-        p.stop_a   = sqlite3_column_double(stmt, 8);
+        if (auto* t = sqlite3_column_text(stmt, 1)) {
+            const char* state_val = reinterpret_cast<const char*>(t);
+            if (!shared_state || *shared_state != state_val) {
+                shared_state = std::make_shared<std::string>(state_val);
+            }
+            p.state = shared_state;
+        }
+        p.ps_v     = static_cast<float>(sqlite3_column_double(stmt, 2));
+        p.bat_v    = static_cast<float>(sqlite3_column_double(stmt, 3));
+        p.bat_a    = static_cast<float>(sqlite3_column_double(stmt, 4));
+        p.sol_v    = static_cast<float>(sqlite3_column_double(stmt, 5));
+        p.target_v = static_cast<float>(sqlite3_column_double(stmt, 6));
+        p.target_a = static_cast<float>(sqlite3_column_double(stmt, 7));
+        p.stop_a   = static_cast<float>(sqlite3_column_double(stmt, 8));
         p.pwm      = sqlite3_column_int(stmt,  9);
         p.minutes  = sqlite3_column_int(stmt, 10);
         p.temp     = sqlite3_column_int(stmt, 11);

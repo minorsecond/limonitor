@@ -39,20 +39,20 @@ bool parse(const uint8_t* d, size_t len, BatterySnapshot& snap) {
         return false;
     }
 
-    snap.total_voltage_v = u32le(d + 12) / 1000.0;
+    snap.total_voltage_v = static_cast<float>(u32le(d + 12) / 1000.0);
 
     // LiTime sign convention: positive int32 = charging, negative = discharging.
     // We negate here to match the rest of the codebase (positive = discharging).
-    snap.current_a = -(s32le(d + 48) / 1000.0);
+    snap.current_a = -static_cast<float>(s32le(d + 48) / 1000.0);
 
     snap.cell_voltages_v.clear();
     snap.cell_voltages_v.reserve(16);
-    snap.cell_min_v = 9999.0;
-    snap.cell_max_v = 0.0;
+    snap.cell_min_v = 9999.0f;
+    snap.cell_max_v = 0.0f;
     for (int i = 0; i < 16; ++i) {
         uint16_t raw = u16le(d + 16 + i * 2);
         if (raw == 0) continue;
-        double v = raw / 1000.0;
+        float v = static_cast<float>(raw / 1000.0);
         snap.cell_voltages_v.push_back(v);
         if (v < snap.cell_min_v) snap.cell_min_v = v;
         if (v > snap.cell_max_v) snap.cell_max_v = v;
@@ -60,15 +60,15 @@ bool parse(const uint8_t* d, size_t len, BatterySnapshot& snap) {
     if (!snap.cell_voltages_v.empty())
         snap.cell_delta_v = snap.cell_max_v - snap.cell_min_v;
 
-    double cell_temp_c = s16le(d + 52);
-    double bms_temp_c  = s16le(d + 54);
+    float cell_temp_c = static_cast<float>(s16le(d + 52));
+    float bms_temp_c  = static_cast<float>(s16le(d + 54));
     snap.temperatures_c = {cell_temp_c, bms_temp_c};
 
-    snap.remaining_ah = u16le(d + 62) / 100.0;
-    snap.nominal_ah   = u16le(d + 64) / 100.0;
+    snap.remaining_ah = static_cast<float>(u16le(d + 62) / 100.0);
+    snap.nominal_ah   = static_cast<float>(u16le(d + 64) / 100.0);
 
-    if (snap.nominal_ah > 0.0)
-        snap.soc_pct = (snap.remaining_ah / snap.nominal_ah) * 100.0;
+    if (snap.nominal_ah > 0.0f)
+        snap.soc_pct = (snap.remaining_ah / snap.nominal_ah) * 100.0f;
 
     // Protection flags at offset 76 (uint32 bitmask)
     if (len > 79) {
@@ -92,7 +92,7 @@ bool parse(const uint8_t* d, size_t len, BatterySnapshot& snap) {
         snap.charge_mosfet = !(bstate & 0x0004);  // off when charge explicitly disabled
         uint16_t bms_soc = u16le(d + 90);
         if (bms_soc > 0)
-            snap.soc_pct = static_cast<double>(bms_soc);
+            snap.soc_pct = static_cast<float>(bms_soc);
     }
 
     // Cycle count at offset 96 (uint32 LE)
@@ -102,12 +102,12 @@ bool parse(const uint8_t* d, size_t len, BatterySnapshot& snap) {
     snap.power_w = snap.total_voltage_v * snap.current_a;
     // positive current_a = discharging: time until empty
     // negative current_a = charging:   time until full
-    if (snap.current_a > 0.01)
+    if (snap.current_a > 0.01f)
         snap.time_remaining_h = snap.remaining_ah / snap.current_a;
-    else if (snap.current_a < -0.01)
+    else if (snap.current_a < -0.01f)
         snap.time_remaining_h = (snap.nominal_ah - snap.remaining_ah) / (-snap.current_a);
     else
-        snap.time_remaining_h = 0.0;
+        snap.time_remaining_h = 0.0f;
 
     snap.valid = true;
     return true;

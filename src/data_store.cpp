@@ -246,6 +246,16 @@ void DataStore::process_system_events(const BatterySnapshot& snap,
 void DataStore::update(BatterySnapshot snap) {
     {
         std::lock_guard<std::mutex> lk(mu_);
+
+        // Ensure device info is shared to save memory in history
+        if (snap.device) {
+            if (!shared_device_info_ || shared_device_info_->ble_address != snap.device->ble_address) {
+                shared_device_info_ = snap.device;
+            } else {
+                snap.device = shared_device_info_;
+            }
+        }
+
         process_tx_detection(snap);
         auto pg_opt = latest_pwrgate_locked();
         analytics_.on_battery(snap, pg_opt.has_value() ? &*pg_opt : nullptr);
@@ -346,6 +356,16 @@ std::vector<DiscoveredDevice> DataStore::discovered_devices() const {
 
 void DataStore::update_pwrgate(PwrGateSnapshot snap) {
     std::lock_guard<std::mutex> lk(mu_);
+
+    // Share state string to save memory
+    if (snap.state) {
+        if (!shared_pwrgate_state_ || *shared_pwrgate_state_ != *snap.state) {
+            shared_pwrgate_state_ = snap.state;
+        } else {
+            snap.state = shared_pwrgate_state_;
+        }
+    }
+
     process_tx_detection(snap);
     auto bat_opt = latest_locked();
     analytics_.on_charger(snap, bat_opt.has_value() ? &*bat_opt : nullptr);

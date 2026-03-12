@@ -429,8 +429,8 @@ void AnalyticsEngine::compute_extended_analytics(const BatterySnapshot& bat,
     // Charger abnormal detection
     snap_.charger_abnormal_warning.clear();
     if (chg && chg->valid) {
-        bool charging = (chg->state == "Charging" || chg->state == "Float");
-        if (charging && chg->bat_a < 0.3 && chg->target_a > 2.0) {
+        bool charging = (chg->state && (*chg->state == "Charging" || *chg->state == "Float"));
+        if (charging && chg->bat_a < 0.3f && chg->target_a > 2.0f) {
             chg_low_current_count_++;
             if (chg_low_current_count_ >= 3)
                 snap_.charger_abnormal_warning = "Charging but current extremely low";
@@ -452,11 +452,11 @@ void AnalyticsEngine::compute_extended_analytics(const BatterySnapshot& bat,
     // PSU limitation heuristic: charger maxed but voltage won't rise toward target
     if (chg && chg->valid && chg->target_v > 0.5) {
         bool in_bulk = (snap_.charging_stage == "Bulk");
-        bool below_target = (chg->bat_v < chg->target_v - 0.15);
+        bool below_target = (chg->bat_v < chg->target_v - 0.15f);
         bool charger_maxed = (chg->pwm > 800) ||
-                            (chg->target_a > 0.5 && chg->bat_a >= chg->target_a * 0.85);
+                            (chg->target_a > 0.5f && chg->bat_a >= chg->target_a * 0.85f);
         bool voltage_not_rising = (snap_.voltage_trend != "up");
-        bool charging = (chg->state == "Charging" || chg->state == "Float");
+        bool charging = (chg->state && (*chg->state == "Charging" || *chg->state == "Float"));
 
         bool psu_limited_now = false;
         if (in_bulk && below_target && charger_maxed && voltage_not_rising && charging) {
@@ -961,8 +961,9 @@ void AnalyticsEngine::on_charger(const PwrGateSnapshot& snap, const BatterySnaps
     }
     snap_.solar_energy_today_wh = solar_energy_wh_;
 
-    update_charging_stage(snap.bat_v, snap.target_v, snap.bat_a, snap.state);
-    prev_chg_a_ = snap.bat_a;
+    update_charging_stage(static_cast<double>(snap.bat_v), static_cast<double>(snap.target_v),
+                          static_cast<double>(snap.bat_a), snap.state ? *snap.state : "");
+    prev_chg_a_ = static_cast<double>(snap.bat_a);
 
     // Efficiency approximation: bat_v / ps_v. Valid for linear/series-pass chargers
     // where I_in ≈ I_out. For switching converters this is a voltage ratio, not
@@ -999,7 +1000,7 @@ void AnalyticsEngine::on_charger(const PwrGateSnapshot& snap, const BatterySnaps
         charger_runtime_day_ = chg_day;
         prev_chg_minutes_ = -1;
     }
-    if (snap.bat_a > 0.05 || snap.state == "Charging" || snap.state == "Float") {
+    if (snap.bat_a > 0.05f || (snap.state && (*snap.state == "Charging" || *snap.state == "Float"))) {
         int m = snap.minutes;
         if (prev_chg_minutes_ >= 0) {
             int delta = m - prev_chg_minutes_;

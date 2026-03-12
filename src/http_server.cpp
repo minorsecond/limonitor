@@ -1220,34 +1220,34 @@ std::string HttpServer::status_json(const BatterySnapshot& s, const std::string&
     o += "{\n";
     o += "  \"timestamp\": " + jstr(s.valid ? iso8601(s.timestamp) : "") + ",\n";
     o += "  \"ble_state\": " + jstr(ble_st) + ",\n";
-    o += "  \"device_name\": " + jstr(s.device_name) + ",\n";
-    o += "  \"device_address\": " + jstr(s.ble_address) + ",\n";
+    o += "  \"device_name\": " + jstr(s.device ? s.device->device_name : "") + ",\n";
+    o += "  \"device_address\": " + jstr(s.device ? s.device->ble_address : "") + ",\n";
     o += "  \"valid\": " + jbool(s.valid) + ",\n";
-    o += "  \"voltage_v\": " + jdbl(s.total_voltage_v) + ",\n";
-    o += "  \"current_a\": " + jdbl(s.current_a) + ",\n";
-    o += "  \"soc_pct\": " + jdbl(s.soc_pct, 1) + ",\n";
-    o += "  \"remaining_ah\": " + jdbl(s.remaining_ah) + ",\n";
-    o += "  \"nominal_ah\": " + jdbl(s.nominal_ah) + ",\n";
-    o += "  \"power_w\": " + jdbl(s.power_w) + ",\n";
-    o += "  \"time_remaining_h\": " + jdbl(s.time_remaining_h) + ",\n";
+    o += "  \"voltage_v\": " + jdbl(static_cast<double>(s.total_voltage_v)) + ",\n";
+    o += "  \"current_a\": " + jdbl(static_cast<double>(s.current_a)) + ",\n";
+    o += "  \"soc_pct\": " + jdbl(static_cast<double>(s.soc_pct), 1) + ",\n";
+    o += "  \"remaining_ah\": " + jdbl(static_cast<double>(s.remaining_ah)) + ",\n";
+    o += "  \"nominal_ah\": " + jdbl(static_cast<double>(s.nominal_ah)) + ",\n";
+    o += "  \"power_w\": " + jdbl(static_cast<double>(s.power_w)) + ",\n";
+    o += "  \"time_remaining_h\": " + jdbl(static_cast<double>(s.time_remaining_h)) + ",\n";
     o += "  \"cycle_count\": " + std::to_string(s.cycle_count) + ",\n";
     o += "  \"charge_mosfet\": " + jbool(s.charge_mosfet) + ",\n";
     o += "  \"discharge_mosfet\": " + jbool(s.discharge_mosfet) + ",\n";
-    o += "  \"cell_min_v\": " + jdbl(s.cell_min_v) + ",\n";
-    o += "  \"cell_max_v\": " + jdbl(s.cell_max_v) + ",\n";
-    o += "  \"cell_delta_v\": " + jdbl(s.cell_delta_v) + ",\n";
+    o += "  \"cell_min_v\": " + jdbl(static_cast<double>(s.cell_min_v)) + ",\n";
+    o += "  \"cell_max_v\": " + jdbl(static_cast<double>(s.cell_max_v)) + ",\n";
+    o += "  \"cell_delta_v\": " + jdbl(static_cast<double>(s.cell_delta_v)) + ",\n";
     // Cells
     o += "  \"cells\": [";
     for (size_t i = 0; i < s.cell_voltages_v.size(); ++i) {
         if (i) o += ", ";
-        o += "{\"index\":" + std::to_string(i) + ",\"voltage_v\":" + jdbl(s.cell_voltages_v[i]) + "}";
+        o += "{\"index\":" + std::to_string(i) + ",\"voltage_v\":" + jdbl(static_cast<double>(s.cell_voltages_v[i])) + "}";
     }
     o += "],\n";
     // Temperatures
     o += "  \"temperatures\": [";
     for (size_t i = 0; i < s.temperatures_c.size(); ++i) {
         if (i) o += ", ";
-        o += "{\"index\":" + std::to_string(i) + ",\"temp_c\":" + jdbl(s.temperatures_c[i], 1) + "}";
+        o += "{\"index\":" + std::to_string(i) + ",\"temp_c\":" + jdbl(static_cast<double>(s.temperatures_c[i]), 1) + "}";
     }
     o += "],\n";
     // Protection
@@ -1275,11 +1275,11 @@ std::string HttpServer::cells_json(const BatterySnapshot& s) {
     std::string o = "{\"cells\": [";
     for (size_t i = 0; i < s.cell_voltages_v.size(); ++i) {
         if (i) o += ", ";
-        o += jdbl(s.cell_voltages_v[i]);
+        o += jdbl(static_cast<double>(s.cell_voltages_v[i]));
     }
-    o += "], \"min_v\": " + jdbl(s.cell_min_v) +
-         ", \"max_v\": " + jdbl(s.cell_max_v) +
-         ", \"delta_v\": " + jdbl(s.cell_delta_v) + "}\n";
+    o += "], \"min_v\": " + jdbl(static_cast<double>(s.cell_min_v)) +
+         ", \"max_v\": " + jdbl(static_cast<double>(s.cell_max_v)) +
+         ", \"delta_v\": " + jdbl(static_cast<double>(s.cell_delta_v)) + "}\n";
     return o;
 }
 
@@ -1293,10 +1293,10 @@ std::string HttpServer::history_json(const std::vector<BatterySnapshot>& snaps) 
         if (!first) o += ",";
         first = false;
         o += "\n  {\"ts\":" + jstr(iso8601(s.timestamp)) +
-             ",\"v\":" + jdbl(s.total_voltage_v) +
-             ",\"a\":" + jdbl(s.current_a) +
-             ",\"soc\":" + jdbl(s.soc_pct, 1) +
-             ",\"w\":" + jdbl(s.power_w) + "}";
+             ",\"v\":" + jdbl(static_cast<double>(s.total_voltage_v)) +
+             ",\"a\":" + jdbl(static_cast<double>(s.current_a)) +
+             ",\"soc\":" + jdbl(static_cast<double>(s.soc_pct), 1) +
+             ",\"w\":" + jdbl(static_cast<double>(s.power_w)) + "}";
     }
     o += "\n]\n";
     return o;
@@ -1312,28 +1312,28 @@ std::string HttpServer::prometheus(const BatterySnapshot& s) {
         char buf[32]; std::snprintf(buf, sizeof(buf), "%.*f", prec, val);
         o += name; o += " "; o += buf; o += "\n";
     };
-    g("battery_voltage_volts",      "Pack voltage",        s.total_voltage_v);
-    g("battery_current_amps",       "Pack current (+discharge/-charge)", s.current_a);
-    g("battery_soc_percent",        "State of charge",     s.soc_pct, 1);
-    g("battery_remaining_ah",       "Remaining capacity Ah", s.remaining_ah);
-    g("battery_nominal_ah",         "Nominal capacity Ah", s.nominal_ah);
-    g("battery_power_watts",        "Power (+ discharge / - charge)", s.power_w);
-    g("battery_time_remaining_hours","Estimated time remaining", s.time_remaining_h);
-    g("battery_cycle_count",        "Charge cycles",       s.cycle_count, 0);
-    g("battery_cell_min_volts",     "Minimum cell voltage", s.cell_min_v);
-    g("battery_cell_max_volts",     "Maximum cell voltage", s.cell_max_v);
-    g("battery_cell_delta_volts",   "Cell imbalance",       s.cell_delta_v);
+    g("battery_voltage_volts",      "Pack voltage",        static_cast<double>(s.total_voltage_v));
+    g("battery_current_amps",       "Pack current (+discharge/-charge)", static_cast<double>(s.current_a));
+    g("battery_soc_percent",        "State of charge",     static_cast<double>(s.soc_pct), 1);
+    g("battery_remaining_ah",       "Remaining capacity Ah", static_cast<double>(s.remaining_ah));
+    g("battery_nominal_ah",         "Nominal capacity Ah", static_cast<double>(s.nominal_ah));
+    g("battery_power_watts",        "Power (+ discharge / - charge)", static_cast<double>(s.power_w));
+    g("battery_time_remaining_hours","Estimated time remaining", static_cast<double>(s.time_remaining_h));
+    g("battery_cycle_count",        "Charge cycles",       static_cast<double>(s.cycle_count), 0);
+    g("battery_cell_min_volts",     "Minimum cell voltage", static_cast<double>(s.cell_min_v));
+    g("battery_cell_max_volts",     "Maximum cell voltage", static_cast<double>(s.cell_max_v));
+    g("battery_cell_delta_volts",   "Cell imbalance",       static_cast<double>(s.cell_delta_v));
 
     for (size_t i = 0; i < s.cell_voltages_v.size(); ++i) {
         char buf[128];
         std::snprintf(buf, sizeof(buf),
-            "battery_cell_voltage_volts{cell=\"%zu\"} %.3f\n", i, s.cell_voltages_v[i]);
+            "battery_cell_voltage_volts{cell=\"%zu\"} %.3f\n", i, static_cast<double>(s.cell_voltages_v[i]));
         o += buf;
     }
     for (size_t i = 0; i < s.temperatures_c.size(); ++i) {
         char buf[128];
         std::snprintf(buf, sizeof(buf),
-            "battery_temperature_celsius{sensor=\"%zu\"} %.1f\n", i, s.temperatures_c[i]);
+            "battery_temperature_celsius{sensor=\"%zu\"} %.1f\n", i, static_cast<double>(s.temperatures_c[i]));
         o += buf;
     }
     return o;
@@ -1348,12 +1348,12 @@ std::string HttpServer::prometheus_charger(const PwrGateSnapshot& pg) {
         char buf[32]; std::snprintf(buf, sizeof(buf), "%.*f", prec, val);
         o += name; o += " "; o += buf; o += "\n";
     };
-    g("charger_ps_volts",       "Charger power-supply input voltage", pg.ps_v);
-    g("charger_bat_volts",      "Battery voltage (charger-measured)",  pg.bat_v);
-    g("charger_bat_amps",       "Charge current",                      pg.bat_a);
-    g("charger_solar_volts",    "Solar panel voltage",                 pg.sol_v);
-    g("charger_target_volts",   "Target absorption voltage",           pg.target_v);
-    g("charger_target_amps",    "Max charge current",                  pg.target_a);
+    g("charger_ps_volts",       "Charger power-supply input voltage", static_cast<double>(pg.ps_v));
+    g("charger_bat_volts",      "Battery voltage (charger-measured)",  static_cast<double>(pg.bat_v));
+    g("charger_bat_amps",       "Charge current",                      static_cast<double>(pg.bat_a));
+    g("charger_solar_volts",    "Solar panel voltage",                 static_cast<double>(pg.sol_v));
+    g("charger_target_volts",   "Target absorption voltage",           static_cast<double>(pg.target_v));
+    g("charger_target_amps",    "Max charge current",                  static_cast<double>(pg.target_a));
     g("charger_pwm",            "PWM duty cycle (0-1023)",             pg.pwm, 0);
     g("charger_elapsed_minutes","Elapsed charge time minutes",         pg.minutes, 0);
     return o;
@@ -2134,17 +2134,17 @@ std::string HttpServer::charger_history_json(const std::vector<PwrGateSnapshot>&
 // then override "Charging"/"Float" to "Idle" when no current/PWM.
 static std::string effective_charger_state(const PwrGateSnapshot& pg) {
     if (!pg.valid) return "";
-    std::string state = pg.state;
+    std::string state = pg.state ? *pg.state : "";
     // "PS" = legacy firmware: "power supply active" — infer from measurements
     // Also handles states containing '=' (raw telemetry tokens from very old firmware)
     if (state == "PS" || state.find('=') != std::string::npos) {
-        if (pg.bat_a > 0.05)
-            state = (pg.bat_v >= pg.target_v - 0.10) ? "Float" : "Charging";
+        if (pg.bat_a > 0.05f)
+            state = (pg.bat_v >= pg.target_v - 0.10f) ? "Float" : "Charging";
         else
             state = "Idle";
     }
     if ((state == "Charging" || state == "Float") &&
-        std::abs(pg.bat_a) < 0.05 && pg.pwm < 10)
+        std::abs(pg.bat_a) < 0.05f && pg.pwm < 10)
         return "Idle";
     return state;
 }
@@ -2616,8 +2616,8 @@ html.light .pwr-modal-submit{background:#16a34a}
     o += "<nav class=\"tabs\"><a href=\"/\" class=\"tab active\">Dashboard</a><a href=\"/solar\" class=\"tab\">Solar</a><a href=\"/settings\" class=\"tab\">Settings</a><a href=\"/ops_log\" class=\"tab\">Ops Log</a><a href=\"/testing\" class=\"tab\">Testing</a></nav>";
     o += "<header><h1>limonitor</h1><div class=\"hstat\">";
     o += "<span><span class=\"dot " + dot_cls + "\"></span>" + ble_st + "</span>";
-    if (s.valid && !s.device_name.empty())
-        o += "<span>" + s.device_name + "</span>";
+    if (s.valid && s.device && !s.device->device_name.empty())
+        o += "<span>" + s.device->device_name + "</span>";
     o += "<span id=\"ts-disp\" style=\"color:var(--muted)\">—</span>";
     // Time range selector (JS-driven, no page reload)
     {
@@ -2690,22 +2690,22 @@ html.light .pwr-modal-submit{background:#16a34a}
     o += buf;
 
     // SoC
-    int soc_bar = static_cast<int>(std::max(0.0, std::min(100.0, s.soc_pct)));
+    int soc_bar = static_cast<int>(std::max(0.0f, std::min(100.0f, s.soc_pct)));
     snprintf(buf, sizeof(buf),
         "<div class=\"stat\"><div class=\"stat-lbl\">State of Charge</div>"
         "<div class=\"sv ok\"><span id=\"ssoc\">%.1f</span><span class=\"u\">%%</span>"
         "<span id=\"ssoc-trend\" style=\"font-size:1rem;margin-left:.2em\"></span></div>"
         "<div class=\"soc-track\"><div class=\"soc-fill\" id=\"soc-bar\" style=\"width:%d%%\"></div></div>"
         "<div class=\"stat-sub\" id=\"ssoc-sub\">%.2f&nbsp;/&nbsp;%.2f&nbsp;Ah</div></div>\n",
-        s.soc_pct, soc_bar, s.remaining_ah, s.nominal_ah);
+        static_cast<double>(s.soc_pct), soc_bar, static_cast<double>(s.remaining_ah), static_cast<double>(s.nominal_ah));
     o += buf;
 
     // Power
     double load_w = 0;
     bool load_estimated = false;
     if (s.valid) {
-        double chg_pwr = pg.valid ? (pg.bat_v * pg.bat_a) : 0;
-        load_w = chg_pwr + s.power_w;
+        double chg_pwr = pg.valid ? (static_cast<double>(pg.bat_v) * static_cast<double>(pg.bat_a)) : 0;
+        load_w = chg_pwr + static_cast<double>(s.power_w);
         
     // Improve load visibility when running on grid with full battery.
     // If direct DC measurements show 0 load but we have historical data or grid power, use it.

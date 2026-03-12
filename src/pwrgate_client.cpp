@@ -109,14 +109,14 @@ bool PwrGateClient::parse_json(const std::string& body, PwrGateSnapshot& snap) {
         body.find("\"valid\":true")  == std::string::npos)
         return false;
 
-    snap.state    = jval_s(body, "state");
-    snap.ps_v     = jval_d(body, "ps_v");
-    snap.bat_v    = jval_d(body, "bat_v");
-    snap.bat_a    = jval_d(body, "bat_a");
-    snap.sol_v    = jval_d(body, "sol_v");
-    snap.target_v = jval_d(body, "target_v");
-    snap.target_a = jval_d(body, "target_a");
-    snap.stop_a   = jval_d(body, "stop_a");
+    snap.state    = std::make_shared<std::string>(jval_s(body, "state"));
+    snap.ps_v     = static_cast<float>(jval_d(body, "ps_v"));
+    snap.bat_v    = static_cast<float>(jval_d(body, "bat_v"));
+    snap.bat_a    = static_cast<float>(jval_d(body, "bat_a"));
+    snap.sol_v    = static_cast<float>(jval_d(body, "sol_v"));
+    snap.target_v = static_cast<float>(jval_d(body, "target_v"));
+    snap.target_a = static_cast<float>(jval_d(body, "target_a"));
+    snap.stop_a   = static_cast<float>(jval_d(body, "stop_a"));
     snap.minutes  = jval_i(body, "minutes");
     snap.pwm      = jval_i(body, "pwm");
     snap.temp     = jval_i(body, "temp");
@@ -134,7 +134,9 @@ void PwrGateClient::poll_loop() {
             if (parse_json(body, snap)) {
                 if (cb_) cb_(snap);
                 LOG_DEBUG("PwrGateClient: %s  PS=%.2fV  Bat=%.2fV %.2fA  Sol=%.2fV",
-                          snap.state.c_str(), snap.ps_v, snap.bat_v, snap.bat_a, snap.sol_v);
+                          snap.state ? snap.state->c_str() : "",
+                          static_cast<double>(snap.ps_v), static_cast<double>(snap.bat_v),
+                          static_cast<double>(snap.bat_a), static_cast<double>(snap.sol_v));
             } else if (body.find("\"valid\": false") != std::string::npos ||
                        body.find("\"valid\":false")  != std::string::npos) {
                 LOG_DEBUG("PwrGateClient: %s:%d has no charger data yet",

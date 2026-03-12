@@ -137,7 +137,7 @@ private:
 
     // Load profile ring buffer (~1 h of 5 s samples)
     static constexpr size_t LOAD_N = 720;
-    double load_ring_[LOAD_N]{};
+    float  load_ring_[LOAD_N]{};
     size_t load_head_{0};
     size_t load_count_{0};
     double last_load_push_ts_{-1};
@@ -152,8 +152,8 @@ private:
 
     // Voltage and SoC trend (last N samples)
     static constexpr size_t VOLTAGE_N = 12;
-    double voltage_ring_[VOLTAGE_N]{};
-    double soc_ring_[VOLTAGE_N]{};
+    float  voltage_ring_[VOLTAGE_N]{};
+    float  soc_ring_[VOLTAGE_N]{};
     double voltage_ring_ts_[VOLTAGE_N]{};
     size_t voltage_ring_count_{0};
     size_t voltage_ring_head_{0};
@@ -187,7 +187,7 @@ private:
 
     // Charge rate history (for slowdown detection)
     static constexpr size_t RATE_N = 72;  // ~6 min at 5s polls
-    double rate_ring_[RATE_N]{};
+    float  rate_ring_[RATE_N]{};
     double rate_ring_ts_[RATE_N]{};
     size_t rate_ring_count_{0};
     size_t rate_ring_head_{0};
@@ -209,7 +209,7 @@ private:
 
     // Charger power when charging — fallback for runtime when no battery discharge data
     static constexpr size_t CHG_PWR_N = 720;  // ~1 h at 5s polls
-    double chg_pwr_ring_[CHG_PWR_N]{};
+    float  chg_pwr_ring_[CHG_PWR_N]{};
     size_t chg_pwr_head_{0};
     size_t chg_pwr_count_{0};
 

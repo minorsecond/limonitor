@@ -30,8 +30,8 @@ bool parse(const std::string& s1, const std::string& s2, PwrGateSnapshot& snap) 
     if (s1.find("PS=") == std::string::npos) return false;
 
     // Parse all numeric fields before inferring state
-    snap.ps_v    = extract_d(s1, "PS");
-    snap.sol_v   = extract_d(s1, "Sol");
+    snap.ps_v    = static_cast<float>(extract_d(s1, "PS"));
+    snap.sol_v   = static_cast<float>(extract_d(s1, "Sol"));
     snap.minutes = extract_i(s1, "Min");
     snap.pwm     = extract_i(s1, "P");
     snap.adc     = extract_i(s1, "adc");
@@ -39,35 +39,46 @@ bool parse(const std::string& s1, const std::string& s2, PwrGateSnapshot& snap) 
     // "Bat=13.08V,  5.36A" — voltage then current after the comma
     size_t bp = s1.find("Bat=");
     if (bp != std::string::npos) {
-        std::sscanf(s1.c_str() + bp + 4, "%lf", &snap.bat_v);
+        double bv = 0, ba = 0;
+        std::sscanf(s1.c_str() + bp + 4, "%lf", &bv);
+        snap.bat_v = static_cast<float>(bv);
         size_t cp = s1.find(',', bp);
-        if (cp != std::string::npos)
-            std::sscanf(s1.c_str() + cp + 1, " %lf", &snap.bat_a);
+        if (cp != std::string::npos) {
+            std::sscanf(s1.c_str() + cp + 1, " %lf", &ba);
+            snap.bat_a = static_cast<float>(ba);
+        }
     }
 
     // Field source: if s1 has TargetV, it's a single-line update.
     // Otherwise use s2 for target fields.
     const std::string& t_src = (s1.find("TargetV=") != std::string::npos) ? s1 : s2;
 
-    snap.target_v = extract_d(t_src, "TargetV");
-    snap.target_a = extract_d(t_src, "TargetI");
-    snap.stop_a   = extract_d(t_src, "Stop");
+    snap.target_v = static_cast<float>(extract_d(t_src, "TargetV"));
+    snap.target_a = static_cast<float>(extract_d(t_src, "TargetI"));
+    snap.stop_a   = static_cast<float>(extract_d(t_src, "Stop"));
     snap.temp     = extract_i(t_src, "Temp");
     snap.pss      = extract_i(t_src, "PSS");
 
     // State: use first word if it looks like a known keyword (no '='), otherwise
     // infer from measurements. Older firmware prefixed lines with "Charging"/"Float"/
     // "Idle"; newer firmware omits the keyword and starts with a field like "TargetV=".
+    static auto s_charging = std::make_shared<std::string>("Charging");
+    static auto s_float    = std::make_shared<std::string>("Float");
+    static auto s_idle     = std::make_shared<std::string>("Idle");
+
     std::string fw = first_word(s1);
     if (fw.find('=') == std::string::npos && !fw.empty()) {
-        snap.state = fw;
+        if      (fw == "Charging") snap.state = s_charging;
+        else if (fw == "Float")    snap.state = s_float;
+        else if (fw == "Idle")     snap.state = s_idle;
+        else                       snap.state = std::make_shared<std::string>(fw);
     } else {
         // Infer: Float when bat_v is within 0.10 V of target; Charging when current
         // is flowing; Idle otherwise.
-        if (snap.bat_a > 0.05) {
-            snap.state = (snap.bat_v >= snap.target_v - 0.10) ? "Float" : "Charging";
+        if (snap.bat_a > 0.05f) {
+            snap.state = (snap.bat_v >= snap.target_v - 0.10f) ? s_float : s_charging;
         } else {
-            snap.state = "Idle";
+            snap.state = s_idle;
         }
     }
 

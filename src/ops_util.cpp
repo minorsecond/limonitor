@@ -60,7 +60,7 @@ std::string build_ops_snapshot_json(
 
     if (pg && *pg) {
         const PwrGateSnapshot& p = **pg;
-        sep(); out << "\"charger\":" << escape_json_str(p.state);
+        sep(); out << "\"charger\":" << escape_json_str(p.state ? *p.state : "");
         sep(); out << "\"grid_v\":" << p.ps_v;
         sep(); out << "\"solar_v\":" << p.sol_v;
         sep(); out << "\"bat_v\":" << p.bat_v;

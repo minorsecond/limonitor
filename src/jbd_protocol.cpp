@@ -89,10 +89,10 @@ void Parser::apply(BatterySnapshot& snap) const {
         // Minimum useful size: 23 bytes (no temperatures)
         if (n < 23) { LOG_WARN("JBD: basic info too short (%zu)", n); return; }
 
-        snap.total_voltage_v   = u16be(d + 0)  * 0.01;   // 10mV units
-        snap.current_a         = s16be(d + 2)  * 0.01;   // 10mA units, signed
-        snap.remaining_ah      = u16be(d + 4)  * 0.01;   // 10mAh units
-        snap.nominal_ah        = u16be(d + 6)  * 0.01;
+        snap.total_voltage_v   = static_cast<float>(u16be(d + 0)  * 0.01);   // 10mV units
+        snap.current_a         = static_cast<float>(s16be(d + 2)  * 0.01);   // 10mA units, signed
+        snap.remaining_ah      = static_cast<float>(u16be(d + 4)  * 0.01);   // 10mAh units
+        snap.nominal_ah        = static_cast<float>(u16be(d + 6)  * 0.01);
         snap.cycle_count       = u16be(d + 8);
         // bytes 10-11: production date (skip)
         // bytes 12-15: balance status (skip for now)
@@ -115,9 +115,10 @@ void Parser::apply(BatterySnapshot& snap) const {
         uint8_t sw_ver = d[18];
         char ver_buf[8];
         std::snprintf(ver_buf, sizeof(ver_buf), "%d.%d", sw_ver >> 4, sw_ver & 0x0F);
-        snap.sw_version = ver_buf;
+        if (!snap.device) snap.device = std::make_shared<DeviceInfo>();
+        snap.device->sw_version = ver_buf;
 
-        snap.soc_pct           = d[19];
+        snap.soc_pct           = static_cast<float>(d[19]);
         uint8_t fet_status     = d[20];
         snap.charge_mosfet     = (fet_status >> 0) & 1;
         snap.discharge_mosfet  = (fet_status >> 1) & 1;
@@ -127,28 +128,28 @@ void Parser::apply(BatterySnapshot& snap) const {
         for (uint8_t i = 0; i < num_ntc; ++i) {
             size_t off = 23 + i * 2;
             if (off + 1 >= n) break;
-            double raw_k = u16be(d + off) * 0.1;
-            snap.temperatures_c.push_back(raw_k - 273.15);
+            float raw_k = static_cast<float>(u16be(d + off) * 0.1);
+            snap.temperatures_c.push_back(raw_k - 273.15f);
         }
 
         // Derived values
         snap.power_w = snap.total_voltage_v * snap.current_a;
-        if (snap.current_a > 0.01)
+        if (snap.current_a > 0.01f)
             snap.time_remaining_h = snap.remaining_ah / snap.current_a;
-        else if (snap.current_a < -0.01)
+        else if (snap.current_a < -0.01f)
             snap.time_remaining_h = (snap.nominal_ah - snap.remaining_ah) / (-snap.current_a);
         else
-            snap.time_remaining_h = 0.0;
+            snap.time_remaining_h = 0.0f;
 
         snap.valid = true;
 
     } else if (last_cmd_ == CMD_CELL_VOLTS) {
         size_t cell_count = n / 2;
         snap.cell_voltages_v.resize(cell_count);
-        snap.cell_min_v = 9999.0;
-        snap.cell_max_v = 0.0;
+        snap.cell_min_v = 9999.0f;
+        snap.cell_max_v = 0.0f;
         for (size_t i = 0; i < cell_count; ++i) {
-            double v = u16be(d + i * 2) * 0.001;   // 1mV units
+            float v = static_cast<float>(u16be(d + i * 2) * 0.001);   // 1mV units
             snap.cell_voltages_v[i] = v;
             if (v < snap.cell_min_v) snap.cell_min_v = v;
             if (v > snap.cell_max_v) snap.cell_max_v = v;
@@ -157,8 +158,9 @@ void Parser::apply(BatterySnapshot& snap) const {
 
     } else if (last_cmd_ == CMD_DEVICE_INFO) {
         // Device name: up to 24 bytes, null-terminated
+        if (!snap.device) snap.device = std::make_shared<DeviceInfo>();
         size_t name_len = std::min(n, size_t{24});
-        snap.device_name.assign(reinterpret_cast<const char*>(d),
+        snap.device->device_name.assign(reinterpret_cast<const char*>(d),
                                 strnlen(reinterpret_cast<const char*>(d), name_len));
     }
 }

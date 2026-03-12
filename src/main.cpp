@@ -396,27 +396,28 @@ static void run_demo(DataStore& store, int interval_s) {
         double base_cell_v = 3.0 + (soc / 100.0) * 0.65;
         s.cell_min_v = 9999; s.cell_max_v = 0;
         for (int i = 0; i < 16; ++i) {
-            double jitter = (i == 7) ? -0.005 : ((i % 3 == 0) ? 0.003 : 0.001);
-            double cv = base_cell_v + jitter + std::sin(tick + i) * 0.001;
+            float jitter = (i == 7) ? -0.005f : ((i % 3 == 0) ? 0.003f : 0.001f);
+            float cv = static_cast<float>(base_cell_v) + jitter + static_cast<float>(std::sin(tick + i) * 0.001);
             s.cell_voltages_v[i] = cv;
             if (cv < s.cell_min_v) s.cell_min_v = cv;
             if (cv > s.cell_max_v) s.cell_max_v = cv;
         }
         s.cell_delta_v = s.cell_max_v - s.cell_min_v;
-        s.total_voltage_v = s.cell_min_v * 16 + (s.cell_max_v - s.cell_min_v) * 8;
+        s.total_voltage_v = s.cell_min_v * 16.0f + (s.cell_max_v - s.cell_min_v) * 8.0f;
         // More realistic: sum of cells
-        s.total_voltage_v = 0;
-        for (double cv : s.cell_voltages_v) s.total_voltage_v += cv;
+        s.total_voltage_v = 0.0f;
+        for (float cv : s.cell_voltages_v) s.total_voltage_v += cv;
 
-        s.temperatures_c = {25.3 + std::sin(tick * 0.05) * 2.0, 24.8};
+        s.temperatures_c = {25.3f + static_cast<float>(std::sin(tick * 0.05) * 2.0), 24.8f};
         s.cycle_count = cycle;
         s.charge_mosfet = true;
         s.discharge_mosfet = true;
         s.power_w = s.total_voltage_v * s.current_a;
-        s.time_remaining_h = (s.current_a > 0) ? (s.remaining_ah / s.current_a) : 0;
-        s.device_name = "LITIME-DEMO";
-        s.ble_address = "00:00:00:00:00:00";
-        s.sw_version = "1.0";
+        s.time_remaining_h = (s.current_a > 0.0f) ? (s.remaining_ah / s.current_a) : 0.0f;
+        if (!s.device) s.device = std::make_shared<DeviceInfo>();
+        s.device->device_name = "LITIME-DEMO";
+        s.device->ble_address = "00:00:00:00:00:00";
+        s.device->sw_version = "1.0";
         s.valid = true;
 
         store.update(std::move(s));
@@ -619,15 +620,16 @@ int main(int argc, char** argv) {
             auto res = parser->feed(raw.data(), raw.size());
             if (res == litime::Parser::Result::COMPLETE) {
                 current->timestamp   = std::chrono::system_clock::now();
-                current->ble_address = ble->device_address();
-                if (current->device_name.empty())
-                    current->device_name = ble->device_name();
+                if (!current->device) current->device = std::make_shared<DeviceInfo>();
+                current->device->ble_address = ble->device_address();
+                if (current->device->device_name.empty())
+                    current->device->device_name = ble->device_name();
                 parser->apply(*current);
                 parser->reset(); // clear buffer for next packet
                 if (current->valid) {
                     store.update(*current);
                     LOG_DEBUG("Updated: %.2fV  %+.2fA  %.1f%%",
-                        current->total_voltage_v, current->current_a, current->soc_pct);
+                        static_cast<double>(current->total_voltage_v), static_cast<double>(current->current_a), static_cast<double>(current->soc_pct));
                 }
             }
         });
@@ -657,7 +659,9 @@ int main(int argc, char** argv) {
         serial->set_callback([&store](const PwrGateSnapshot& snap) {
             store.update_pwrgate(snap);
             LOG_DEBUG("PwrGate: %s  PS=%.2fV  Bat=%.2fV %.2fA  Sol=%.2fV",
-                snap.state.c_str(), snap.ps_v, snap.bat_v, snap.bat_a, snap.sol_v);
+                snap.state ? snap.state->c_str() : "",
+                static_cast<double>(snap.ps_v), static_cast<double>(snap.bat_v),
+                static_cast<double>(snap.bat_a), static_cast<double>(snap.sol_v));
         });
         serial->set_recovery_callback([&db](const std::string& reason) {
             LOG_WARN("PwrGate recovery: %s", reason.c_str());

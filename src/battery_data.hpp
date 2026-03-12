@@ -4,63 +4,69 @@
 #include <string>
 #include <vector>
 
+#include <memory>
+
 struct ProtectionStatus {
-    bool cell_overvoltage{false};
-    bool cell_undervoltage{false};
-    bool pack_overvoltage{false};
-    bool pack_undervoltage{false};
-    bool charge_overtemp{false};
-    bool charge_undertemp{false};
-    bool discharge_overtemp{false};
-    bool discharge_undertemp{false};
-    bool charge_overcurrent{false};
-    bool discharge_overcurrent{false};
-    bool short_circuit{false};
-    bool front_end_ic_error{false};
-    bool mosfet_software_lock{false};
+    union {
+        struct {
+            uint16_t cell_overvoltage : 1;
+            uint16_t cell_undervoltage : 1;
+            uint16_t pack_overvoltage : 1;
+            uint16_t pack_undervoltage : 1;
+            uint16_t charge_overtemp : 1;
+            uint16_t charge_undertemp : 1;
+            uint16_t discharge_overtemp : 1;
+            uint16_t discharge_undertemp : 1;
+            uint16_t charge_overcurrent : 1;
+            uint16_t discharge_overcurrent : 1;
+            uint16_t short_circuit : 1;
+            uint16_t front_end_ic_error : 1;
+            uint16_t mosfet_software_lock : 1;
+            uint16_t reserved : 3;
+        };
+        uint16_t all{0};
+    };
 
     bool any() const {
-        return cell_overvoltage || cell_undervoltage || pack_overvoltage ||
-               pack_undervoltage || charge_overtemp || charge_undertemp ||
-               discharge_overtemp || discharge_undertemp || charge_overcurrent ||
-               discharge_overcurrent || short_circuit || front_end_ic_error ||
-               mosfet_software_lock;
+        return all != 0;
     }
+};
+
+struct DeviceInfo {
+    std::string device_name;
+    std::string hw_version;
+    std::string sw_version;
+    std::string ble_address;
 };
 
 struct BatterySnapshot {
     std::chrono::system_clock::time_point timestamp;
 
-    // Pack level
-    double total_voltage_v{0.0};
-    double current_a{0.0};       // positive = discharging, negative = charging
-    double remaining_ah{0.0};
-    double nominal_ah{0.0};
-    double soc_pct{0.0};
-    double power_w{0.0};
-    double time_remaining_h{0.0};
+    // Pack level (floats for memory efficiency, double precision not required for telemetry)
+    float total_voltage_v{0.0f};
+    float current_a{0.0f};       // positive = discharging, negative = charging
+    float remaining_ah{0.0f};
+    float nominal_ah{0.0f};
+    float soc_pct{0.0f};
+    float power_w{0.0f};
+    float time_remaining_h{0.0f};
+    float cell_min_v{0.0f};
+    float cell_max_v{0.0f};
+    float cell_delta_v{0.0f};
+    
     uint16_t cycle_count{0};
+    ProtectionStatus protection;
 
     // MOSFET states
     bool charge_mosfet{false};
     bool discharge_mosfet{false};
+    bool valid{false};
 
     // Cell voltages (V)
-    std::vector<double> cell_voltages_v;
-    double cell_min_v{0.0};
-    double cell_max_v{0.0};
-    double cell_delta_v{0.0};
-
+    std::vector<float> cell_voltages_v;
     // Temperatures (°C)
-    std::vector<double> temperatures_c;
+    std::vector<float> temperatures_c;
 
-    ProtectionStatus protection;
-
-    // Device info
-    std::string device_name;
-    std::string hw_version;
-    std::string sw_version;
-    std::string ble_address;
-
-    bool valid{false};
+    // Shared device info (saves ~120 bytes per snapshot in history)
+    std::shared_ptr<DeviceInfo> device;
 };
