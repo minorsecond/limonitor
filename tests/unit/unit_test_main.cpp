@@ -111,6 +111,7 @@ void test_pwrgate_parse_float_state_preserved();
 void test_pwrgate_parse_state_inferred_charging();
 void test_pwrgate_parse_state_inferred_float();
 void test_pwrgate_parse_state_inferred_idle();
+void test_pwrgate_parse_single_line();
 void test_pwrgate_parse_rejects_missing_ps();
 void test_pwrgate_parse_values_correct();
 void test_charging_stage_bulk_from_inferred_state();
@@ -258,6 +259,7 @@ int main() {
     test_pwrgate_parse_state_inferred_charging();
     test_pwrgate_parse_state_inferred_float();
     test_pwrgate_parse_state_inferred_idle();
+    test_pwrgate_parse_single_line();
     test_pwrgate_parse_rejects_missing_ps();
     test_pwrgate_parse_values_correct();
     test_charging_stage_bulk_from_inferred_state();

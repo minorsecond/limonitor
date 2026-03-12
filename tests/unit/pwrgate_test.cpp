@@ -51,6 +51,16 @@ void test_pwrgate_parse_state_inferred_idle() {
     ASSERT(snap.state == "Idle", "State inferred as Idle: bat_a~0");
 }
 
+void test_pwrgate_parse_single_line() {
+    PwrGateSnapshot snap;
+    // Both PS= and TargetV= in the same line
+    std::string s1 = "Charging PS=14.01 Sol=0.00 Bat=13.25V, 5.36A Min=20 P=800 adc=600 TargetV=14.59 TargetI=10.0 Stop=0.15 Temp=74 PSS=0";
+    ASSERT(pwrgate::parse(s1, s1, snap), "Parse succeeds with single line");
+    ASSERT(snap.state == "Charging", "State 'Charging' parsed");
+    ASSERT(std::abs(snap.ps_v - 14.01) < 0.01, "ps_v correct");
+    ASSERT(std::abs(snap.target_v - 14.59) < 0.01, "target_v correct");
+}
+
 void test_pwrgate_parse_rejects_missing_ps() {
     PwrGateSnapshot snap;
     std::string s1 = "Charging Sol=0.00 Bat=13.25V, 5.36A Min=20 P=800 adc=600"; // no PS=

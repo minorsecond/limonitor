@@ -28,7 +28,9 @@ static std::string first_word(const std::string& s) {
 
 bool parse(const std::string& s1, const std::string& s2, PwrGateSnapshot& snap) {
     if (s1.find("PS=")      == std::string::npos) return false;
-    if (s2.find("TargetV=") == std::string::npos) return false;
+    // s2 must have TargetV=, unless s1 already has it (single-line mode)
+    if (s2.find("TargetV=") == std::string::npos &&
+        s1.find("TargetV=") == std::string::npos) return false;
 
     // Parse all numeric fields before inferring state
     snap.ps_v    = extract_d(s1, "PS");
@@ -46,11 +48,15 @@ bool parse(const std::string& s1, const std::string& s2, PwrGateSnapshot& snap) 
             std::sscanf(s1.c_str() + cp + 1, " %lf", &snap.bat_a);
     }
 
-    snap.target_v = extract_d(s2, "TargetV");
-    snap.target_a = extract_d(s2, "TargetI");
-    snap.stop_a   = extract_d(s2, "Stop");
-    snap.temp     = extract_i(s2, "Temp");
-    snap.pss      = extract_i(s2, "PSS");
+    // Field source: if s1 has TargetV, it's a single-line update.
+    // Otherwise use s2 for target fields.
+    const std::string& t_src = (s1.find("TargetV=") != std::string::npos) ? s1 : s2;
+
+    snap.target_v = extract_d(t_src, "TargetV");
+    snap.target_a = extract_d(t_src, "TargetI");
+    snap.stop_a   = extract_d(t_src, "Stop");
+    snap.temp     = extract_i(t_src, "Temp");
+    snap.pss      = extract_i(t_src, "PSS");
 
     // State: use first word if it looks like a known keyword (no '='), otherwise
     // infer from measurements. Older firmware prefixed lines with "Charging"/"Float"/

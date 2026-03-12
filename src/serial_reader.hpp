@@ -49,6 +49,9 @@ public:
     int  reconnect_count()         const { return reconnect_count_.load(); }
 
 private:
+    void process_charger_logic(const PwrGateSnapshot& snap,
+                               std::chrono::steady_clock::time_point now);
+
     std::string       device_;
     int               baud_;
     int               fd_{-1};
@@ -59,6 +62,18 @@ private:
 
     std::atomic<int>  charger_recovery_count_{0};
     std::atomic<int>  reconnect_count_{0};
+
+    // State for process_charger_logic
+    bool reconfigure_sent_{false};
+    bool charger_was_stuck_{false};
+    std::chrono::steady_clock::time_point charger_stuck_since_;
+    std::chrono::steady_clock::time_point last_charger_recovery_;
+
+    static constexpr long STUCK_TIMEOUT_S    = 900;  // 15 min before first recovery
+    static constexpr long RECOVERY_COOLDOWN_S = 1800; // 30 min between attempts
+    static constexpr long STALE_RECONNECT_S  = 300;  // 5 min without any data → reconnect
+    // After this many serial reconnects still produce no data, escalate to USB reset
+    static constexpr int  USB_RESET_AFTER_RECONNECTS = 2;
 
     int  open_port();
     void read_loop();
