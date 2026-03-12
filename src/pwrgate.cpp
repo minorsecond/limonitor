@@ -23,11 +23,7 @@ static std::string first_word(const std::string& s) {
     while (p < s.size() && (s[p] == ' ' || s[p] == '\t')) ++p;
     size_t e = p;
     while (e < s.size() && s[e] != ' ' && s[e] != '\t') ++e;
-    std::string word = s.substr(p, e - p);
-    // If the "first word" contains '=', it's likely a key-value pair, not the state.
-    // In that case, the state might be missing or the format changed.
-    if (word.find('=') != std::string::npos) return "Idle";
-    return word;
+    return s.substr(p, e - p);
 }
 
 bool parse(const std::string& s1, const std::string& s2, PwrGateSnapshot& snap) {
