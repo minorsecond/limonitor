@@ -435,6 +435,18 @@ void SerialReader::read_loop() {
             if (handle_prompt(line)) continue;
 
             if (line.find("PS=") != std::string::npos) {
+                // If we already have a pending status, it never got a TargetV line.
+                // Process it now as a single-line update.
+                if (!pending_status.empty()) {
+                    PwrGateSnapshot snap;
+                    if (pwrgate::parse(pending_status, pending_status, snap) && cb_) {
+                        cb_(snap);
+                        last_snap_time = std::chrono::steady_clock::now();
+                        stale_reconnects_since_data = 0;
+                        process_charger_logic(snap, last_snap_time);
+                    }
+                }
+
                 // Check if this line ALSO has TargetV= (single-line status)
                 if (line.find("TargetV=") != std::string::npos) {
                     PwrGateSnapshot snap;

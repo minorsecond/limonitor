@@ -61,6 +61,18 @@ void test_pwrgate_parse_single_line() {
     ASSERT(std::abs(snap.target_v - 14.59) < 0.01, "target_v correct");
 }
 
+void test_pwrgate_parse_lenient() {
+    PwrGateSnapshot snap;
+    // PS= present, but no TargetV=
+    std::string s1 = "Charging PS=15.11V Bat=13.78V, 9.96A Sol=0.24V Min=16";
+    ASSERT(pwrgate::parse(s1, "", snap), "Parse succeeds without TargetV");
+    ASSERT(snap.state == "Charging", "State 'Charging' parsed");
+    ASSERT(std::abs(snap.ps_v - 15.11) < 0.01, "ps_v correct");
+    ASSERT(std::abs(snap.bat_v - 13.78) < 0.01, "bat_v correct");
+    ASSERT(std::abs(snap.bat_a - 9.96) < 0.01, "bat_a correct");
+    ASSERT(std::abs(snap.target_v) < 0.01, "target_v defaults to 0");
+}
+
 void test_pwrgate_parse_rejects_missing_ps() {
     PwrGateSnapshot snap;
     std::string s1 = "Charging Sol=0.00 Bat=13.25V, 5.36A Min=20 P=800 adc=600"; // no PS=

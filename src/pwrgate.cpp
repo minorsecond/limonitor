@@ -27,10 +27,7 @@ static std::string first_word(const std::string& s) {
 }
 
 bool parse(const std::string& s1, const std::string& s2, PwrGateSnapshot& snap) {
-    if (s1.find("PS=")      == std::string::npos) return false;
-    // s2 must have TargetV=, unless s1 already has it (single-line mode)
-    if (s2.find("TargetV=") == std::string::npos &&
-        s1.find("TargetV=") == std::string::npos) return false;
+    if (s1.find("PS=") == std::string::npos) return false;
 
     // Parse all numeric fields before inferring state
     snap.ps_v    = extract_d(s1, "PS");
