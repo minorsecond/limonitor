@@ -598,6 +598,9 @@ int main(int argc, char** argv) {
     } else {
         // Determine target: prefer address, fall back to name
         std::string target = cfg.device_address.empty() ? cfg.device_name : cfg.device_address;
+        // Trim whitespace
+        target.erase(0, target.find_first_not_of(" \t\r\n"));
+        target.erase(target.find_last_not_of(" \t\r\n") + 1);
         if (target.empty()) {
             LOG_WARN("No device address or name specified; will match any JBD service (ff00)");
         }

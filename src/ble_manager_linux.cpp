@@ -78,7 +78,8 @@ struct BleManager::Impl {
 
     void set_state(BleState s, const std::string& msg = "") {
         BleState old = state.exchange(s);
-        if (s == BleState::READY) last_data_time = std::chrono::steady_clock::now();
+        if (s == BleState::READY || s == BleState::CONNECTING || s == BleState::SCANNING)
+            last_data_time = std::chrono::steady_clock::now();
         if (old != s || !msg.empty()) {
             LOG_INFO("BLE: %s -> %s%s%s",
                 ble_state_str(old), ble_state_str(s),
@@ -90,9 +91,17 @@ struct BleManager::Impl {
     bool is_target(GDBusProxy* dev) const {
         if (target.empty()) return dev_has_service(dev);
         g_autoptr(GVariant) av = g_dbus_proxy_get_cached_property(dev, "Address");
-        if (av && strcasecmp(gv_str(av).c_str(), target.c_str()) == 0) return true;
+        std::string addr = gv_str(av);
+        if (!addr.empty() && strcasecmp(addr.c_str(), target.c_str()) == 0) return true;
+
         g_autoptr(GVariant) nv = g_dbus_proxy_get_cached_property(dev, "Name");
-        if (nv && str_icontains(gv_str(nv), target)) return true;
+        std::string name = gv_str(nv);
+        if (!name.empty() && str_icontains(name, target)) return true;
+
+        g_autoptr(GVariant) al = g_dbus_proxy_get_cached_property(dev, "Alias");
+        std::string alias = gv_str(al);
+        if (!alias.empty() && str_icontains(alias, target)) return true;
+
         return false;
     }
 
@@ -108,12 +117,19 @@ struct BleManager::Impl {
 
     void maybe_connect(GDBusProxy* proxy, const std::string& path) {
         if (is_target(proxy)) {
+            BleState expected = BleState::SCANNING;
+            if (!state.compare_exchange_strong(expected, BleState::CONNECTING)) {
+                // Already connecting or connected.
+                return;
+            }
             g_autoptr(GDBusProxy) adapter = g_dbus_proxy_new_for_bus_sync(
                 G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, nullptr, "org.bluez",
                 adapter_path.c_str(), "org.bluez.Adapter1", nullptr, nullptr);
-            if (adapter)
+            if (adapter) {
+                LOG_DEBUG("BLE: stopping discovery before connect");
                 g_dbus_proxy_call(adapter, "StopDiscovery",
                     nullptr, G_DBUS_CALL_FLAGS_NONE, 5000, nullptr, nullptr, nullptr);
+            }
             connect_device(path);
         }
     }
@@ -189,19 +205,28 @@ struct BleManager::Impl {
                 const char* path = g_dbus_object_get_object_path(obj);
                 report_device(proxy, path);
                 if (!found && is_target(proxy)) {
-                    connect_device(path);
-                    found = true;
+                    BleState current = state.load();
+                    if (current == BleState::DISCONNECTED || current == BleState::ERROR || current == BleState::SCANNING) {
+                        if (state.compare_exchange_strong(current, BleState::CONNECTING)) {
+                            connect_device(path);
+                            found = true;
+                        }
+                    }
                 }
                 g_object_unref(iface);
             }
-            // obj ref is owned by the list — do NOT unref here; g_list_free_full handles it
         }
         g_list_free_full(objects, g_object_unref);
         return found;
     }
 
     void start_discovery() {
-        set_state(BleState::SCANNING);
+        BleState curr = state.load();
+        if (curr != BleState::DISCONNECTED && curr != BleState::ERROR && curr != BleState::SCANNING) {
+            LOG_DEBUG("BLE: skip start_discovery in state %s", ble_state_str(curr));
+            return;
+        }
+        set_state(BleState::SCANNING, target);
         GError* err = nullptr;
         g_autoptr(GDBusProxy) adapter = g_dbus_proxy_new_for_bus_sync(
             G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, nullptr,
