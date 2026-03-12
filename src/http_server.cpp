@@ -2125,6 +2125,9 @@ void HttpServer::shelly_poll_loop() {
         }
         wait_ticks = st.ok ? 30 : 10;
 
+        if (st.ok && st.relay_on)
+            shelly_was_relay_on_ = true;
+
         // Grid outage detection — only when Shelly is configured
         bool host_configured = db_ && !db_->get_setting("shelly_host").empty();
         if (!host_configured) continue;
@@ -2134,18 +2137,19 @@ void HttpServer::shelly_poll_loop() {
 
         if (!st.ok && !test_active && !maintenance) {
             ++shelly_fail_count_;
-            // Require 2 consecutive failures (~20s) + battery discharging before logging
-            if (shelly_fail_count_ == 2 && active_grid_event_id_ == 0) {
+            // Require 2 consecutive failures (~20 s) and a prior confirmed
+            // relay-on reading before logging an outage event.  This avoids
+            // false positives when Shelly is configured but never yet seen
+            // drawing power (e.g. device reboot before first poll).
+            if (shelly_fail_count_ == 2 && active_grid_event_id_ == 0
+                    && shelly_was_relay_on_) {
                 auto bat = store_.latest();
-                bool discharging = bat && bat->valid && bat->current_a > 0.1;
-                if (discharging) {
-                    double soc = bat->soc_pct;
-                    int64_t now_ts = static_cast<int64_t>(std::time(nullptr));
-                    active_grid_event_id_ = db_->insert_grid_event(now_ts, soc);
-                    grid_event_start_ts_  = now_ts;
-                    LOG_WARN("Grid: connectivity lost while battery discharging — possible outage (event id=%lld)",
-                             (long long)active_grid_event_id_);
-                }
+                double soc = bat && bat->valid ? bat->soc_pct : 0;
+                int64_t now_ts = static_cast<int64_t>(std::time(nullptr));
+                active_grid_event_id_ = db_->insert_grid_event(now_ts, soc);
+                grid_event_start_ts_  = now_ts;
+                LOG_WARN("Grid: connectivity lost — possible outage (event id=%lld)",
+                         (long long)active_grid_event_id_);
             }
         } else if (st.ok) {
             if (active_grid_event_id_ > 0) {
@@ -2178,27 +2182,33 @@ std::string HttpServer::flow_json(const BatterySnapshot& bat, const PwrGateSnaps
     double bat_pwr = bat.valid ? bat.power_w : 0;
     double chg_pwr = chg.valid ? (chg.bat_v * chg.bat_a) : 0;
     
-    // System load estimation logic:
-    // 1) Direct DC load (Charger Output + Battery Discharge)
-    double load_w = chg_pwr + bat_pwr;
-    
-    // 2) If Shelly grid power is available, we can estimate DC load from AC side
-    //    assuming ~85% PSU efficiency and subtracting battery charge power.
-    if (load_w < 0.1 && shelly.ok && shelly.power_w > 5.0) {
-        double dc_from_ac = std::max(0.0, shelly.power_w * 0.85);
-        // If battery is charging, subtract that power from the DC total to find the system load.
-        // If battery current is negative (charging), bat_pwr is negative.
-        double net_load = dc_from_ac + (bat_pwr < 0 ? bat_pwr : 0);
-        if (net_load > 0.1) load_w = net_load;
-    } else if (load_w < 0.1) {
-        // Fallback to historical average from analytics if available
-        if (an.avg_load_watts > 0.1) load_w = an.avg_load_watts;
+    // System load estimation — sources in priority order:
+    // 1) PwrGate bat_a < 0: battery discharging through EPG2 → direct measurement
+    // 2) BMS current_a > 0: direct battery discharge measurement (rarely non-zero)
+    // 3) Historical average from load ring (populated by #1/#2 in real-time)
+    // Shelly AC data is intentionally excluded — it measures total AC wall power
+    // (PSU + battery + everything) and cannot isolate system DC load.
+    double load_w = 0;
+    std::string load_source = "unknown";
+
+    double pwrgate_discharge_w = (chg.valid && chg.bat_a < -0.05)
+                                 ? chg.bat_v * (-chg.bat_a) : 0.0;
+    if (pwrgate_discharge_w > 0.5) {
+        load_w = pwrgate_discharge_w;
+        load_source = "measured_pwrgate";
+    } else if (bat_pwr > 0.5) {
+        load_w = bat_pwr;
+        load_source = "measured_bms";
+    } else if (an.avg_load_watts > 0.1) {
+        load_w = an.avg_load_watts;
+        load_source = "historical_avg";
     }
-    
+
     load_w = std::max(0.0, load_w);
 
     o += "  \"power_watts\": " + jdbl(load_w) + ",\n";
-    o += "  \"battery_power_w\": " + jdbl(bat_pwr) + ",\n";
+    o += "  \"load_source\": " + jstr(load_source) + ",\n";
+    o += "  \"battery_power_w\": " + jdbl(pwrgate_discharge_w > 0.0 ? pwrgate_discharge_w : bat_pwr) + ",\n";
     o += "  \"charger_power_w\": " + jdbl(chg_pwr) + ",\n";
     // Shelly grid stats (AC side — true wall power, upstream of PSU)
     o += "  \"grid_enabled\": " + std::string(shelly.ok ? "true" : "false") + ",\n";

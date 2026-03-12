@@ -435,6 +435,7 @@ AnalyticsSnapshot DataStore::analytics() const {
     return analytics_.snapshot();
 }
 
+
 void DataStore::init_extensions(const Config& cfg, Database* db) {
     std::lock_guard<std::mutex> lk(mu_);
     extensions_ = std::make_unique<AnalyticsExtensions>(cfg, db);

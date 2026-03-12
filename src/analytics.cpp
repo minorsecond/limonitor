@@ -883,13 +883,17 @@ void AnalyticsEngine::on_battery(const BatterySnapshot& snap, const PwrGateSnaps
         else              snap_.temp_status = "Warning";
     }
 
-    if (!soc_init_) {
-        max_soc_ = snap.soc_pct;
-        min_soc_ = snap.soc_pct;
-        soc_init_ = true;
-    } else {
-        if (snap.soc_pct > max_soc_) max_soc_ = snap.soc_pct;
-        if (snap.soc_pct < min_soc_) min_soc_ = snap.soc_pct;
+    // Guard: skip clearly invalid SoC readings (0.0 can appear when BMS
+    // hasn't responded yet, or from d[86]-override bugs in old DB records).
+    if (snap.soc_pct > 0.5) {
+        if (!soc_init_) {
+            max_soc_ = snap.soc_pct;
+            min_soc_ = snap.soc_pct;
+            soc_init_ = true;
+        } else {
+            if (snap.soc_pct > max_soc_) max_soc_ = snap.soc_pct;
+            if (snap.soc_pct < min_soc_) min_soc_ = snap.soc_pct;
+        }
     }
     snap_.depth_of_discharge_pct = max_soc_ - min_soc_;
     double dod = snap_.depth_of_discharge_pct;
@@ -897,9 +901,13 @@ void AnalyticsEngine::on_battery(const BatterySnapshot& snap, const PwrGateSnaps
     else if (dod < 70) snap_.dod_status = "Normal";
     else               snap_.dod_status = "High stress";
 
-    double load = (snap.current_a > 0) ? snap.power_w : 0.0;
-    push_load_sample(ts, load);
-    recompute_load_stats();
+    // Only push a BMS load sample when the battery is actually discharging.
+    // Do NOT push 0 W when idle/charging — that floods the ring buffer and
+    // contaminates the historical average, breaking the off-grid load estimate.
+    if (snap.current_a > 0.1) {
+        push_load_sample(ts, snap.power_w);
+        recompute_load_stats();
+    }
 
     bool discharging = snap.current_a >  0.1;
     bool charging    = snap.current_a < -0.1;
@@ -999,3 +1007,5 @@ void AnalyticsEngine::on_charger(const PwrGateSnapshot& snap, const BatterySnaps
     prev_chg_ts_ = ts;
     chg_seen_    = true;
 }
+
+

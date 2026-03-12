@@ -70,6 +70,35 @@ bool parse(const uint8_t* d, size_t len, BatterySnapshot& snap) {
     if (snap.nominal_ah > 0.0)
         snap.soc_pct = (snap.remaining_ah / snap.nominal_ah) * 100.0;
 
+    // Protection flags at offset 76 (uint32 bitmask)
+    if (len > 79) {
+        uint32_t prot = u32le(d + 76);
+        snap.protection.pack_overvoltage      = (prot & 0x00000004) != 0;
+        snap.protection.pack_undervoltage     = (prot & 0x00000020) != 0;
+        snap.protection.charge_overcurrent    = (prot & 0x00000040) != 0;
+        snap.protection.discharge_overcurrent = (prot & 0x00000080) != 0;
+        snap.protection.charge_overtemp       = (prot & 0x00000100) != 0;
+        snap.protection.discharge_overtemp    = (prot & 0x00000200) != 0;
+        snap.protection.charge_undertemp      = (prot & 0x00000400) != 0;
+        snap.protection.discharge_undertemp   = (prot & 0x00000800) != 0;
+        snap.protection.short_circuit         = (prot & 0x00004000) != 0;
+        // MOSFET discharge state: off when over-discharge protection active
+        snap.discharge_mosfet = !(prot & 0x00000020);
+    }
+
+    // Battery state + BMS SoC at offsets 88-91
+    if (len > 91) {
+        uint16_t bstate = u16le(d + 88);
+        snap.charge_mosfet = !(bstate & 0x0004);  // off when charge explicitly disabled
+        uint16_t bms_soc = u16le(d + 90);
+        if (bms_soc > 0)
+            snap.soc_pct = static_cast<double>(bms_soc);
+    }
+
+    // Cycle count at offset 96 (uint32 LE)
+    if (len > 99)
+        snap.cycle_count = static_cast<uint16_t>(u32le(d + 96));
+
     snap.power_w = snap.total_voltage_v * snap.current_a;
     // positive current_a = discharging: time until empty
     // negative current_a = charging:   time until full

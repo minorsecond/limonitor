@@ -66,6 +66,7 @@ private:
     int shelly_fail_count_{0};
     int64_t active_grid_event_id_{0};
     int64_t grid_event_start_ts_{0};
+    bool shelly_was_relay_on_{false}; // tracks last confirmed relay-on state
     static std::string tx_events_json(const std::vector<TxEvent>& events);
     static std::string system_events_json(const std::vector<SystemEvent>& events);
     static std::string analytics_json(const AnalyticsSnapshot& a,
