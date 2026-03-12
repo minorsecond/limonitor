@@ -21,21 +21,6 @@ TestRunner::~TestRunner() {
     stop_test();
 }
 
-bool TestRunner::is_running() const {
-    std::lock_guard<std::mutex> lk(mu_);
-    return running_;
-}
-
-int64_t TestRunner::current_test_id() const {
-    std::lock_guard<std::mutex> lk(mu_);
-    return current_test_id_;
-}
-
-TestType TestRunner::current_test_type() const {
-    std::lock_guard<std::mutex> lk(mu_);
-    return current_test_type_;
-}
-
 int64_t TestRunner::start_test(TestType type) {
     std::lock_guard<std::mutex> lk(mu_);
     if (running_) return 0;
@@ -84,15 +69,12 @@ int64_t TestRunner::start_test(TestType type) {
     energy_delivered_wh_ = 0;
     soc_at_start_ = bat->soc_pct;
     voltage_at_start_ = bat->total_voltage_v;
-    min_voltage_seen_ = bat->total_voltage_v;
     load_sum_wh_ = 0;
     load_sample_count_ = 0;
     last_telemetry_ts_ = 0;
-    last_tick_ts_ = row.start_time;
-    last_v_ = bat->total_voltage_v;
-    last_a_ = bat->current_a;
-    last_soc_ = bat->soc_pct;
-    last_load_ = 0;
+
+    capture_running_ = true;
+    capture_thread_ = std::thread(&TestRunner::capture_loop, this);
 
     LOG_INFO("Test started: id=%lld type=%s soc=%.0f%%",
              (long long)id, row.test_type.c_str(), bat->soc_pct);
@@ -100,12 +82,13 @@ int64_t TestRunner::start_test(TestType type) {
 }
 
 void TestRunner::stop_test() {
-    std::lock_guard<std::mutex> lk(mu_);
     if (!running_) return;
     stop_requested_ = true;
-    
-    // Process one more tick to trigger finish_test (which is now done on the same thread as stop_requested_)
-    on_telemetry_tick_locked(nullptr, nullptr, 0, false, 0);
+    capture_running_ = false; // Ensure loop exits even if not through finish_test
+    if (capture_thread_.joinable()) {
+        capture_thread_.join();
+    }
+    running_ = false;
 }
 
 TestRunner::ActiveStats TestRunner::active_stats() const {
@@ -119,43 +102,37 @@ TestRunner::ActiveStats TestRunner::active_stats() const {
     s.duration_seconds = static_cast<int>(now - test_start_ts_);
     s.energy_delivered_wh = load_sum_wh_;
     s.voltage_at_start = voltage_at_start_;
-    s.min_voltage_seen = min_voltage_seen_;
-    s.battery_voltage = last_v_;
-    s.battery_current = last_a_;
-    s.battery_soc = last_soc_;
-    s.load_power = last_load_;
     return s;
+}
+
+void TestRunner::capture_loop() {
+    while (capture_running_ && running_) {
+        auto bat = store_.latest();
+        auto chg = store_.latest_pwrgate();
+        double load_w = bat && bat->valid && bat->current_a > 0
+            ? (bat->power_w > 0 ? bat->power_w : bat->total_voltage_v * bat->current_a)
+            : 0;
+        bool tx_active = false;
+        double tx_power = 0;
+        auto tx_evs = store_.tx_events(5);
+        for (const auto& e : tx_evs) {
+            if (e.peak_current > 0.5) { tx_active = true; tx_power = e.peak_power; break; }
+        }
+        on_telemetry_tick(bat ? &*bat : nullptr, chg ? &*chg : nullptr,
+                          load_w, tx_active, tx_power);
+        // Sleep in smaller increments so stop() responds faster
+        for (int i = 0; i < TELEMETRY_INTERVAL_SEC * 10 && capture_running_ && running_; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
 }
 
 void TestRunner::on_telemetry_tick(const BatterySnapshot* bat, const PwrGateSnapshot* chg,
                                    double load_w, bool tx_active, double tx_power) {
-    std::lock_guard<std::mutex> lk(mu_);
-    on_telemetry_tick_locked(bat, chg, load_w, tx_active, tx_power);
-}
-
-void TestRunner::on_telemetry_tick_locked(const BatterySnapshot* bat, const PwrGateSnapshot* chg,
-                                          double load_w, bool tx_active, double tx_power) {
     if (!running_ || current_test_id_ == 0) return;
 
-    // Stop requested (highest priority, can happen even without telemetry)
-    if (stop_requested_) {
-        finish_test("aborted", "{\"reason\":\"user_stop\"}");
-        return;
-    }
-
-    auto now_ts = (bat && bat->valid) ? static_cast<int64_t>(
-        std::chrono::system_clock::to_time_t(bat->timestamp)) : 
-        static_cast<int64_t>(std::time(nullptr));
-
-    if (bat && bat->valid) {
-        last_v_ = bat->total_voltage_v;
-        last_a_ = bat->current_a;
-        last_soc_ = bat->soc_pct;
-        last_load_ = load_w;
-        if (bat->total_voltage_v > 0 && bat->total_voltage_v < min_voltage_seen_) {
-            min_voltage_seen_ = bat->total_voltage_v;
-        }
-    }
+    auto now_ts = bat ? static_cast<int64_t>(
+        std::chrono::system_clock::to_time_t(bat->timestamp)) : 0;
 
     // Safety check
     if (bat && bat->valid && check_safety_limits(*bat)) {
@@ -171,24 +148,19 @@ void TestRunner::on_telemetry_tick_locked(const BatterySnapshot* bat, const PwrG
         return;
     }
 
-    // Stop requested (handled at top of function now)
-    /*
+    // Stop requested
     if (stop_requested_) {
         finish_test("aborted", "{\"reason\":\"user_stop\"}");
         return;
     }
-    */
 
     // Integrate energy (discharge only)
     if (bat && bat->valid && bat->current_a > 0.01) {
         double pwr = bat->power_w > 0 ? bat->power_w : (bat->total_voltage_v * bat->current_a);
-        double dt = (last_tick_ts_ > 0) ? static_cast<double>(now_ts - last_tick_ts_) : 0;
-        if (dt > 0 && dt < 30) { // sanity check
-            load_sum_wh_ += pwr * (dt / 3600.0);
-            load_sample_count_++;
-        }
+        std::lock_guard<std::mutex> lk(mu_);
+        load_sum_wh_ += pwr * (1.0 / 3600.0);  // assume 1s tick
+        load_sample_count_++;
     }
-    last_tick_ts_ = now_ts;
 
     // Capture telemetry at interval
     if (now_ts - last_telemetry_ts_ >= TELEMETRY_INTERVAL_SEC) {
@@ -196,10 +168,7 @@ void TestRunner::on_telemetry_tick_locked(const BatterySnapshot* bat, const PwrG
         auto sample = make_telemetry_sample(current_test_id_, bat, chg, load_w, tx_active, tx_power);
         telemetry_buffer_.push(sample);
         if (telemetry_buffer_.needs_flush()) {
-            auto batch = telemetry_buffer_.flush();
-            if (!batch.empty() && db_) {
-                db_->insert_test_telemetry_batch(batch);
-            }
+            flush_telemetry();
         }
     }
 }
@@ -224,11 +193,10 @@ bool TestRunner::check_safety_limits(const BatterySnapshot& bat) const {
 }
 
 void TestRunner::finish_test(const std::string& result, const std::string& metadata_json) {
-    if (!running_) return;
+    capture_running_ = false;  // capture_loop will exit on next iteration
 
-    int64_t id_for_log = current_test_id_;
-    running_ = false;
-    current_test_id_ = 0;
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!running_) return;
 
     flush_telemetry();
 
@@ -265,13 +233,16 @@ void TestRunner::finish_test(const std::string& result, const std::string& metad
     }
 
     if (db_) {
-        db_->update_test_run(id_for_log, end_ts, duration, result, meta);
+        db_->update_test_run(current_test_id_, end_ts, duration, result, meta);
     }
 
     LOG_INFO("Test finished: id=%lld result=%s duration=%ds",
-             (long long)id_for_log, result.c_str(), duration);
+             (long long)current_test_id_, result.c_str(), duration);
 
+    running_ = false;
+    current_test_id_ = 0;
     stop_requested_ = false;
+    LOG_INFO("DEBUG: finish_test exit");
 }
 
 static int64_t compute_next_run(const std::string& freq, int hour, int min, int day) {

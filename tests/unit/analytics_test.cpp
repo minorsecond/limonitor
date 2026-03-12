@@ -312,52 +312,6 @@ void test_daily_ci_variance_addition() {
     ASSERT(approx_eq(daily_sd, 0.02546, 0.001), "daily_ci: sd ≈ 0.0255 kWh");
 }
 
-void test_sys_load_available() {
-    DataStore store;
-    store.update_self_monitor();
-    auto an = store.analytics();
-    // getloadavg() is POSIX and works on macOS and Linux
-    ASSERT(an.sys_load_1m >= 0.0, "sys_load_1m is non-negative");
-    ASSERT(an.sys_load_5m >= 0.0, "sys_load_5m is non-negative");
-    ASSERT(an.sys_load_15m >= 0.0, "sys_load_15m is non-negative");
-}
-
-void test_sys_mem_total_nonzero() {
-    DataStore store;
-    store.update_self_monitor();
-    auto an = store.analytics();
-    ASSERT(an.sys_mem_total_kb > 0, "sys_mem_total_kb is non-zero");
-    // available may be 0 but should not be negative
-    ASSERT(an.sys_mem_available_kb >= 0, "sys_mem_available_kb is non-negative");
-}
-
-void test_disk_free_valid() {
-    DataStore store;
-    store.update_self_monitor();
-    auto an = store.analytics();
-    ASSERT(an.disk_total_bytes > 0, "disk_total_bytes is non-zero");
-    ASSERT(an.disk_free_bytes >= 0, "disk_free_bytes is non-negative");
-    ASSERT(an.disk_free_bytes <= an.disk_total_bytes, "disk_free <= disk_total");
-}
-
-void test_cpu_freq_graceful() {
-    DataStore store;
-    store.update_self_monitor();
-    auto an = store.analytics();
-    // On Linux: real value in MHz; on macOS Apple Silicon: -1 (not exposed)
-    ASSERT(an.cpu_freq_mhz >= -1, "cpu_freq_mhz is -1 or a valid MHz value");
-}
-
-void test_ssd_metrics_graceful() {
-    DataStore store;
-    store.update_self_monitor();
-    auto an = store.analytics();
-    // SMART may not be available in test environment; just must not crash
-    ASSERT(an.ssd_wear_pct >= -1, "ssd_wear_pct is -1 or valid");
-    ASSERT(an.ssd_power_on_hours >= -1, "ssd_power_on_hours is -1 or valid");
-    ASSERT(an.ssd_data_written_gb >= -1, "ssd_data_written_gb is -1 or valid");
-}
-
 void test_self_monitor_rss_nonzero() {
     DataStore store;
     store.update_self_monitor();

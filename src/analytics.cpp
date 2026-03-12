@@ -9,13 +9,10 @@
 #include <cstdio>
 #include <ctime>
 #include <fstream>
-#include <sstream>
-#include <sys/statvfs.h>
 
 #ifdef __APPLE__
 #include <mach/mach.h>
 #include <sys/resource.h>
-#include <sys/sysctl.h>
 #else
 #include <sys/resource.h>
 #include <unistd.h>
@@ -597,24 +594,8 @@ void AnalyticsEngine::compute_system_status(const BatterySnapshot& bat,
     snap_.system_status = status;
 }
 
-// Extract the first integer following "key": in a JSON string.
-// Returns -1 if the key is not found.
-static int64_t json_extract_int(const std::string& json, const std::string& key) {
-    std::string needle = "\"" + key + "\":";
-    auto pos = json.find(needle);
-    if (pos == std::string::npos) {
-        needle = "\"" + key + "\": ";
-        pos = json.find(needle);
-        if (pos == std::string::npos) return -1;
-    }
-    pos += needle.size();
-    while (pos < json.size() && json[pos] == ' ') ++pos;
-    if (pos >= json.size() || (!std::isdigit(json[pos]) && json[pos] != '-')) return -1;
-    try { return std::stoll(json.substr(pos)); } catch (...) { return -1; }
-}
-
 void AnalyticsEngine::update_self_monitor(Database* db) {
-    // 1. Process memory usage
+    // 1. Memory usage
 #ifdef __APPLE__
     task_basic_info_data_t info;
     mach_msg_type_number_t count = TASK_BASIC_INFO_COUNT;
@@ -623,191 +604,41 @@ void AnalyticsEngine::update_self_monitor(Database* db) {
         snap_.process_vsz_kb = info.virtual_size / 1024;
     }
 #else
-    {
-        std::ifstream statm("/proc/self/statm");
-        if (statm) {
-            long vpages, rpages;
-            if (statm >> vpages >> rpages) {
-                long page_size = sysconf(_SC_PAGESIZE);
-                snap_.process_vsz_kb = (vpages * page_size) / 1024;
-                snap_.process_rss_kb = (rpages * page_size) / 1024;
-            }
+    std::ifstream statm("/proc/self/statm");
+    if (statm) {
+        long vpages, rpages;
+        if (statm >> vpages >> rpages) {
+            long page_size = sysconf(_SC_PAGESIZE);
+            snap_.process_vsz_kb = (vpages * page_size) / 1024;
+            snap_.process_rss_kb = (rpages * page_size) / 1024;
         }
     }
 #endif
 
-    // 2. Process CPU usage (delta between calls)
-    {
-        struct rusage usage;
-        if (getrusage(RUSAGE_SELF, &usage) == 0) {
-            double utime = usage.ru_utime.tv_sec + usage.ru_utime.tv_usec / 1000000.0;
-            double stime = usage.ru_stime.tv_sec + usage.ru_stime.tv_usec / 1000000.0;
-            double total_cpu_time = utime + stime;
-            static double last_cpu_time = 0;
-            static double last_ts = 0;
-            double now = static_cast<double>(std::time(nullptr));
-            if (last_ts > 0 && now > last_ts) {
-                double delta_cpu = total_cpu_time - last_cpu_time;
-                double delta_wall = now - last_ts;
-                snap_.process_cpu_pct = (delta_cpu / delta_wall) * 100.0;
-            }
-            last_cpu_time = total_cpu_time;
-            last_ts = now;
+    // 2. CPU usage (simplified average over uptime)
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+        double utime = usage.ru_utime.tv_sec + usage.ru_utime.tv_usec / 1000000.0;
+        double stime = usage.ru_stime.tv_sec + usage.ru_stime.tv_usec / 1000000.0;
+        double total_cpu_time = utime + stime;
+
+        static double last_cpu_time = 0;
+        static double last_ts = 0;
+        double now = static_cast<double>(std::time(nullptr));
+
+        if (last_ts > 0 && now > last_ts) {
+            double delta_cpu = total_cpu_time - last_cpu_time;
+            double delta_wall = now - last_ts;
+            snap_.process_cpu_pct = (delta_cpu / delta_wall) * 100.0;
         }
+        last_cpu_time = total_cpu_time;
+        last_ts = now;
     }
 
     // 3. Database size
     if (db) {
         snap_.db_size_bytes = db->file_size();
         snap_.db_table_sizes = db->table_sizes();
-    }
-
-    // 4. System load average (POSIX — works on Linux and macOS)
-    {
-        double loadavg[3] = {-1, -1, -1};
-        if (getloadavg(loadavg, 3) == 3) {
-            snap_.sys_load_1m  = loadavg[0];
-            snap_.sys_load_5m  = loadavg[1];
-            snap_.sys_load_15m = loadavg[2];
-        }
-    }
-
-    // 5. System RAM
-#ifdef __APPLE__
-    {
-        int64_t total = 0;
-        size_t sz = sizeof(total);
-        if (sysctlbyname("hw.memsize", &total, &sz, nullptr, 0) == 0)
-            snap_.sys_mem_total_kb = total / 1024;
-
-        mach_port_t host = mach_host_self();
-        vm_size_t page_size_vm = 0;
-        host_page_size(host, &page_size_vm);
-        vm_statistics64_data_t vm_stat;
-        mach_msg_type_number_t vm_count = HOST_VM_INFO64_COUNT;
-        if (host_statistics64(host, HOST_VM_INFO64, (host_info64_t)&vm_stat, &vm_count) == KERN_SUCCESS)
-            snap_.sys_mem_available_kb =
-                (int64_t)(vm_stat.free_count + vm_stat.inactive_count) * page_size_vm / 1024;
-    }
-#else
-    {
-        std::ifstream meminfo("/proc/meminfo");
-        std::string line;
-        int64_t total = 0, available = 0;
-        while (std::getline(meminfo, line)) {
-            std::istringstream iss(line.substr(line.find(':') + 1));
-            if (line.rfind("MemTotal:", 0) == 0) iss >> total;
-            else if (line.rfind("MemAvailable:", 0) == 0) iss >> available;
-        }
-        snap_.sys_mem_total_kb     = total;
-        snap_.sys_mem_available_kb = available;
-    }
-#endif
-
-    // 6. Disk free (statvfs on DB path or root)
-    {
-        const char* check_path = (db && !db->path().empty()) ? db->path().c_str() : "/";
-        struct statvfs sv;
-        if (statvfs(check_path, &sv) == 0) {
-            snap_.disk_free_bytes  = (int64_t)sv.f_bavail * (int64_t)sv.f_frsize;
-            snap_.disk_total_bytes = (int64_t)sv.f_blocks * (int64_t)sv.f_frsize;
-        }
-    }
-
-    // 7. CPU frequency
-#ifdef __APPLE__
-    {
-        int64_t freq = 0;
-        size_t sz = sizeof(freq);
-        // Not available on Apple Silicon; returns -1 gracefully
-        if (sysctlbyname("hw.cpufrequency", &freq, &sz, nullptr, 0) == 0 && freq > 0)
-            snap_.cpu_freq_mhz = freq / 1000000;
-    }
-#else
-    {
-        std::ifstream cpufreq("/sys/devices/system/cpu/cpufreq/policy0/scaling_cur_freq");
-        int64_t khz = 0;
-        if (cpufreq >> khz && khz > 0)
-            snap_.cpu_freq_mhz = khz / 1000;
-    }
-#endif
-
-    // 8. SSD health via smartctl (cached — runs at most once per 5 minutes)
-    {
-        static auto last_smart     = std::chrono::steady_clock::now() - std::chrono::minutes(6);
-        static int     cached_wear = -1;
-        static int64_t cached_hours = -1;
-        static int64_t cached_written_gb = -1;
-
-        auto now_tp = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::minutes>(now_tp - last_smart).count() >= 5) {
-            last_smart = now_tp;
-
-            const char* devs[] = {"/dev/nvme0", "/dev/nvme0n1", "/dev/sda", nullptr};
-            for (const char** dev = devs; *dev; ++dev) {
-                std::string cmd = std::string("smartctl --json=c -a ") + *dev + " 2>/dev/null";
-                FILE* fp = popen(cmd.c_str(), "r");
-                if (!fp) continue;
-
-                std::string json;
-                char buf[4096];
-                while (fgets(buf, sizeof(buf), fp)) json += buf;
-                pclose(fp);
-
-                if (json.size() < 10) continue;
-
-                // NVMe: "percentage_used" at top level
-                int64_t wear = json_extract_int(json, "percentage_used");
-                // SATA wear: look for attribute id 177 (Wear_Leveling_Count) value field,
-                // or id 202 (Percent_Lifetime_Remaining) — approximated via "value" after id
-                if (wear < 0) {
-                    // Try common SATA remaining-life attribute (202 value = % remaining → invert)
-                    auto id202 = json.find("\"id\": 202");
-                    if (id202 == std::string::npos) id202 = json.find("\"id\":202");
-                    if (id202 != std::string::npos) {
-                        auto vpos = json.find("\"value\":", id202);
-                        if (vpos != std::string::npos && vpos < id202 + 300) {
-                            vpos += 8;
-                            while (vpos < json.size() && json[vpos] == ' ') ++vpos;
-                            try { wear = 100 - std::stoll(json.substr(vpos)); } catch (...) {}
-                        }
-                    }
-                }
-
-                int64_t hours = json_extract_int(json, "hours");          // power_on_time.hours
-                int64_t duw   = json_extract_int(json, "data_units_written"); // NVMe (units of 512000 bytes)
-                int64_t written_gb = -1;
-                if (duw >= 0) written_gb = duw * 512000LL / 1000000000LL;
-
-                // SATA fallback for total writes: attribute 241 raw value (LBAs written)
-                if (written_gb < 0) {
-                    auto id241 = json.find("\"id\": 241");
-                    if (id241 == std::string::npos) id241 = json.find("\"id\":241");
-                    if (id241 != std::string::npos) {
-                        auto rpos = json.find("\"value\":", id241);
-                        if (rpos != std::string::npos && rpos < id241 + 400) {
-                            rpos += 8;
-                            while (rpos < json.size() && json[rpos] == ' ') ++rpos;
-                            try {
-                                int64_t lbas = std::stoll(json.substr(rpos));
-                                written_gb = lbas * 512LL / 1000000000LL;
-                            } catch (...) {}
-                        }
-                    }
-                }
-
-                if (hours >= 0 || wear >= 0) {
-                    cached_wear       = (int)wear;
-                    cached_hours      = hours;
-                    cached_written_gb = written_gb;
-                    break;
-                }
-            }
-        }
-
-        snap_.ssd_wear_pct      = cached_wear;
-        snap_.ssd_power_on_hours = cached_hours;
-        snap_.ssd_data_written_gb = cached_written_gb;
     }
 }
 
