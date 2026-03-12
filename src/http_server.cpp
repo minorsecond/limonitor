@@ -741,6 +741,7 @@ void HttpServer::handle(int fd) {
         if (ni != std::string::npos) { try { count = std::stoul(query.substr(ni + 2)); } catch (...) {} }
         send_response(fd, 200, "application/json", tx_events_json(store_.tx_events(count)));
     } else if (path == "/api/analytics") {
+        store_.update_self_monitor();
         auto an = store_.analytics();
         if (an.avg_discharge_24h_w < 0.5 && db_ && snap.valid && snap.nominal_ah > 1.0) {
             auto usage = db_->get_usage_profile(7);
@@ -2714,32 +2715,6 @@ html.light .pwr-modal-submit{background:#16a34a}
          "<tr><td>Avg TX current</td><td id=\"tx-avg-cur\">—</td></tr>"
          "</table></div>\n";
 
-    // Performance monitoring (Self-monitor)
-    o += "<div class=\"card\"><div class=\"card-title\">Application Performance</div><table class=\"dt\">\n";
-    o += "<tr><td>Server CPU</td><td id=\"sys-cpu-short\">—</td></tr>\n";
-    o += "<tr><td>Server RAM</td><td id=\"sys-mem-short\">—</td></tr>\n";
-    o += "<tr><td>UI Latency</td><td id=\"sys-ui-lat-short\">—</td></tr>\n";
-    {
-        auto uptime = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - store.startup_time()).count();
-        int days = static_cast<int>(uptime / 86400);
-        int hours = static_cast<int>((uptime % 86400) / 3600);
-        int mins = static_cast<int>((uptime % 3600) / 60);
-        snprintf(buf, sizeof(buf), "<tr><td>Uptime</td><td>%dd %dh %dm</td></tr>\n", days, hours, mins);
-        o += buf;
-    }
-    o += "</table></div>\n";
-
-    // Database statistics
-    o += "<div class=\"card\"><div class=\"card-title\">Database Integrity</div><table class=\"dt\">\n";
-    snprintf(buf, sizeof(buf), "<tr><td>Database File</td><td id=\"sys-db-size\">%.2f MB</td></tr>\n", a.db_size_bytes / 1024.0 / 1024.0);
-    o += buf;
-    o += "<tr><td>Table Row Counts</td><td><div id=\"sys-db-tables\" style=\"font-size:0.8rem; line-height:1.4;\">";
-    for (size_t i = 0; i < a.db_table_sizes.size(); ++i) {
-        if (i) o += "<br/>";
-        o += "<b>" + a.db_table_sizes[i].first + ":</b> " + std::to_string(a.db_table_sizes[i].second);
-    }
-    o += "</div></td></tr>\n";
-    o += "</table></div>\n";
 
     o += "</div>\n"; // .col2
 
@@ -3414,10 +3389,6 @@ function upAnalytics(){fetch('/api/analytics').then(function(r){return r.json()}
     window.lastAnUpdate = now;
     
     var rss=d.process_rss_kb||0, vsz=d.process_vsz_kb||0, cpu=d.process_cpu_pct||0;
-    sv('sys-mem-short', (rss/1024).toFixed(1) + ' MB');
-    sv('sys-cpu-short', cpu.toFixed(1) + '%');
-    sv('sys-ui-lat-short', lat>0 ? Math.round(lat)+'ms' : '—');
-    
     sv('p-be-cpu-val', cpu.toFixed(1) + '%');
     var cBar=$('p-be-cpu-bar'); if(cBar){cBar.style.width=Math.min(cpu,100)+'%'; cBar.className='p-bar-fill '+(cpu>80?'err':cpu>50?'warn':'')}
     sv('p-be-mem-val', (rss/1024).toFixed(1) + ' MB');
@@ -4505,6 +4476,17 @@ h1{font-size:1.25rem;color:var(--green);margin-bottom:.75rem}
 <input type="text" class="ops-input" id="note-input" placeholder="e.g. Adjusted charge current to 10A">
 <button type="button" class="ops-submit" id="note-submit">Add</button>
 </div>
+<div class="ops-card" id="diag-card">
+<h2>System Diagnostics</h2>
+<table style="width:100%;border-collapse:collapse;font-size:.85rem">
+<tr><td style="color:var(--muted);padding:.2rem 0">Server CPU</td><td id="diag-cpu" style="text-align:right">—</td></tr>
+<tr><td style="color:var(--muted);padding:.2rem 0">Server RAM</td><td id="diag-mem" style="text-align:right">—</td></tr>
+<tr><td style="color:var(--muted);padding:.2rem 0">UI Latency</td><td id="diag-lat" style="text-align:right">—</td></tr>
+<tr><td style="color:var(--muted);padding:.2rem 0">Uptime</td><td id="diag-uptime" style="text-align:right">—</td></tr>
+<tr><td style="color:var(--muted);padding:.2rem 0">Database File</td><td id="diag-db-size" style="text-align:right">—</td></tr>
+<tr><td style="color:var(--muted);padding:.2rem 0;vertical-align:top">Table Row Counts</td><td id="diag-db-tables" style="text-align:right;font-size:.78rem;line-height:1.5">—</td></tr>
+</table>
+</div>
 <div class="ops-card">
 <h2>Recent Events</h2>
 <div class="ops-filter">
@@ -4540,6 +4522,21 @@ $('maint-end-btn').onclick=function(){fetch('/api/maintenance/end',{method:'POST
 $('note-submit').onclick=function(){var inp=$('note-input');var msg=inp.value.trim();if(!msg)return;fetch('/api/note',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})}).then(function(x){return x.json()}).then(function(d){if(d.ok){inp.value='';loadOpsLog()}})}
 $('note-input').onkeydown=function(e){if(e.key==='Enter')$('note-submit').click()}
 document.querySelectorAll('.ops-filter-btn').forEach(function(b){b.onclick=function(){document.querySelectorAll('.ops-filter-btn').forEach(function(x){x.classList.remove('active')});b.classList.add('active');loadOpsLog(b.dataset.filter)}})
+function loadDiagnostics(){
+  var t0=performance.now();
+  fetch('/api/analytics').then(function(r){return r.json()}).then(function(d){
+    var lat=Math.round(performance.now()-t0);
+    var rss=d.process_rss_kb||0,cpu=d.process_cpu_pct||0;
+    function sv(id,v){var e=$(id);if(e)e.textContent=v}
+    sv('diag-cpu',cpu.toFixed(1)+'%');
+    sv('diag-mem',(rss/1024).toFixed(1)+' MB');
+    sv('diag-lat',lat+'ms');
+    if(d.uptime_sec!=null){var u=d.uptime_sec,dy=Math.floor(u/86400),hr=Math.floor((u%86400)/3600),mn=Math.floor((u%3600)/60);sv('diag-uptime',dy+'d '+hr+'h '+mn+'m')}
+    if(d.db_size_bytes>0)sv('diag-db-size',(d.db_size_bytes/1024/1024).toFixed(2)+' MB');
+    if(d.db_table_sizes){var tbls=Object.entries(d.db_table_sizes).map(function(kv){return kv[0]+': '+kv[1]}).join('\n');var e=$('diag-db-tables');if(e)e.style.whiteSpace='pre';sv('diag-db-tables',tbls||'—')}
+  }).catch(function(){})
+}
+setInterval(loadDiagnostics,10000);loadDiagnostics();
 loadMaintStatus();loadOpsLog();
 )HTML" + grid_event_banner_js() + R"HTML(</script></body></html>)HTML";
     return o;

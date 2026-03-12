@@ -65,6 +65,10 @@ void test_regression_flat();
 void test_runtime_nominal_voltage();
 void test_daily_ci_variance_addition();
 
+void test_self_monitor_rss_nonzero();
+void test_self_monitor_db_populated();
+void test_analytics_api_self_monitor();
+
 void test_parse_test_type();
 void test_test_type_str();
 void test_test_result_str();
@@ -102,6 +106,7 @@ int main() {
     test_charger_history_api_empty();
     test_charger_history_api_with_data();
     test_charger_history_persistence_via_store();
+    test_analytics_api_self_monitor();
     printf("PASS: HTTP APIs\n");
 
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -154,6 +159,8 @@ int main() {
 
     test_runtime_nominal_voltage();
     test_daily_ci_variance_addition();
+    test_self_monitor_rss_nonzero();
+    test_self_monitor_db_populated();
     printf("PASS: Misc analytics\n");
 
     test_parse_test_type();

@@ -311,3 +311,26 @@ void test_daily_ci_variance_addition() {
     double daily_sd = std::sqrt(daily_var) / 1000.0;
     ASSERT(approx_eq(daily_sd, 0.02546, 0.001), "daily_ci: sd ≈ 0.0255 kWh");
 }
+
+void test_self_monitor_rss_nonzero() {
+    DataStore store;
+    store.update_self_monitor();
+    auto an = store.analytics();
+    ASSERT(an.process_rss_kb > 0, "RSS memory is non-zero after update_self_monitor");
+}
+
+void test_self_monitor_db_populated() {
+    std::string db_path = "/tmp/test_selfmon_db_" + std::to_string(getpid()) + ".db";
+    remove(db_path.c_str());
+    Database db(db_path);
+    db.open();
+
+    DataStore store;
+    store.set_database(&db);
+    store.update_self_monitor();
+    auto an = store.analytics();
+    ASSERT(an.db_size_bytes > 0, "db_size_bytes non-zero after update_self_monitor with DB");
+    ASSERT(an.db_table_sizes.size() > 0, "db_table_sizes non-empty after update_self_monitor with DB");
+
+    remove(db_path.c_str());
+}

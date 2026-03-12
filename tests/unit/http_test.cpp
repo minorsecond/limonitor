@@ -231,3 +231,19 @@ void test_charger_history_persistence_via_store() {
 
     remove(db_path.c_str());
 }
+
+void test_analytics_api_self_monitor() {
+    DataStore store;
+    HttpServer server(store, nullptr, "127.0.0.1", 8093);
+    server.start();
+
+    // The /api/analytics handler must call update_self_monitor so RSS is non-zero
+    std::string resp = http_request("127.0.0.1", 8093, "GET", "/api/analytics", "");
+    ASSERT(parse_http_status(resp) == 200, "GET /api/analytics returns 200");
+    ASSERT(resp.find("\"process_rss_kb\"") != std::string::npos, "process_rss_kb field present");
+    // RSS must be non-zero — a running process always has memory.
+    // JSON format is: "process_rss_kb": NNN (space after colon)
+    ASSERT(resp.find("\"process_rss_kb\": 0") == std::string::npos, "process_rss_kb is non-zero");
+
+    server.stop();
+}
