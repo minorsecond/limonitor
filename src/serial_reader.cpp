@@ -1,6 +1,7 @@
 #include "serial_reader.hpp"
 #include "logger.hpp"
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <fcntl.h>
 #include <sys/ioctl.h>
@@ -8,6 +9,88 @@
 #include <thread>
 #include <chrono>
 #include <unistd.h>
+#ifdef __linux__
+#include <linux/usbdevice_fs.h>
+#include <stdlib.h>  // realpath
+#endif
+
+// ---------------------------------------------------------------------------
+// USB device reset (Linux only)
+// Walks sysfs to find the USB device behind a tty node and issues
+// USBDEVFS_RESET — equivalent to physically unplugging and replugging.
+// ---------------------------------------------------------------------------
+
+#ifdef __linux__
+static bool usb_reset_tty_device(const std::string& dev) {
+    // Extract bare tty name: "/dev/ttyACM0" -> "ttyACM0"
+    std::string ttyname = dev;
+    auto slash = dev.rfind('/');
+    if (slash != std::string::npos) ttyname = dev.substr(slash + 1);
+
+    // /sys/class/tty/<name>/device -> symlink to USB interface directory
+    std::string sysfs = "/sys/class/tty/" + ttyname + "/device";
+    char link[512];
+    ssize_t len = readlink(sysfs.c_str(), link, sizeof(link) - 1);
+    if (len < 0) {
+        LOG_WARN("USB reset: readlink(%s): %s", sysfs.c_str(), strerror(errno));
+        return false;
+    }
+    link[len] = '\0';
+
+    // Resolve symlink relative to /sys/class/tty/<name>/
+    std::string base = "/sys/class/tty/" + ttyname + "/";
+    std::string iface = (link[0] == '/') ? link : base + link;
+    char real[PATH_MAX];
+    if (!realpath(iface.c_str(), real)) {
+        LOG_WARN("USB reset: realpath(%s): %s", iface.c_str(), strerror(errno));
+        return false;
+    }
+
+    // Parent of the interface directory = USB device directory
+    std::string usb_dir = real;
+    auto p = usb_dir.rfind('/');
+    if (p == std::string::npos) return false;
+    usb_dir = usb_dir.substr(0, p);
+
+    // Read busnum / devnum from sysfs
+    auto read_int = [](const std::string& path) -> int {
+        FILE* f = fopen(path.c_str(), "r");
+        if (!f) return -1;
+        int v = -1;
+        fscanf(f, "%d", &v);
+        fclose(f);
+        return v;
+    };
+    int busnum = read_int(usb_dir + "/busnum");
+    int devnum = read_int(usb_dir + "/devnum");
+    if (busnum < 0 || devnum < 0) {
+        LOG_WARN("USB reset: could not read busnum/devnum from %s", usb_dir.c_str());
+        return false;
+    }
+
+    // Open /dev/bus/usb/NNN/NNN and issue reset ioctl
+    char usbpath[64];
+    snprintf(usbpath, sizeof(usbpath), "/dev/bus/usb/%03d/%03d", busnum, devnum);
+    int fd = open(usbpath, O_WRONLY);
+    if (fd < 0) {
+        LOG_WARN("USB reset: open(%s): %s", usbpath, strerror(errno));
+        return false;
+    }
+    int rc = ioctl(fd, USBDEVFS_RESET, 0);
+    close(fd);
+    if (rc < 0) {
+        LOG_WARN("USB reset: USBDEVFS_RESET on %s: %s", usbpath, strerror(errno));
+        return false;
+    }
+    LOG_INFO("USB reset: issued reset to %s (bus%03d dev%03d)", dev.c_str(), busnum, devnum);
+    return true;
+}
+#else
+static bool usb_reset_tty_device(const std::string& dev) {
+    LOG_WARN("USB reset: not supported on this platform (%s)", dev.c_str());
+    return false;
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // serial_prompts free functions
@@ -160,11 +243,14 @@ void SerialReader::read_loop() {
     static constexpr long STUCK_TIMEOUT_S    = 900;  // 15 min before first recovery
     static constexpr long RECOVERY_COOLDOWN_S = 1800; // 30 min between attempts
     static constexpr long STALE_RECONNECT_S  = 300;  // 5 min without any data → reconnect
+    // After this many serial reconnects still produce no data, escalate to USB reset
+    static constexpr int  USB_RESET_AFTER_RECONNECTS = 2;
 
-    bool charger_was_stuck     = false;
-    auto charger_stuck_since   = std::chrono::steady_clock::time_point{};
-    auto last_charger_recovery = std::chrono::steady_clock::time_point{};
-    auto last_stale_reconnect  = std::chrono::steady_clock::time_point{};
+    bool charger_was_stuck         = false;
+    auto charger_stuck_since       = std::chrono::steady_clock::time_point{};
+    auto last_charger_recovery     = std::chrono::steady_clock::time_point{};
+    auto last_stale_reconnect      = std::chrono::steady_clock::time_point{};
+    int  stale_reconnects_since_data = 0; // escalation counter
 
     // Helper: close and reopen the port, re-send DTR wake pulse
     auto reconnect = [&]() -> bool {
@@ -240,13 +326,34 @@ void SerialReader::read_loop() {
                 auto since_reconnect = std::chrono::duration_cast<std::chrono::seconds>(
                     now_w - last_stale_reconnect).count();
                 if (stale_s >= STALE_RECONNECT_S && since_reconnect >= STALE_RECONNECT_S) {
-                    LOG_WARN("Serial: no PwrGate data from %s for %llds — reconnecting",
-                             device_.c_str(), static_cast<long long>(stale_s));
                     last_stale_reconnect = now_w;
                     last_snap_time = now_w; // prevent rapid retrigger on reconnect failure
-                    if (recovery_cb_)
-                        recovery_cb_("No data for " + std::to_string(static_cast<long long>(stale_s)) + "s — reconnected");
-                    reconnect();
+
+                    if (stale_reconnects_since_data >= USB_RESET_AFTER_RECONNECTS) {
+                        // Serial reconnects haven't helped — escalate to USB device reset
+                        LOG_WARN("Serial: %d serial reconnects, still no data — issuing USB reset on %s",
+                                 stale_reconnects_since_data, device_.c_str());
+                        if (fd_ >= 0) { close(fd_); fd_ = -1; }
+                        bool ok = usb_reset_tty_device(device_);
+                        if (ok) {
+                            // Allow 3s for the OS to re-enumerate the device
+                            std::this_thread::sleep_for(std::chrono::seconds(3));
+                            stale_reconnects_since_data = 0;
+                            std::string reason = "USB reset after " +
+                                std::to_string(stale_s) + "s stale data";
+                            if (recovery_cb_) recovery_cb_(reason);
+                        }
+                        reconnect(); // re-open port regardless
+                    } else {
+                        LOG_WARN("Serial: no PwrGate data from %s for %llds — reconnecting (attempt %d)",
+                                 device_.c_str(), static_cast<long long>(stale_s),
+                                 stale_reconnects_since_data + 1);
+                        reconnect();
+                        ++stale_reconnects_since_data;
+                        if (recovery_cb_)
+                            recovery_cb_("No data for " +
+                                std::to_string(static_cast<long long>(stale_s)) + "s — reconnected");
+                    }
                 }
             }
 
@@ -287,6 +394,7 @@ void SerialReader::read_loop() {
                     cb_(snap);
                     auto now_s = std::chrono::steady_clock::now();
                     last_snap_time = now_s;
+                    stale_reconnects_since_data = 0; // data is flowing, reset escalation counter
 
                     // ── Charger reconfiguration (jumper reset) ───────────────
                     if (!reconfigure_sent && serial_prompts::needs_reconfigure(snap.target_a)) {
