@@ -5,6 +5,7 @@
 #include "ble_manager.hpp"
 #include "logger.hpp"
 #include <atomic>
+#include <chrono>
 #include <map>
 #include <mutex>
 #include <string>
@@ -42,6 +43,7 @@ struct BleManager::Impl {
     CBCharacteristic*  notify_char{nullptr};
     CBCharacteristic*  write_char{nullptr};
     BLEDelegate*       delegate{nullptr};
+    std::chrono::steady_clock::time_point last_data_time;
 
     // Discovered peripherals (id -> retained CBPeripheral*)
     std::map<std::string, CBPeripheral*> discovered;
@@ -58,6 +60,7 @@ struct BleManager::Impl {
 
     void set_state(BleState s, const std::string& msg = "") {
         BleState old = state.exchange(s);
+        if (s == BleState::READY) last_data_time = std::chrono::steady_clock::now();
         if (old != s || !msg.empty()) {
             LOG_INFO("BLE: %s -> %s%s%s",
                 ble_state_str(old), ble_state_str(s),
@@ -70,8 +73,8 @@ struct BleManager::Impl {
         return [p.identifier.UUIDString UTF8String];
     }
 
-    bool matches_target(CBPeripheral* p) const {
-        if (target.empty()) return false;
+    bool matches_target(CBPeripheral* p, NSDictionary* adv) const {
+        if (target.empty()) return adv_has_service(adv);
         NSString* t = [NSString stringWithUTF8String:target.c_str()];
         if (p.name) {
             NSRange r = [p.name rangeOfString:t options:NSCaseInsensitiveSearch];
@@ -101,6 +104,7 @@ struct BleManager::Impl {
         }
 
         // Fire discovery callback (visible to TUI device picker)
+        bool is_target = matches_target(p, adv);
         if (discovery_cb) {
             DiscoveredDevice dev;
             dev.id   = pid;
@@ -110,8 +114,7 @@ struct BleManager::Impl {
             discovery_cb(dev);
         }
 
-        // Auto-connect if we have a matching target
-        if (state.load() == BleState::SCANNING && matches_target(p)) {
+        if (state.load() == BleState::SCANNING && is_target) {
             LOG_INFO("BLE: target found — connecting");
             do_connect(p);
         }
@@ -206,6 +209,7 @@ struct BleManager::Impl {
 
     void on_notification(CBCharacteristic* ch) {
         NSData* d = ch.value;
+        last_data_time = std::chrono::steady_clock::now();
         if (!d || d.length == 0 || !data_cb) return;
         const uint8_t* p = static_cast<const uint8_t*>(d.bytes);
         data_cb(std::vector<uint8_t>(p, p + d.length));
@@ -246,6 +250,14 @@ struct BleManager::Impl {
 
     void do_poll() {
         if (state.load() != BleState::READY || !write_char) return;
+
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - last_data_time).count() > 30) {
+            LOG_WARN("BLE: data timeout (30s) — reconnecting");
+            on_disconnected(nil);
+            return;
+        }
+
         if (!poll_command.empty()) {
             NSData* d = [NSData dataWithBytes:poll_command.data() length:poll_command.size()];
             [peripheral writeValue:d forCharacteristic:write_char type:write_type];

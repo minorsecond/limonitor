@@ -2,6 +2,7 @@
 #include "logger.hpp"
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -64,6 +65,7 @@ struct BleManager::Impl {
     guint               reconnect_src{0};
     guint               char_find_src{0};
     int                 char_find_attempt{0};
+    std::chrono::steady_clock::time_point last_data_time;
 
     std::thread thread;
 
@@ -76,6 +78,7 @@ struct BleManager::Impl {
 
     void set_state(BleState s, const std::string& msg = "") {
         BleState old = state.exchange(s);
+        if (s == BleState::READY) last_data_time = std::chrono::steady_clock::now();
         if (old != s || !msg.empty()) {
             LOG_INFO("BLE: %s -> %s%s%s",
                 ble_state_str(old), ble_state_str(s),
@@ -85,7 +88,7 @@ struct BleManager::Impl {
     }
 
     bool is_target(GDBusProxy* dev) const {
-        if (target.empty()) return false;
+        if (target.empty()) return dev_has_service(dev);
         g_autoptr(GVariant) av = g_dbus_proxy_get_cached_property(dev, "Address");
         if (av && strcasecmp(gv_str(av).c_str(), target.c_str()) == 0) return true;
         g_autoptr(GVariant) nv = g_dbus_proxy_get_cached_property(dev, "Name");
@@ -99,8 +102,20 @@ struct BleManager::Impl {
         GVariantIter it; g_variant_iter_init(&it, uuids_v);
         const char* u;
         while (g_variant_iter_next(&it, "&s", &u))
-            if (str_icontains(u, "ff00")) return true;
+            if (str_icontains(u, service_uuid)) return true;
         return false;
+    }
+
+    void maybe_connect(GDBusProxy* proxy, const std::string& path) {
+        if (is_target(proxy)) {
+            g_autoptr(GDBusProxy) adapter = g_dbus_proxy_new_for_bus_sync(
+                G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, nullptr, "org.bluez",
+                adapter_path.c_str(), "org.bluez.Adapter1", nullptr, nullptr);
+            if (adapter)
+                g_dbus_proxy_call_sync(adapter, "StopDiscovery",
+                    nullptr, G_DBUS_CALL_FLAGS_NONE, 5000, nullptr, nullptr);
+            connect_device(path);
+        }
     }
 
     // Report a device via the discovery callback and add to discovered map.
@@ -200,8 +215,12 @@ struct BleManager::Impl {
         g_autoptr(GVariant) r = g_dbus_proxy_call_sync(adapter, "StartDiscovery",
             nullptr, G_DBUS_CALL_FLAGS_NONE, 15000, cancel, &err);
         if (err) {
-            if (!strstr(err->message, "InProgress"))
+            bool in_progress = strstr(err->message, "InProgress") != nullptr;
+            if (!in_progress) {
                 LOG_WARN("BLE: StartDiscovery: %s", err->message);
+                set_state(BleState::DISCONNECTED);
+                schedule_reconnect(10);
+            }
             g_error_free(err);
         } else {
             LOG_INFO("BLE: scanning for devices…");
@@ -372,6 +391,14 @@ struct BleManager::Impl {
     }
     void do_poll() {
         if (state.load() != BleState::READY || !write_char || poll_command.empty()) return;
+
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - last_data_time).count() > 30) {
+            LOG_WARN("BLE: data timeout (30s) — reconnecting");
+            schedule_reconnect();
+            return;
+        }
+
         LOG_DEBUG("BLE: polling (%zu bytes)", poll_command.size());
         GVariantBuilder b; g_variant_builder_init(&b, G_VARIANT_TYPE("ay"));
         for (uint8_t byte : poll_command) g_variant_builder_add(&b, "y", byte);
@@ -444,6 +471,7 @@ struct BleManager::Impl {
             return;
         }
         g_signal_connect(self->obj_mgr, "object-added", G_CALLBACK(cb_obj_added), self);
+        g_signal_connect(self->obj_mgr, "interface-proxy-properties-changed", G_CALLBACK(cb_interface_props_changed), self);
         if (!self->try_find_device()) self->start_discovery();
     }
 
@@ -459,17 +487,20 @@ struct BleManager::Impl {
 
         // Always report to picker
         self->report_device(proxy, path);
-
-        if (self->is_target(proxy)) {
-            g_autoptr(GDBusProxy) adapter = g_dbus_proxy_new_for_bus_sync(
-                G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, nullptr, "org.bluez",
-                self->adapter_path.c_str(), "org.bluez.Adapter1", nullptr, nullptr);
-            if (adapter)
-                g_dbus_proxy_call_sync(adapter, "StopDiscovery",
-                    nullptr, G_DBUS_CALL_FLAGS_NONE, 5000, nullptr, nullptr);
-            self->connect_device(path);
-        }
+        self->maybe_connect(proxy, path);
         g_object_unref(iface);
+    }
+
+    static void cb_interface_props_changed(GDBusObjectManagerClient*, GDBusObjectProxy* obj,
+                                           GDBusProxy* proxy, GVariant*, GStrv, gpointer ud) {
+        auto* self = static_cast<Impl*>(ud);
+        if (self->state.load() != BleState::SCANNING) return;
+
+        const char* iface = g_dbus_proxy_get_interface_name(proxy);
+        if (iface && strcmp(iface, "org.bluez.Device1") == 0) {
+            const char* path = g_dbus_object_get_object_path(G_DBUS_OBJECT(obj));
+            self->maybe_connect(proxy, path);
+        }
     }
 
     static void cb_device_props(GDBusProxy*, GVariant* changed, GStrv, gpointer ud) {
@@ -491,6 +522,7 @@ struct BleManager::Impl {
         gsize n = 0;
         const uint8_t* d = static_cast<const uint8_t*>(g_variant_get_fixed_array(val, &n, 1));
         LOG_INFO("BLE: notification received, %zu bytes", n);
+        self->last_data_time = std::chrono::steady_clock::now();
         if (d && n > 0 && self->data_cb)
             self->data_cb(std::vector<uint8_t>(d, d + n));
     }
