@@ -1,5 +1,6 @@
 #pragma once
 #include "battery_data.hpp"
+#include "system_load.hpp"
 #include "ops_events.hpp"
 #include "pwrgate.hpp"
 #include "system_events.hpp"
@@ -70,6 +71,10 @@ public:
 
     std::string get_setting(const std::string& key) const;
     void set_setting(const std::string& key, const std::string& value);
+
+    // System load calibration (stored as JSON in settings table)
+    SystemLoadConfig get_system_load_config() const;
+    void set_system_load_config(const SystemLoadConfig& cfg);
 
     // Weather cache: raw API JSON responses, survives restarts
     void save_weather_cache(const std::string& key, const std::string& json);

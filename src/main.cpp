@@ -500,6 +500,10 @@ int main(int argc, char** argv) {
         store.set_rated_capacity(cfg.rated_capacity_ah);
         LOG_INFO("Rated capacity override: %.1f Ah", cfg.rated_capacity_ah);
     }
+    // Load system component calibration config (provides idle-load fallback for runtime estimates)
+    if (db->is_open()) {
+        store.set_system_load_config(db->get_system_load_config());
+    }
 
     // Attach DB to store (already opened above)
     if (db->is_open()) {

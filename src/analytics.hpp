@@ -64,6 +64,7 @@ struct AnalyticsSnapshot {
     bool   runtime_current_exceeds_cap{false}; // display "> 1000 h" for current
     bool   runtime_from_charger{false}; // true when load used charger power (charging) fallback
     bool   runtime_from_historical{false}; // true when load from 7d DB profile (on grid)
+    bool   runtime_from_calibrated{false}; // true when load used user's calibrated idle
     double avg_discharge_24h_w{0};      // 24h average discharge (W), 0 = insufficient data
     std::vector<std::string> health_alerts;
 
@@ -99,8 +100,9 @@ class AnalyticsEngine {
 public:
     explicit AnalyticsEngine(double rated_capacity_ah = 100.0);
 
-    void set_rated_capacity(double ah);           // 0 = auto-detect from BMS
-    void set_purchase_date(const std::string& d); // "YYYY-MM-DD"
+    void set_rated_capacity(double ah);            // 0 = auto-detect from BMS
+    void set_purchase_date(const std::string& d);  // "YYYY-MM-DD"
+    void set_calibrated_idle_w(double w);          // user-measured idle load fallback
 
     void on_battery(const BatterySnapshot& snap, const PwrGateSnapshot* chg = nullptr);
     void on_charger(const PwrGateSnapshot& snap, const BatterySnapshot* bat = nullptr);
@@ -114,6 +116,7 @@ private:
     double rated_capacity_ah_{100.0};
     bool   rated_override_{false};   // true = user set it explicitly
     std::string purchase_date_;
+    double calibrated_idle_w_{0.0};  // user-measured idle load (system_load config)
 
     // Daily energy counters (midnight reset)
     double energy_charged_wh_{0};

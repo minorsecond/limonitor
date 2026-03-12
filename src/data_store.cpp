@@ -417,6 +417,12 @@ void DataStore::set_rated_capacity(double ah) {
     analytics_.set_rated_capacity(ah);
 }
 
+void DataStore::set_system_load_config(const SystemLoadConfig& cfg) {
+    std::lock_guard<std::mutex> lk(mu_);
+    system_load_config_ = cfg;
+    analytics_.set_calibrated_idle_w(cfg.total_idle_w());
+}
+
 void DataStore::update_self_monitor() {
     std::lock_guard<std::mutex> lk(mu_);
     analytics_.update_self_monitor(db_);

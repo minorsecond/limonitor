@@ -129,6 +129,7 @@ set(SOURCES
     src/testing/types.cpp
     src/testing/telemetry.cpp
     src/testing/runner.cpp
+    src/system_load.cpp
     ${PROTO_SOURCES}
 )
 
@@ -212,6 +213,7 @@ if(BUILD_TESTING)
         tests/unit/pwrgate_test.cpp
         tests/unit/serial_reader_test.cpp
         tests/unit/test_runner_test.cpp
+        tests/unit/system_load_test.cpp
         src/logger.cpp
         src/analytics.cpp
         src/shelly_client.cpp
@@ -231,6 +233,7 @@ if(BUILD_TESTING)
         src/testing/types.cpp
         src/testing/telemetry.cpp
         src/testing/runner.cpp
+        src/system_load.cpp
         ${PROTO_SOURCES}
     )
     if(APPLE)

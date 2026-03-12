@@ -316,6 +316,24 @@ void HttpServer::handle(int fd) {
         return;
     }
 
+    if (method == "POST" && path == "/api/system_load") {
+        if (!db_) { send_response(fd, 503, "application/json", "{\"error\":\"Database unavailable\"}\n"); return; }
+        auto body_start = req.find("\r\n\r\n");
+        if (body_start != std::string::npos) body_start += 4;
+        else { body_start = req.find("\n\n"); if (body_start != std::string::npos) body_start += 2; }
+        std::string body = (body_start != std::string::npos && body_start < req.size())
+            ? req.substr(body_start) : "";
+        auto cfg = SystemLoadConfig::from_json(body);
+        if (cfg.empty()) {
+            send_response(fd, 400, "application/json", "{\"ok\":false,\"error\":\"Invalid or empty component list\"}\n");
+            return;
+        }
+        db_->set_system_load_config(cfg);
+        store_.set_system_load_config(cfg);
+        send_response(fd, 200, "application/json", "{\"ok\":true}\n");
+        return;
+    }
+
     if (method == "POST" && path == "/api/settings") {
         if (!db_) {
             send_response(fd, 503, "application/json", "{\"error\":\"Settings not available\"}\n");
@@ -1114,6 +1132,15 @@ void HttpServer::handle(int fd) {
             o += "]}\n";
             send_response(fd, 200, "application/json", o);
         }
+    } else if (path == "/api/system_load") {
+        // GET: return current system load calibration config as JSON
+        if (!db_) {
+            send_response(fd, 200, "application/json",
+                          SystemLoadConfig::default_config().to_json() + "\n");
+        } else {
+            send_response(fd, 200, "application/json",
+                          db_->get_system_load_config().to_json() + "\n");
+        }
     } else if (path == "/api/settings") {
         if (!db_) {
             send_response(fd, 200, "application/json", "{\"theme\":\"\",\"time\":\"24\",\"range\":\"1\",\"show-extended\":\"0\",\"locale\":\"\"}\n");
@@ -1479,7 +1506,49 @@ std::string HttpServer::analytics_json(const AnalyticsSnapshot& a,
         o += ",\n  \"uptime_sec\": " + std::to_string(uptime);
         o += ",\n  \"last_bms_update_ago_sec\": " + (bms_ago >= 0 ? std::to_string(bms_ago) : "null");
         o += ",\n  \"last_charger_update_ago_sec\": " + (chg_ago >= 0 ? std::to_string(chg_ago) : "null");
+
+        // System load calibration — runtime estimates from user's measured component data
+        const auto& slc = store->system_load_config();
+        if (!slc.empty()) {
+            // Find the first component with TX levels (radio)
+            int tx_comp = -1;
+            int tx_level = 1;  // default to second level (10W RF) if available
+            for (int ci = 0; ci < static_cast<int>(slc.components.size()); ++ci) {
+                if (!slc.components[ci].tx_levels.empty()) { tx_comp = ci; break; }
+            }
+            if (tx_comp >= 0 && tx_level >= static_cast<int>(slc.components[tx_comp].tx_levels.size()))
+                tx_level = 0;
+
+            // Battery capacity from latest snapshot
+            double usable_wh = 0;
+            auto bat_opt = store->latest();
+            if (bat_opt && bat_opt->nominal_ah > 1.0) {
+                double measured_v = bat_opt->total_voltage_v > 1.0 ? bat_opt->total_voltage_v : 51.2;
+                int cells = std::max(1, static_cast<int>(std::round(measured_v / 3.3)));
+                double pack_v = cells * 3.2;
+                double soc = bat_opt->soc_pct;
+                usable_wh = bat_opt->nominal_ah * pack_v * (soc - 10.0) / 100.0;
+                if (usable_wh < 0) usable_wh = 0;
+            }
+
+            double rx_h   = slc.runtime_receive_h(usable_wh);
+            double tx10_h = (tx_comp >= 0) ? slc.runtime_with_tx_h(usable_wh, 10.0, tx_comp, tx_level) : 0;
+            std::string tx_label = (tx_comp >= 0)
+                ? slc.components[tx_comp].tx_levels[tx_level].label : "";
+
+            o += ",\n  \"system_load\": {";
+            o += "\n    \"total_idle_w\": " + jdbl(slc.total_idle_w(), 2);
+            o += ",\n    \"total_idle_a\": " + jdbl(slc.total_idle_a(), 3);
+            o += ",\n    \"runtime_receive_h\": " + jdbl(rx_h, 1);
+            o += ",\n    \"runtime_receive_d\": " + jdbl(rx_h / 24.0, 2);
+            o += ",\n    \"runtime_tx10_h\": " + jdbl(tx10_h, 1);
+            o += ",\n    \"runtime_tx10_d\": " + jdbl(tx10_h / 24.0, 2);
+            o += ",\n    \"tx_label\": " + jstr(tx_label);
+            o += ",\n    \"usable_wh\": " + jdbl(usable_wh, 0);
+            o += "\n  }";
+        }
     }
+    o += ",\n  \"runtime_from_calibrated\": " + jbool(a.runtime_from_calibrated);
     o += "\n}\n";
     return o;
 }
@@ -4858,7 +4927,11 @@ std::string HttpServer::html_settings_page(Database* db) {
 :root{--bg:#0d0d11;--card:#16161c;--border:#2e2e3a;--text:#e0e0ea;--muted:#9090a8;--green:#4ade80;--input-bg:#1a1a22}
 html.light{--bg:#f2f3f7;--card:#fff;--border:#d4d4e0;--text:#1a1a2c;--muted:#5a5a72;--green:#16a34a;--input-bg:#fafafa}
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5;padding:1.5rem;max-width:560px;margin:0 auto}
+body{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5;padding:1.5rem;max-width:660px;margin:0 auto}
+.tab-bar{display:flex;gap:.25rem;margin-bottom:1.25rem;border-bottom:1px solid var(--border);padding-bottom:.5rem}
+.tab-btn{background:none;border:none;padding:.4rem .9rem;border-radius:6px 6px 0 0;cursor:pointer;font-family:inherit;font-size:.85rem;color:var(--muted)}
+.tab-btn.active{background:var(--card);color:var(--green);font-weight:600;border:1px solid var(--border);border-bottom:1px solid var(--card)}
+.tab-panel{display:none}.tab-panel.active{display:block}
 nav{display:flex;align-items:center;gap:.5rem;margin-bottom:1.5rem;padding-bottom:1rem;border-bottom:1px solid var(--border)}
 nav a{color:var(--muted);text-decoration:none;font-size:.9rem;padding:.35rem .6rem;border-radius:6px}
 nav a:hover{color:var(--text);background:var(--card)}nav a.active{color:var(--green);font-weight:600}
@@ -4894,6 +4967,11 @@ h1{font-size:1.35rem;font-weight:600;color:var(--green);margin-bottom:.25rem}
 <div id="pwr-reason-modal" class="pwr-modal" style="display:none"><div class="pwr-modal-panel" onclick="event.stopPropagation()"><div class="pwr-modal-title" id="pwr-modal-title">Reason required</div><p class="pwr-modal-desc" id="pwr-modal-desc"></p><textarea id="pwr-reason-input" class="pwr-reason-input" placeholder="e.g. Ending battery test" rows="3"></textarea><div class="pwr-modal-err" id="pwr-modal-err">Please enter a reason.</div><div class="pwr-modal-btns"><button type="button" class="pwr-modal-btn pwr-modal-cancel" id="pwr-modal-cancel">Cancel</button><button type="button" class="pwr-modal-btn pwr-modal-submit" id="pwr-modal-submit" disabled>Submit</button></div></div></div>
 <h1>Settings</h1>
 <p class="sub">Application configuration. Hardware changes (BLE, serial) require a restart to take effect.</p>
+<div class="tab-bar">
+<button class="tab-btn active" onclick="showTab('general',this)">General</button>
+<button class="tab-btn" onclick="showTab('components',this)">System Components</button>
+</div>
+<div id="tab-general" class="tab-panel active">
 <form id="cfg-form">
 <div class="card"><div class="card-title">Bluetooth (BLE)</div>
 <div class="row"><label>Device name fragment</label><input type="text" name="device_name" placeholder="e.g. L-12100BNNA70" value=")HTML";
@@ -4999,6 +5077,244 @@ h1{font-size:1.35rem;font-weight:600;color:var(--green);margin-bottom:.25rem}
     o += R"HTML(> Run as daemon (background service)</label></div></div>
 <button type="submit" class="btn">Save settings</button><div id="msg" class="msg"></div>
 </form>
+</div><!-- end tab-general -->
+
+<div id="tab-components" class="tab-panel">
+)HTML";
+    // Inject current system load config as JSON for the tab's JS
+    {
+        auto slc = db ? db->get_system_load_config() : SystemLoadConfig::default_config();
+        o += "<script>var initSysLoad=" + slc.to_json() + ";</script>\n";
+    }
+    o += R"HTML(
+<div class="card">
+<div class="card-title">System Components
+  <button type="button" class="btn btn-sm" style="float:right;margin-top:-.2rem" onclick="addComponent()">+ Add</button>
+</div>
+<div id="comp-list"></div>
+</div>
+
+<div class="card" id="summary-card">
+<div class="card-title">System Summary</div>
+<div class="row" style="display:flex;gap:1.5rem">
+  <div><span class="hint">Total idle current</span><br><strong id="sum-a">—</strong> A</div>
+  <div><span class="hint">Total idle power</span><br><strong id="sum-w">—</strong> W</div>
+</div>
+</div>
+
+<div class="card">
+<div class="card-title">Runtime Estimates (from current SoC)</div>
+<div style="display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:.75rem">
+  <div class="row" style="flex:1;min-width:120px">
+    <label>TX duty cycle (%)</label>
+    <input type="number" id="tx-duty" min="0" max="100" step="1" value="10"
+           style="width:100%;padding:.4rem .5rem;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text)">
+  </div>
+  <div class="row" style="flex:2;min-width:180px">
+    <label>TX power level</label>
+    <select id="tx-level-sel"
+            style="width:100%;padding:.4rem .5rem;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text)">
+      <option value="">No TX levels defined</option>
+    </select>
+  </div>
+</div>
+<div id="rt-estimates" style="display:flex;gap:1.5rem;flex-wrap:wrap"></div>
+</div>
+
+<button class="btn" onclick="saveComponents()">Save component config</button>
+<div id="comp-msg" class="msg"></div>
+</div><!-- end tab-components -->
+
+<script>
+function showTab(name,btn){
+  document.querySelectorAll('.tab-panel').forEach(function(p){p.classList.remove('active')});
+  document.querySelectorAll('.tab-btn').forEach(function(b){b.classList.remove('active')});
+  document.getElementById('tab-'+name).classList.add('active');
+  btn.classList.add('active');
+}
+
+/* ── System Load Component Editor ─────────────────────────────────────── */
+var sysLoad = JSON.parse(JSON.stringify(initSysLoad));
+
+function fmt1(n){return(+n||0).toFixed(3);}
+function fmt2(n){return(+n||0).toFixed(2);}
+
+function renderComponents(){
+  var list=document.getElementById('comp-list');
+  list.innerHTML='';
+  (sysLoad.components||[]).forEach(function(c,ci){
+    var card=document.createElement('div');
+    card.className='card';
+    card.style.marginBottom='.6rem';
+    card.innerHTML='<div class="card-title" style="display:flex;justify-content:space-between;align-items:center">'
+      +'<span>'+escH(c.name||'Unnamed')+'</span>'
+      +'<span style="display:flex;gap:.4rem">'
+      +'<button type="button" class="btn btn-sm" onclick="editComponent('+ci+')">Edit</button>'
+      +'<button type="button" class="btn btn-sm" style="background:#dc2626" onclick="removeComponent('+ci+')">&#x2715;</button>'
+      +'</span></div>'
+      +'<div style="color:var(--muted);font-size:.8rem;margin-bottom:.4rem">'+escH(c.purpose||'')+'</div>'
+      +'<div style="display:flex;gap:1.5rem">'
+      +'<div><span class="hint">Idle current</span><br>'+fmt1(c.idle_a)+' A</div>'
+      +'<div><span class="hint">Idle power</span><br>'+fmt2(c.idle_w)+' W</div>'
+      +'</div>';
+    // TX levels table
+    if(c.tx_levels&&c.tx_levels.length>0){
+      var totalIdleOther=totalIdleW()-c.idle_w;
+      var tbl='<table style="width:100%;margin-top:.6rem;font-size:.8rem;border-collapse:collapse">'
+        +'<thead><tr style="color:var(--muted)">'
+        +'<th style="text-align:left;padding:.2rem .4rem">Level</th>'
+        +'<th style="text-align:right;padding:.2rem .4rem">RF out</th>'
+        +'<th style="text-align:right;padding:.2rem .4rem">System A</th>'
+        +'<th style="text-align:right;padding:.2rem .4rem">System W</th>'
+        +'<th style="text-align:right;padding:.2rem .4rem">Radio eff.</th>'
+        +'<th style="width:2rem"></th>'
+        +'</tr></thead><tbody>';
+      c.tx_levels.forEach(function(tx,ti){
+        var radioDC=tx.dc_in_w-totalIdleOther;
+        var eff=radioDC>0.01?(tx.rf_out_w/radioDC*100):0;
+        tbl+='<tr style="border-top:1px solid var(--border)">'
+          +'<td style="padding:.2rem .4rem">'+escH(tx.label)+'</td>'
+          +'<td style="text-align:right;padding:.2rem .4rem">'+tx.rf_out_w.toFixed(0)+' W</td>'
+          +'<td style="text-align:right;padding:.2rem .4rem">'+tx.dc_in_a.toFixed(1)+' A</td>'
+          +'<td style="text-align:right;padding:.2rem .4rem">'+tx.dc_in_w.toFixed(1)+' W</td>'
+          +'<td style="text-align:right;padding:.2rem .4rem">'+eff.toFixed(1)+'%</td>'
+          +'<td style="text-align:center;padding:.2rem">'
+          +'<button type="button" class="btn btn-sm" style="padding:.15rem .4rem;font-size:.7rem" onclick="editTxLevel('+ci+','+ti+')">&#x270F;</button>'
+          +'</td></tr>';
+      });
+      tbl+='<tr><td colspan="6" style="padding:.3rem .4rem">'
+        +'<button type="button" class="btn btn-sm" onclick="addTxLevel('+ci+')">+ TX level</button></td></tr>'
+        +'</tbody></table>';
+      card.innerHTML+=tbl;
+    } else {
+      card.innerHTML+='<div style="margin-top:.4rem"><button type="button" class="btn btn-sm" onclick="addTxLevel('+ci+')">+ Add TX levels</button></div>';
+    }
+    list.appendChild(card);
+  });
+  updateSummary();
+  updateRtEstimates();
+}
+
+function totalIdleW(){
+  return (sysLoad.components||[]).reduce(function(s,c){return s+(+c.idle_w||0);},0);
+}
+function totalIdleA(){
+  return (sysLoad.components||[]).reduce(function(s,c){return s+(+c.idle_a||0);},0);
+}
+
+function updateSummary(){
+  var aw=document.getElementById('sum-w');
+  var aa=document.getElementById('sum-a');
+  if(aw)aw.textContent=totalIdleW().toFixed(2);
+  if(aa)aa.textContent=totalIdleA().toFixed(3);
+}
+
+function buildTxLevelSel(){
+  var sel=document.getElementById('tx-level-sel');
+  sel.innerHTML='';
+  var found=false;
+  (sysLoad.components||[]).forEach(function(c,ci){
+    (c.tx_levels||[]).forEach(function(tx,ti){
+      var o=document.createElement('option');
+      o.value=ci+':'+ti;
+      o.textContent=c.name+' — '+tx.label+' ('+tx.dc_in_w.toFixed(1)+'W total)';
+      sel.appendChild(o);
+      found=true;
+    });
+  });
+  if(!found){var o=document.createElement('option');o.value='';o.textContent='No TX levels defined';sel.appendChild(o);}
+}
+
+function updateRtEstimates(){
+  buildTxLevelSel();
+  computeRt();
+}
+
+function computeRt(){
+  var div=document.getElementById('rt-estimates');
+  if(!div)return;
+  var idleW=totalIdleW();
+  if(idleW<0.01){div.innerHTML='<span class="hint">Add components to see estimates.</span>';return;}
+  // Use runtime from current SoC via /api/analytics system_load data
+  fetch('/api/analytics').then(function(r){return r.json()}).then(function(d){
+    var sl=d.system_load;
+    var rxH=sl?sl.runtime_receive_h:0;
+    var txH=sl?sl.runtime_tx10_h:0;
+    var txLbl=sl?sl.tx_label:'';
+    var html='<div><span class="hint">Receive only</span><br><strong>'+
+      (rxH>0?rxH.toFixed(1)+'h':'—')+'</strong>'+(rxH>0?' / '+(rxH/24).toFixed(1)+'d':'')+'</div>';
+    if(txH>0)html+='<div><span class="hint">10% TX @ '+escH(txLbl)+'</span><br><strong>'+
+      txH.toFixed(1)+'h</strong> / '+(txH/24).toFixed(1)+'d</div>';
+    html+='<div><span class="hint" style="display:block">Idle: '+idleW.toFixed(2)+'W</span>'
+      +'<span class="hint">'+totalIdleA().toFixed(3)+'A</span></div>';
+    div.innerHTML=html;
+  }).catch(function(){
+    // Offline calc without real SoC
+    var idleW=totalIdleW();
+    div.innerHTML='<div><span class="hint">Idle load</span><br><strong>'+idleW.toFixed(2)+' W</strong></div>';
+  });
+}
+
+document.getElementById('tx-duty').addEventListener('input',computeRt);
+document.getElementById('tx-level-sel').addEventListener('change',computeRt);
+
+function escH(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+
+function addComponent(){
+  var name=prompt('Component name (e.g. "PwrGate EPG2"):');
+  if(!name)return;
+  var purpose=prompt('Purpose (e.g. "AC-to-DC PSU"):','');
+  var idleA=parseFloat(prompt('Idle current (A):','0')||'0');
+  var idleW=parseFloat(prompt('Idle power (W):','0')||'0');
+  sysLoad.components.push({name:name,purpose:purpose||'',idle_a:idleA,idle_w:idleW,tx_levels:[]});
+  renderComponents();
+}
+
+function editComponent(ci){
+  var c=sysLoad.components[ci];
+  var name=prompt('Component name:',c.name)||c.name;
+  var purpose=prompt('Purpose:',c.purpose);
+  var idleA=parseFloat(prompt('Idle current (A):',c.idle_a)||String(c.idle_a));
+  var idleW=parseFloat(prompt('Idle power (W):',c.idle_w)||String(c.idle_w));
+  sysLoad.components[ci]={name:name,purpose:purpose||'',idle_a:idleA,idle_w:idleW,tx_levels:c.tx_levels};
+  renderComponents();
+}
+
+function removeComponent(ci){
+  if(!confirm('Remove "'+sysLoad.components[ci].name+'"?'))return;
+  sysLoad.components.splice(ci,1);
+  renderComponents();
+}
+
+function addTxLevel(ci){
+  var label=prompt('TX level label (e.g. "10W RF"):','');
+  if(!label)return;
+  var rfOut=parseFloat(prompt('RF output (W):','10')||'10');
+  var dcA=parseFloat(prompt('Total system current during TX (A):','5')||'5');
+  var dcW=parseFloat(prompt('Total system power during TX (W):','68.6')||'68.6');
+  sysLoad.components[ci].tx_levels.push({label:label,rf_out_w:rfOut,dc_in_a:dcA,dc_in_w:dcW});
+  renderComponents();
+}
+
+function editTxLevel(ci,ti){
+  var tx=sysLoad.components[ci].tx_levels[ti];
+  var label=prompt('Label:',tx.label)||tx.label;
+  var rfOut=parseFloat(prompt('RF output (W):',tx.rf_out_w)||String(tx.rf_out_w));
+  var dcA=parseFloat(prompt('Total system amps during TX:',tx.dc_in_a)||String(tx.dc_in_a));
+  var dcW=parseFloat(prompt('Total system watts during TX:',tx.dc_in_w)||String(tx.dc_in_w));
+  sysLoad.components[ci].tx_levels[ti]={label:label,rf_out_w:rfOut,dc_in_a:dcA,dc_in_w:dcW};
+  renderComponents();
+}
+
+function saveComponents(){
+  fetch('/api/system_load',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(sysLoad)})
+  .then(function(r){if(r.ok){var m=document.getElementById('comp-msg');if(m){m.textContent='Saved.';m.className='msg'}}else{throw new Error()}})
+  .catch(function(){var m=document.getElementById('comp-msg');if(m){m.textContent='Save failed.';m.className='msg err'}});
+}
+
+// Init
+renderComponents();
+</script>
 <script>
 (function(){var n=document.querySelectorAll('nav a[href^="/"]');for(var i=0;i<n.length;i++){n[i].addEventListener('click',function(e){if(e.ctrlKey||e.metaKey||e.shiftKey)return;var h=this.getAttribute('href');if(!h)return;e.preventDefault();location.href=h})}})();
 document.getElementById('cfg-form').onsubmit=function(e){e.preventDefault();var f=e.target;var o={settings_initialized:'1'};

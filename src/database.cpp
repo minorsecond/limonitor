@@ -424,6 +424,19 @@ void Database::set_setting(const std::string& key, const std::string& value) {
     write_setting_to_file(settings_file_path(path_), key, value);
 }
 
+SystemLoadConfig Database::get_system_load_config() const {
+    std::string json = get_setting("system_components_json");
+    if (!json.empty()) {
+        auto cfg = SystemLoadConfig::from_json(json);
+        if (!cfg.empty()) return cfg;
+    }
+    return SystemLoadConfig::default_config();
+}
+
+void Database::set_system_load_config(const SystemLoadConfig& cfg) {
+    set_setting("system_components_json", cfg.to_json());
+}
+
 bool Database::begin_transaction() {
     return exec("BEGIN IMMEDIATE;");
 }

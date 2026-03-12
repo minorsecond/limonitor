@@ -233,6 +233,10 @@ void AnalyticsEngine::set_purchase_date(const std::string& d) {
     update_health_and_age();
 }
 
+void AnalyticsEngine::set_calibrated_idle_w(double w) {
+    calibrated_idle_w_ = w;
+}
+
 void AnalyticsEngine::push_voltage_soc_sample(double ts, double v, double soc) {
     if (voltage_ring_count_ == VOLTAGE_N) {
         // Remove oldest sample from sums
@@ -518,6 +522,7 @@ void AnalyticsEngine::compute_extended_analytics(const BatterySnapshot& bat,
     snap_.runtime_from_full_h = 0;
     snap_.runtime_from_current_h = 0;
     snap_.runtime_from_charger = false;
+    snap_.runtime_from_calibrated = false;
     snap_.avg_discharge_24h_w = 0;
     double load_w = 0;
     if (discharge_hour_count_ >= 6) {
@@ -541,6 +546,12 @@ void AnalyticsEngine::compute_extended_analytics(const BatterySnapshot& bat,
     }
     // Require load high enough for plausible runtime (avoid >1000 h on typical 100Ah pack)
     constexpr double MIN_LOAD_FOR_PLAUSIBLE_H = 1.2;  // 1200 Wh / 1.2 W = 1000 h
+    // Final fallback: user's calibrated idle load (from system_load config)
+    if (load_w < MIN_LOAD_W && calibrated_idle_w_ >= MIN_LOAD_FOR_PLAUSIBLE_H) {
+        load_w = calibrated_idle_w_;
+        snap_.avg_discharge_24h_w = load_w;
+        snap_.runtime_from_calibrated = true;
+    }
     if (load_w >= MIN_LOAD_FOR_PLAUSIBLE_H && bat.nominal_ah > 1.0) {
         // Use nominal voltage (3.2V/cell for LiFePO4) for stable runtime estimates.
         // Derive cell count from instantaneous voltage, then use 3.2V * cells.

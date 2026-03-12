@@ -1,5 +1,6 @@
 #pragma once
 #include "analytics.hpp"
+#include "system_load.hpp"
 #include "battery_data.hpp"
 #include "ble_types.hpp"
 #include "config.hpp"
@@ -73,6 +74,10 @@ public:
     void init_extensions(const Config& cfg, Database* db = nullptr);
     const AnalyticsExtensions* extensions() const { return extensions_.get(); }
 
+    // System load calibration config (for runtime estimates and analytics)
+    void set_system_load_config(const SystemLoadConfig& cfg);
+    const SystemLoadConfig& system_load_config() const { return system_load_config_; }
+
 private:
     void process_tx_detection(const BatterySnapshot& snap);
     void process_tx_detection(const PwrGateSnapshot& snap);
@@ -132,6 +137,7 @@ private:
     // Analytics engine
     AnalyticsEngine analytics_;
     Config cfg_;
+    SystemLoadConfig system_load_config_;
 
     // Analytics extensions (optional)
     std::unique_ptr<AnalyticsExtensions> extensions_;
