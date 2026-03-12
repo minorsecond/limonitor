@@ -65,9 +65,7 @@ int64_t TestRunner::start_test(TestType type) {
 
     Database::TestRunRow row;
     row.test_type = test_type_str(type);
-    row.start_time = (bat->timestamp.time_since_epoch().count() > 0)
-        ? std::chrono::system_clock::to_time_t(bat->timestamp)
-        : std::time(nullptr);
+    row.start_time = std::chrono::system_clock::to_time_t(bat->timestamp);
     row.end_time = 0;
     row.duration_seconds = 0;
     row.result = "running";
@@ -75,7 +73,7 @@ int64_t TestRunner::start_test(TestType type) {
     row.initial_voltage = bat->total_voltage_v;
     row.average_load = 0;
 
-    int64_t id = db_ ? db_->insert_test_run(row) : 1;
+    int64_t id = db_->insert_test_run(row);
     if (id <= 0) return 0;
 
     current_test_id_ = id;
@@ -83,19 +81,6 @@ int64_t TestRunner::start_test(TestType type) {
     running_ = true;
     stop_requested_ = false;
     test_start_ts_ = row.start_time;
-
-    // Record OpsEvent
-    if (db_) {
-        OpsEvent ev;
-        ev.timestamp = std::chrono::system_clock::now();
-        ev.type = "grid_test_start";
-        ev.subtype = test_type_str(type);
-        ev.message = "Test started: " + std::string(test_type_str(type));
-        char buf[128];
-        std::snprintf(buf, sizeof(buf), "{\"soc\":%.1f,\"voltage\":%.2f}", bat->soc_pct, bat->total_voltage_v);
-        ev.metadata_json = buf;
-        db_->insert_ops_event(ev);
-    }
     energy_delivered_wh_ = 0;
     soc_at_start_ = bat->soc_pct;
     voltage_at_start_ = bat->total_voltage_v;
@@ -116,11 +101,7 @@ int64_t TestRunner::start_test(TestType type) {
 
 void TestRunner::stop_test() {
     std::lock_guard<std::mutex> lk(mu_);
-    if (!running_) {
-        LOG_DEBUG("TestRunner::stop_test: not running");
-        return;
-    }
-    LOG_DEBUG("TestRunner::stop_test: stopping test id=%lld", (long long)current_test_id_);
+    if (!running_) return;
     stop_requested_ = true;
     
     // Process one more tick to trigger finish_test (which is now done on the same thread as stop_requested_)
@@ -243,16 +224,11 @@ bool TestRunner::check_safety_limits(const BatterySnapshot& bat) const {
 }
 
 void TestRunner::finish_test(const std::string& result, const std::string& metadata_json) {
-    if (!running_) {
-        LOG_DEBUG("TestRunner::finish_test: already not running");
-        return;
-    }
+    if (!running_) return;
 
     int64_t id_for_log = current_test_id_;
-    TestType type_for_log = current_test_type_;
     running_ = false;
     current_test_id_ = 0;
-    LOG_DEBUG("TestRunner::finish_test: id=%lld result=%s", (long long)id_for_log, result.c_str());
 
     flush_telemetry();
 
@@ -290,18 +266,6 @@ void TestRunner::finish_test(const std::string& result, const std::string& metad
 
     if (db_) {
         db_->update_test_run(id_for_log, end_ts, duration, result, meta);
-        
-        // Record OpsEvent
-        OpsEvent ev;
-        ev.timestamp = std::chrono::system_clock::now();
-        ev.type = "grid_test_end";
-        ev.subtype = test_type_str(type_for_log);
-        ev.message = "Test " + result + ": " + std::string(test_type_str(type_for_log));
-        char buf[256];
-        std::snprintf(buf, sizeof(buf), "{\"duration\":%d,\"soc\":%.1f,\"voltage\":%.2f,\"result\":\"%s\"}",
-                      duration, soc_end, bat && bat->valid ? bat->total_voltage_v : 0, result.c_str());
-        ev.metadata_json = buf;
-        db_->insert_ops_event(ev);
     }
 
     LOG_INFO("Test finished: id=%lld result=%s duration=%ds",
