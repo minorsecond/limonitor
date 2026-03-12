@@ -209,6 +209,7 @@ if(BUILD_TESTING)
         tests/unit/database_test.cpp
         tests/unit/http_test.cpp
         tests/unit/analytics_test.cpp
+        tests/unit/pwrgate_test.cpp
         tests/unit/test_runner_test.cpp
         src/logger.cpp
         src/analytics.cpp

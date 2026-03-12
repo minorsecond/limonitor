@@ -2249,11 +2249,14 @@ std::string HttpServer::html_dashboard(const BatterySnapshot& s, const std::stri
                                        const std::string& theme) {
     char buf[512];
 
+    // When the BMS reports ~0 A but the charger is actively pushing current,
+    // treat the system as charging for display purposes.
+    bool chg_active = pg.valid && pg.bat_a > 0.05;
     const char* cur_cls = s.current_a >  0.01 ? "sv warn" :
-                          s.current_a < -0.01 ? "sv ok"   : "sv dim";
+                          (s.current_a < -0.01 || chg_active) ? "sv ok" : "sv dim";
     const char* cur_dir = s.current_a >  0.01 ? "discharging" :
-                          s.current_a < -0.01 ? "charging"    : "idle";
-    const char* rem_dir = s.current_a < -0.01 ? "to full" : "to empty";
+                          (s.current_a < -0.01 || chg_active) ? "charging" : "idle";
+    const char* rem_dir = (s.current_a < -0.01 || chg_active) ? "to full" : "to empty";
 
     std::string dot_cls = "dot-off";
     if      (ble_st.find("ready")   != std::string::npos) dot_cls = "dot-ok";
@@ -2633,7 +2636,11 @@ html.light .pwr-modal-submit{background:#16a34a}
     double nom_wh = s.nominal_ah * (s.total_voltage_v > 1 ? s.total_voltage_v : 51.2);
     snprintf(buf, sizeof(buf), "%.2f / %.2f Ah (%.0f / %.0f Wh)", s.remaining_ah, s.nominal_ah, rem_wh, nom_wh);
     o += "<tr><td>Capacity</td><td id=\"bat-cap\">" + std::string(buf) + "</td></tr>\n";
-    snprintf(buf, sizeof(buf), "%.1f h %s", s.time_remaining_h, rem_dir);
+    // If BMS shows 0h but charger is active, compute time-to-full from charger current.
+    double rem_h = s.time_remaining_h;
+    if (chg_active && rem_h < 0.01 && s.nominal_ah > 0.1 && pg.bat_a > 0.05)
+        rem_h = (s.nominal_ah - s.remaining_ah) / pg.bat_a;
+    snprintf(buf, sizeof(buf), "%.1f h %s", rem_h, rem_dir);
     o += "<tr><td>Est. remaining</td><td id=\"bat-rem\">" + std::string(buf) + "</td></tr>\n";
     {
         const char* dc = s.cell_delta_v > 0.05 ? "warn" : s.cell_delta_v > 0.02 ? "" : "ok";
@@ -3077,9 +3084,10 @@ function upBat(){fetch('/api/status').then(function(r){return r.json()}).then(fu
   $('sv').textContent=fmt(d.voltage_v,2)
   $('sv-sub').textContent=fmt(d.cell_min_v,3)+' min \xb7 '+fmt(d.cell_max_v,3)+' max'
   var a=d.current_a,aa=Math.abs(a)
-  var adir=a>0.01?'discharging':a<-0.01?'charging':'idle'
+  var chgActive=(window.lastChgBatA||0)>0.05
+  var adir=a>0.01?'discharging':(a<-0.01||chgActive)?'charging':'idle'
   $('sa').textContent=fmt(aa,2)
-  $('sa-wrap').className='sv '+(a>0.01?'warn':a<-0.01?'ok':'dim')
+  $('sa-wrap').className='sv '+(a>0.01?'warn':(a<-0.01||chgActive)?'ok':'dim')
   if(a>0.01 && window.lastSocRate < 0) {
     $('sa-sub').textContent=adir+' \xb7 '+Math.abs(window.lastSocRate).toFixed(2)+'%/h'
   } else {
@@ -3095,11 +3103,14 @@ function upBat(){fetch('/api/status').then(function(r){return r.json()}).then(fu
   window.lastBatV = d.voltage_v;
   window.lastBatPwr = d.power_w;
   window.lastBatPwrIn = (d.power_w < -0.1);
-  var rd=a<-0.01?'to full':'to empty'
+  var rd=(a<-0.01||chgActive)?'to full':'to empty'
   updatePowerStat();
 
   $('bat-cap').textContent=fmt(d.remaining_ah,2)+' / '+fmt(d.nominal_ah,2)+' Ah ('+fmt(remWh,0)+' / '+fmt(nomWh,0)+' Wh)'
-  $('bat-rem').textContent=fmt(d.time_remaining_h,1)+' h '+rd
+  var remH=d.time_remaining_h
+  if(chgActive&&remH<0.01&&d.nominal_ah>0.1&&(window.lastChgBatA||0)>0.05)
+    remH=(d.nominal_ah-d.remaining_ah)/(window.lastChgBatA)
+  $('bat-rem').textContent=fmt(remH,1)+' h '+rd
   if(d.cells&&d.cells.length){
     var vs=d.cells.map(function(c){return c.voltage_v})
     var mn=Math.min.apply(null,vs),mx=Math.max.apply(null,vs)
@@ -3120,6 +3131,7 @@ function upBat(){fetch('/api/status').then(function(r){return r.json()}).then(fu
 function upChg(){fetch('/api/charger').then(function(r){return r.json()}).then(function(d){
   if(!d.valid)return
   window.lastChgPwr = (d.bat_v * d.bat_a);
+  window.lastChgBatA = d.bat_a;
   updatePowerStat();
   var sc=d.state==='Charging'||d.state==='Float'?'ok':'warn'
   if($('chg-state'))$('chg-state').innerHTML='<span class="'+sc+'">'+d.state+'</span>'

@@ -30,7 +30,7 @@ bool parse(const std::string& s1, const std::string& s2, PwrGateSnapshot& snap) 
     if (s1.find("PS=")      == std::string::npos) return false;
     if (s2.find("TargetV=") == std::string::npos) return false;
 
-    snap.state   = first_word(s1);
+    // Parse all numeric fields before inferring state
     snap.ps_v    = extract_d(s1, "PS");
     snap.sol_v   = extract_d(s1, "Sol");
     snap.minutes = extract_i(s1, "Min");
@@ -51,6 +51,22 @@ bool parse(const std::string& s1, const std::string& s2, PwrGateSnapshot& snap) 
     snap.stop_a   = extract_d(s2, "Stop");
     snap.temp     = extract_i(s2, "Temp");
     snap.pss      = extract_i(s2, "PSS");
+
+    // State: use first word if it looks like a known keyword (no '='), otherwise
+    // infer from measurements. Older firmware prefixed lines with "Charging"/"Float"/
+    // "Idle"; newer firmware omits the keyword and starts with a field like "TargetV=".
+    std::string fw = first_word(s1);
+    if (fw.find('=') == std::string::npos && !fw.empty()) {
+        snap.state = fw;
+    } else {
+        // Infer: Float when bat_v is within 0.10 V of target; Charging when current
+        // is flowing; Idle otherwise.
+        if (snap.bat_a > 0.05) {
+            snap.state = (snap.bat_v >= snap.target_v - 0.10) ? "Float" : "Charging";
+        } else {
+            snap.state = "Idle";
+        }
+    }
 
     snap.timestamp = std::chrono::system_clock::now();
     snap.valid = true;

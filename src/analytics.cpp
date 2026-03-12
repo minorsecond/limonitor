@@ -184,19 +184,25 @@ void AnalyticsEngine::update_health_and_age() {
 void AnalyticsEngine::update_charging_stage(double bat_v, double target_v,
                                             double bat_a,
                                             const std::string& state) {
-    if (state != "Charging" && state != "Float") {
+    // Treat the charger as idle only when the state is explicitly Idle/unknown
+    // AND no current is flowing. This handles firmware variants that omit the
+    // state keyword (state inferred in pwrgate::parse) as well as future formats.
+    bool current_flowing = bat_a > 0.05;
+    bool explicitly_idle = (state != "Charging" && state != "Float");
+    if (explicitly_idle && !current_flowing) {
         snap_.charging_stage = "Idle";
         return;
     }
+
     // Float: explicit state or very low current near target voltage
     if (state == "Float" ||
         (target_v > 0 && bat_v >= target_v - 0.05 && bat_a < 0.5)) {
         snap_.charging_stage = "Float";
         return;
     }
-    // Absorption: near target AND current is decreasing
+    // Absorption: near target voltage (within 0.15 V)
     bool near_target = (target_v > 0) && (bat_v >= target_v - 0.15);
-    bool cur_falling = (prev_chg_a_ >= 0) && (bat_a < prev_chg_a_ - 0.05);
+    bool cur_falling  = (prev_chg_a_ >= 0) && (bat_a < prev_chg_a_ - 0.05);
     if (near_target && cur_falling) {
         snap_.charging_stage = "Absorption";
     } else if (target_v > 0 && bat_v < target_v - 0.15) {
@@ -942,8 +948,7 @@ void AnalyticsEngine::on_charger(const PwrGateSnapshot& snap, const BatterySnaps
     // Efficiency approximation: bat_v / ps_v. Valid for linear/series-pass chargers
     // where I_in ≈ I_out. For switching converters this is a voltage ratio, not
     // true efficiency (would need input current measurement).
-    if ((snap.state == "Charging" || snap.state == "Float") &&
-        snap.bat_a > 0.5 && snap.bat_v > 1.0) {
+    if (snap.bat_a > 0.5 && snap.bat_v > 1.0) {
         double input_v = snap.ps_v > 0.5 ? snap.ps_v
                        : snap.sol_v > 0.5 ? snap.sol_v : 0;
         if (input_v > snap.bat_v) {
@@ -975,7 +980,7 @@ void AnalyticsEngine::on_charger(const PwrGateSnapshot& snap, const BatterySnaps
         charger_runtime_day_ = chg_day;
         prev_chg_minutes_ = -1;
     }
-    if (snap.state == "Charging" || snap.state == "Float") {
+    if (snap.bat_a > 0.05 || snap.state == "Charging" || snap.state == "Float") {
         int m = snap.minutes;
         if (prev_chg_minutes_ >= 0) {
             int delta = m - prev_chg_minutes_;

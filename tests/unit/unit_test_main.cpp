@@ -76,6 +76,18 @@ void test_analytics_api_self_monitor();
 void test_dashboard_visibility();
 void test_shelly_api_visibility();
 
+void test_pwrgate_parse_known_state_preserved();
+void test_pwrgate_parse_float_state_preserved();
+void test_pwrgate_parse_state_inferred_charging();
+void test_pwrgate_parse_state_inferred_float();
+void test_pwrgate_parse_state_inferred_idle();
+void test_pwrgate_parse_rejects_missing_ps();
+void test_pwrgate_parse_values_correct();
+void test_charging_stage_bulk_from_inferred_state();
+void test_charging_stage_absorption_from_voltage();
+void test_charging_stage_float_from_voltage();
+void test_charging_stage_not_idle_when_current_flows();
+
 void test_parse_test_type();
 void test_test_type_str();
 void test_test_result_str();
@@ -176,6 +188,19 @@ int main() {
     test_self_monitor_rss_nonzero();
     test_self_monitor_db_populated();
     printf("PASS: Misc analytics\n");
+
+    test_pwrgate_parse_known_state_preserved();
+    test_pwrgate_parse_float_state_preserved();
+    test_pwrgate_parse_state_inferred_charging();
+    test_pwrgate_parse_state_inferred_float();
+    test_pwrgate_parse_state_inferred_idle();
+    test_pwrgate_parse_rejects_missing_ps();
+    test_pwrgate_parse_values_correct();
+    test_charging_stage_bulk_from_inferred_state();
+    test_charging_stage_absorption_from_voltage();
+    test_charging_stage_float_from_voltage();
+    test_charging_stage_not_idle_when_current_flows();
+    printf("PASS: PwrGate parser\n");
 
     test_parse_test_type();
     test_test_type_str();
