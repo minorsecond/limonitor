@@ -24,44 +24,17 @@ static std::string first_word(const std::string& s) {
     size_t e = p;
     while (e < s.size() && s[e] != ' ' && s[e] != '\t') ++e;
     std::string word = s.substr(p, e - p);
-    
-    // Valid states for EpicPowerGate 2
-    static const char* VALID_STATES[] = {
-        "Charging", "Float", "Bulk", "Absorption", "Idle", "Off"
-    };
-    for (const char* valid : VALID_STATES) {
-        if (word == valid) return word;
-    }
-
     // If the "first word" contains '=', it's likely a key-value pair, not the state.
+    // In that case, the state might be missing or the format changed.
     if (word.find('=') != std::string::npos) return "Idle";
-
-    // If it's not a known state and doesn't look like a KV pair, maybe it is a state we don't know?
-    // But if we saw "TargetV=..." it would have matched the find('=') above.
     return word;
-}
-
-static std::string extract_state(const std::string& line) {
-    // Try to find one of the known states anywhere in the line.
-    // They are unique enough words and usually appear at the start of the line or
-    // before the first key-value pair.
-    static const char* VALID_STATES[] = {
-        "Charging", "Float", "Bulk", "Absorption", "Idle", "Off"
-    };
-
-    for (const char* valid : VALID_STATES) {
-        if (line.find(valid) != std::string::npos) return valid;
-    }
-
-    // Fallback to first_word logic if no known state found
-    return first_word(line);
 }
 
 bool parse(const std::string& s1, const std::string& s2, PwrGateSnapshot& snap) {
     if (s1.find("PS=")      == std::string::npos) return false;
     if (s2.find("TargetV=") == std::string::npos) return false;
 
-    snap.state   = extract_state(s1);
+    snap.state   = first_word(s1);
     snap.ps_v    = extract_d(s1, "PS");
     snap.sol_v   = extract_d(s1, "Sol");
     snap.minutes = extract_i(s1, "Min");
