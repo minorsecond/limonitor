@@ -112,8 +112,8 @@ struct BleManager::Impl {
                 G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, nullptr, "org.bluez",
                 adapter_path.c_str(), "org.bluez.Adapter1", nullptr, nullptr);
             if (adapter)
-                g_dbus_proxy_call_sync(adapter, "StopDiscovery",
-                    nullptr, G_DBUS_CALL_FLAGS_NONE, 5000, nullptr, nullptr);
+                g_dbus_proxy_call(adapter, "StopDiscovery",
+                    nullptr, G_DBUS_CALL_FLAGS_NONE, 5000, nullptr, nullptr, nullptr);
             connect_device(path);
         }
     }
@@ -212,12 +212,21 @@ struct BleManager::Impl {
             schedule_reconnect(10);
             return;
         }
+
+        // Check if already discovering
+        g_autoptr(GVariant) d = g_dbus_proxy_get_cached_property(adapter, "Discovering");
+        if (d && g_variant_get_boolean(d)) {
+            LOG_INFO("BLE: discovery already active");
+            return;
+        }
+
         g_autoptr(GVariant) r = g_dbus_proxy_call_sync(adapter, "StartDiscovery",
             nullptr, G_DBUS_CALL_FLAGS_NONE, 15000, cancel, &err);
         if (err) {
             bool in_progress = strstr(err->message, "InProgress") != nullptr;
             if (!in_progress) {
-                LOG_WARN("BLE: StartDiscovery: %s", err->message);
+                LOG_WARN("BLE: StartDiscovery: %s — trying StopDiscovery", err->message);
+                g_dbus_proxy_call_sync(adapter, "StopDiscovery", nullptr, G_DBUS_CALL_FLAGS_NONE, 5000, nullptr, nullptr);
                 set_state(BleState::DISCONNECTED);
                 schedule_reconnect(10);
             }
@@ -390,12 +399,21 @@ struct BleManager::Impl {
         g_source_unref(src);
     }
     void do_poll() {
-        if (state.load() != BleState::READY || !write_char || poll_command.empty()) return;
+        BleState s = state.load();
+        if (s != BleState::READY && s != BleState::CONNECTING && s != BleState::DISCOVERING) {
+            schedule_poll(g_poll_interval_s);
+            return;
+        }
 
         auto now = std::chrono::steady_clock::now();
         if (std::chrono::duration_cast<std::chrono::seconds>(now - last_data_time).count() > 30) {
-            LOG_WARN("BLE: data timeout (30s) — reconnecting");
+            LOG_WARN("BLE: data timeout (30s, state %s) — reconnecting", ble_state_str(s));
             schedule_reconnect();
+            return;
+        }
+
+        if (s != BleState::READY || !write_char || poll_command.empty()) {
+            schedule_poll(g_poll_interval_s);
             return;
         }
 

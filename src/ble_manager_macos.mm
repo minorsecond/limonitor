@@ -76,10 +76,20 @@ struct BleManager::Impl {
     bool matches_target(CBPeripheral* p, NSDictionary* adv) const {
         if (target.empty()) return adv_has_service(adv);
         NSString* t = [NSString stringWithUTF8String:target.c_str()];
+        
+        // Check peripheral name
         if (p.name) {
             NSRange r = [p.name rangeOfString:t options:NSCaseInsensitiveSearch];
             if (r.location != NSNotFound) return true;
         }
+
+        // Check advertisement local name
+        NSString* localName = adv[CBAdvertisementDataLocalNameKey];
+        if (localName) {
+            NSRange r = [localName rangeOfString:t options:NSCaseInsensitiveSearch];
+            if (r.location != NSNotFound) return true;
+        }
+
         return [p.identifier.UUIDString caseInsensitiveCompare:t] == NSOrderedSame;
     }
 
@@ -105,25 +115,32 @@ struct BleManager::Impl {
 
         // Fire discovery callback (visible to TUI device picker)
         bool is_target = matches_target(p, adv);
+        const char* name_cstr = p.name ? [p.name UTF8String] : "";
+        if (!name_cstr || strlen(name_cstr) == 0) {
+            NSString* localName = adv[CBAdvertisementDataLocalNameKey];
+            if (localName) name_cstr = [localName UTF8String];
+        }
+
         if (discovery_cb) {
             DiscoveredDevice dev;
             dev.id   = pid;
-            dev.name = p.name ? [p.name UTF8String] : "";
+            dev.name = name_cstr ? name_cstr : "";
             dev.rssi = rssi;
             dev.has_target_service = adv_has_service(adv);
             discovery_cb(dev);
         }
 
-        if (state.load() == BleState::SCANNING && is_target) {
-            LOG_INFO("BLE: target found — connecting");
-            do_connect(p);
+        BleState current_state = state.load();
+        if (current_state == BleState::SCANNING && is_target) {
+            if (state.compare_exchange_strong(current_state, BleState::CONNECTING)) {
+                LOG_INFO("BLE: target found — connecting to %s (%s)", pid.c_str(), name_cstr);
+                do_connect(p);
+            }
         }
     }
 
     void do_connect(CBPeripheral* p) {
         // Cancel and release any DIFFERENT previous peripheral.
-        // Do not cancel if it's the same object to avoid a spurious
-        // didDisconnectPeripheral callback arriving for our new connection.
         if (peripheral && peripheral != p) {
             [central cancelPeripheralConnection:peripheral];
             [peripheral release];
@@ -135,12 +152,14 @@ struct BleManager::Impl {
         {
             std::lock_guard<std::mutex> lk(mu);
             device_address = peripheral_id(peripheral);
-            device_name    = peripheral.name ? [peripheral.name UTF8String] : "";
+            const char* n = peripheral.name ? [peripheral.name UTF8String] : "";
+            if (n && strlen(n) > 0) device_name = n;
         }
         peripheral.delegate = (id<CBPeripheralDelegate>)delegate;
         [central stopScan];
-        LOG_INFO("BLE: connecting to %s (%s)", device_address.c_str(), device_name.c_str());
-        set_state(BleState::CONNECTING);
+        LOG_INFO("BLE: connecting to %s", device_address.c_str());
+        // set_state(BleState::CONNECTING); // state set in on_discovered via CAS or here
+        if (state.load() != BleState::CONNECTING) set_state(BleState::CONNECTING);
         [central connectPeripheral:peripheral options:nil];
     }
 
@@ -212,6 +231,7 @@ struct BleManager::Impl {
         last_data_time = std::chrono::steady_clock::now();
         if (!d || d.length == 0 || !data_cb) return;
         const uint8_t* p = static_cast<const uint8_t*>(d.bytes);
+        LOG_DEBUG("BLE: notification received, %zu bytes", (size_t)d.length);
         data_cb(std::vector<uint8_t>(p, p + d.length));
     }
 
@@ -249,14 +269,17 @@ struct BleManager::Impl {
     }
 
     void do_poll() {
-        if (state.load() != BleState::READY || !write_char) return;
+        BleState s = state.load();
+        if (s != BleState::READY && s != BleState::CONNECTING && s != BleState::DISCOVERING) return;
 
         auto now = std::chrono::steady_clock::now();
         if (std::chrono::duration_cast<std::chrono::seconds>(now - last_data_time).count() > 30) {
-            LOG_WARN("BLE: data timeout (30s) — reconnecting");
+            LOG_WARN("BLE: data timeout (30s, state %s) — reconnecting", ble_state_str(s));
             on_disconnected(nil);
             return;
         }
+
+        if (s != BleState::READY || !write_char) return;
 
         if (!poll_command.empty()) {
             NSData* d = [NSData dataWithBytes:poll_command.data() length:poll_command.size()];

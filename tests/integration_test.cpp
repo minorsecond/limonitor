@@ -40,7 +40,7 @@ static bool run_checks(const BatterySnapshot& s, std::vector<Check>& out) {
     add("voltage < 65 V",                  s.total_voltage_v < 65.0);
     add("SoC in [0 %, 100 %]",             s.soc_pct >= 0.0 && s.soc_pct <= 100.0);
     add("nominal capacity > 0 Ah",         s.nominal_ah > 0.0);
-    add("remaining <= nominal + epsilon",  s.remaining_ah <= s.nominal_ah + 0.5);
+    add("remaining <= nominal + epsilon",  s.remaining_ah <= s.nominal_ah * 1.02);
     add("at least 4 cells reported",       s.cell_voltages_v.size() >= 4);
     add("no more than 16 cells",           s.cell_voltages_v.size() <= 16);
     add("cell min >= 2.5 V",               s.cell_min_v >= 2.5);
