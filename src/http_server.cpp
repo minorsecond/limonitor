@@ -1879,7 +1879,7 @@ std::string HttpServer::svg_history_chart(const std::vector<BatterySnapshot>& hi
     if (hist.size() < 2)
         return "<p style='color:#555;font-family:monospace'>Collecting history...</p>";
 
-    const int W = 800, H = 320;
+    const int W = 800, H = 480;
     const int PL = 52, PR = 48, PT = 14, PB = 28;
     const int CW = W - PL - PR, CH = H - PT - PB;
 
@@ -1898,7 +1898,7 @@ std::string HttpServer::svg_history_chart(const std::vector<BatterySnapshot>& hi
     std::string o;
     char buf[256];
 
-    o += "<svg viewBox='0 0 800 320' style='width:100%;height:320px;display:block;background:#111;border-radius:4px'>\n";
+    o += "<svg viewBox='0 0 800 480' style='width:100%;height:480px;display:block;background:#111;border-radius:4px'>\n";
 
     // Horizontal grid + voltage labels
     o += "<g stroke='#2a2a2a' stroke-width='1'>\n";
@@ -1998,7 +1998,7 @@ std::string HttpServer::svg_charger_chart(const std::vector<PwrGateSnapshot>& hi
     }
     const auto& display = sampled;
 
-    const int W = 800, H = 300;
+    const int W = 800, H = 450;
     const int PL = 52, PR = 48, PT = 14, PB = 28;
     const int CW = W - PL - PR, CH = H - PT - PB;
 
@@ -2026,7 +2026,7 @@ std::string HttpServer::svg_charger_chart(const std::vector<PwrGateSnapshot>& hi
     std::string o;
     char buf[256];
 
-    o += "<svg viewBox='0 0 800 300' style='width:100%;height:300px;display:block;background:#111;border-radius:4px'>\n";
+    o += "<svg viewBox='0 0 800 450' style='width:100%;height:450px;display:block;background:#111;border-radius:4px'>\n";
 
     o += "<g stroke='#2a2a2a' stroke-width='1'>\n";
     for (int i = 0; i <= 4; ++i) {
@@ -2578,7 +2578,7 @@ html.light .grid-btn-test{background:var(--border);color:var(--text)}
 @media(max-width:640px){.grid-control-btns{flex-direction:column}.grid-btn{min-height:44px;padding:.6rem 1rem;font-size:.9rem}}
 )HTML";
     o += ".main{display:flex;flex-direction:column;gap:.7rem}"
-         "#bat-chart{height:320px}#chg-chart{height:300px}"
+         "#bat-chart{height:480px}#chg-chart{height:450px}"
          "@media(max-width:640px){.main{display:flex;flex-direction:column}"
          ".stats{order:-2;margin-bottom:.5rem}.card-bat{order:-1}.card-chg{order:0}.col2{order:1}"
          "#bat-chart{height:280px}#chg-chart{height:260px}.card.card-bat,.card.card-chg{padding-bottom:1.5rem}"
@@ -2742,7 +2742,7 @@ html.light .pwr-modal-submit{background:#16a34a}
          "</svg></div></div>\n";
 
     o += "<div class=\"card card-bat\"><div class=\"card-title\">Battery History</div>"
-         "<svg id=\"bat-chart\" class=\"chart-svg\" viewBox=\"0 0 800 320\">"
+         "<svg id=\"bat-chart\" class=\"chart-svg\" viewBox=\"0 0 800 480\">"
          "<text x=\"50%\" y=\"50%\" fill=\"#444\" font-size=\"12\" font-family=\"monospace\""
          " text-anchor=\"middle\" dominant-baseline=\"middle\">Loading\xe2\x80\xa6</text>"
          "</svg></div>\n";
@@ -2856,7 +2856,7 @@ html.light .pwr-modal-submit{background:#16a34a}
     o += "</div>\n"; // .col2
 
     o += "<div class=\"card card-chg\"><div class=\"card-title\">Charger History</div>"
-         "<svg id=\"chg-chart\" class=\"chart-svg\" viewBox=\"0 0 800 300\">"
+         "<svg id=\"chg-chart\" class=\"chart-svg\" viewBox=\"0 0 800 450\">"
          "<text x=\"50%\" y=\"50%\" fill=\"#444\" font-size=\"12\" font-family=\"monospace\""
          " text-anchor=\"middle\" dominant-baseline=\"middle\">Loading\xe2\x80\xa6</text>"
          "</svg></div>\n";
@@ -3885,7 +3885,7 @@ function renderBatChart(data,txEvs){
     W=md.w;H=md.hBat;PL=78;PR=72;PT=32;PB=42
     fs=16;fsTick=14;sw=4;sw2=3;legY=22
   }else{
-    W=800;H=320;PL=62;PR=52;PT=16;PB=24
+    W=800;H=480;PL=62;PR=52;PT=16;PB=24
     fs=11;fsTick=10;sw=2;sw2=1.5;legY=13
   }
   var CW=W-PL-PR,CH=H-PT-PB
@@ -3942,7 +3942,7 @@ function renderChgChart(data){
     W=md.w;H=md.hChg;PL=78;PR=72;PT=32;PB=42
     fs=16;fsTick=14;sw=4;sw2=3;legY=22
   }else{
-    W=800;H=300;PL=62;PR=52;PT=16;PB=24
+    W=800;H=450;PL=62;PR=52;PT=16;PB=24
     fs=11;fsTick=10;sw=2;sw2=1.5;legY=13
   }
   var CW=W-PL-PR,CH=H-PT-PB
