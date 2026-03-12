@@ -3682,8 +3682,9 @@ function timeTicks(t0,t1,tspan,pl,cw,chartTop,chartH,labelY,fsTick){
   }
   function fmtStart(t,short){
     var d=new Date(t),h=d.getHours(),m=d.getMinutes(),tm=fmtTime(h,m)
-    if(short) return multi ? (d.getMonth()+1)+'/'+d.getDate() : tm
-    return multi ? (d.getMonth()+1)+'/'+d.getDate()+' '+tm : tm
+    var ds=(d.getMonth()+1)+'/'+d.getDate()
+    if(short) return ds
+    return ds+' '+tm
   }
   var minGap=Math.max(36,fs*2.8)
   var firstTkX=firstTk<t1?pl+(firstTk-t0)/tspan*cw:pl+cw
