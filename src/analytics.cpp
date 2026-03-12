@@ -184,14 +184,13 @@ void AnalyticsEngine::update_health_and_age() {
 void AnalyticsEngine::update_charging_stage(double bat_v, double target_v,
                                             double bat_a,
                                             const std::string& state) {
-    if (state != "Charging" && state != "Float" && state != "Bulk" && state != "Absorption" && state != "Charged") {
+    if (state != "Charging" && state != "Float" && state != "Bulk" && state != "Absorption") {
         snap_.charging_stage = "Idle";
         return;
     }
-    // Specific states from state string
+    // Bulk/Absorption from state string
     if (state == "Bulk") { snap_.charging_stage = "Bulk"; return; }
     if (state == "Absorption") { snap_.charging_stage = "Absorption"; return; }
-    if (state == "Charged") { snap_.charging_stage = "Charged"; return; }
 
     // Float: explicit state or very low current near target voltage
     if (state == "Float" ||
