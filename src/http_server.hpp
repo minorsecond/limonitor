@@ -88,6 +88,10 @@ private:
     std::string solar_forecast_week_json(const SolarForecastWeekResult& r,
                                          const UsageCache* cache = nullptr) const;
     static std::string system_health_json(const HealthScoreResult& r);
+    static std::string html_head(const std::string& title, const std::string& theme, const std::string& extra_style = "");
+    static std::string html_nav(const std::string& active_page, const std::string& theme);
+    static std::string html_footer();
+    static std::string common_scripts(const std::string& init_settings);
     static std::string html_dashboard(const BatterySnapshot& s, const std::string& ble_state,
                                       const PwrGateSnapshot& pg,
                                       const AnalyticsSnapshot& an,

@@ -2353,6 +2353,185 @@ std::string HttpServer::charger_json(const PwrGateSnapshot& pg) {
     return o;
 }
 
+std::string HttpServer::html_head(const std::string& title, const std::string& theme, const std::string& extra_style) {
+    std::string html_class = (theme == "light") ? " class=\"light\"" : "";
+    std::string o = "<!DOCTYPE html><html lang=\"en\"" + html_class + "><head>\n";
+    o += "<meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\">\n";
+    o += "<meta name=\"theme-color\" content=\"#0d0d12\" media=\"(prefers-color-scheme:dark)\">\n";
+    o += "<meta name=\"theme-color\" content=\"#f8fafc\" media=\"(prefers-color-scheme:light)\">\n";
+    o += "<title>" + title + " — limonitor</title>\n";
+    o += R"CSS(<style>
+:root{
+  --bg:#0d0d12;--card:#17171e;--border:#2d2d3d;--text:#e2e8f0;--muted:#94a3b8;
+  --green:#10b981;--orange:#f59e0b;--red:#ef4444;--blue:#3b82f6;--cyan:#06b6d4;
+  --input-bg:#1f1f29;--soc-track:#252535;--cell-bg:#12121a;
+  --font-main:system-ui,-apple-system,sans-serif;
+  --font-mono:'SF Mono',Menlo,monospace;
+}
+html.light{
+  --bg:#f8fafc;--card:#ffffff;--border:#e2e8f0;--text:#0f172a;--muted:#64748b;
+  --green:#059669;--orange:#d97706;--red:#dc2626;--blue:#2563eb;--cyan:#0891b2;
+  --input-bg:#f1f5f9;--soc-track:#e2e8f0;--cell-bg:#f8fafc;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font-main);background:var(--bg);color:var(--text);line-height:1.5;padding:0;margin:0;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1200px;margin:0 auto;padding:1.5rem;padding-top:max(1.5rem,env(safe-area-inset-top));padding-bottom:max(2.5rem,env(safe-area-inset-bottom))}
+a{color:var(--green);text-decoration:none;transition:opacity .2s}a:hover{opacity:.8}
+nav{display:flex;align-items:center;gap:.5rem;padding:1rem 1.5rem;background:var(--card);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:100}
+nav a{color:var(--muted);font-weight:500;font-size:.9rem;padding:.5rem .75rem;border-radius:8px;transition:all .2s}
+nav a:hover{color:var(--text);background:var(--input-bg)}
+nav a.active{color:var(--green);background:rgba(16,185,129,.1)}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;margin-bottom:1.5rem;box-shadow:0 1px 3px rgba(0,0,0,.1)}
+.card-title{font-size:.75rem;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:700;margin-bottom:1rem;display:flex;justify-content:space-between;align-items:center}
+h1{font-size:1.5rem;font-weight:800;letter-spacing:-.02em;margin-bottom:1rem;color:var(--text)}
+.btn{background:var(--input-bg);border:1px solid var(--border);color:var(--text);padding:.5rem 1rem;border-radius:8px;cursor:pointer;font-family:inherit;font-size:.85rem;font-weight:600;transition:all .2s;display:inline-flex;align-items:center;gap:.5rem}
+.btn:hover{background:var(--border)}
+.btn-primary{background:var(--green);color:#fff;border:none}.btn-primary:hover{opacity:.9}
+.dt{width:100%;border-collapse:collapse;font-size:.9rem}
+.dt td{padding:.75rem 0;border-bottom:1px solid var(--border)}.dt tr:last-child td{border-bottom:none}
+.dt td:first-child{color:var(--muted);width:40%}
+@media(max-width:640px){.wrap{padding:1rem}nav{padding:.75rem 1rem;overflow-x:auto;white-space:nowrap}.card{padding:1.25rem}}
+</style>)CSS";
+    o += extra_style;
+    o += "</head><body>\n";
+    return o;
+}
+
+std::string HttpServer::html_nav(const std::string& active_page, const std::string& theme) {
+    std::string o = "<nav>";
+    auto link = [&](const char* href, const char* label) {
+        bool active = (active_page == href);
+        o += "<a href=\"" + std::string(href) + "\"";
+        if (active) o += " class=\"active\"";
+        o += ">" + std::string(label) + "</a>";
+    };
+    link("/", "Dashboard");
+    link("/solar", "Solar");
+    link("/settings", "Settings");
+    link("/ops_log", "Ops Log");
+    link("/testing", "Testing");
+    o += "<div style=\"flex:1\"></div>";
+    o += "<button class=\"btn\" id=\"thm-btn\" onclick=\"toggleTheme()\" title=\"Toggle theme\">";
+    o += (theme == "light") ? "&#9788;" : "&#263d;";
+    o += "</button>";
+    o += "</nav><div class=\"wrap\">\n";
+    return o;
+}
+
+std::string HttpServer::html_footer() {
+    std::string o;
+    o += "</div>"; // close .wrap
+
+    // Settings Modal
+    o += "<div id=\"settings-modal\" class=\"set-modal\" style=\"display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);z-index:2000;align-items:center;justify-content:center\">"
+         "<div class=\"card\" style=\"min-width:300px;margin:0\">"
+         "<div class=\"card-title\"><span>Settings</span></div>"
+         "<div style=\"display:flex;flex-direction:column;gap:1rem\">"
+         "<div><label style=\"display:block;font-size:.75rem;color:var(--muted);margin-bottom:.4rem\">Theme</label>"
+         "<select id=\"set-theme\" onchange=\"applySetting('theme',this.value)\" style=\"width:100%;padding:.5rem;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:8px;font-family:inherit\">"
+         "<option value=\"dark\">Dark</option><option value=\"light\">Light</option></select></div>"
+         "<div><label style=\"display:block;font-size:.75rem;color:var(--muted);margin-bottom:.4rem\">Time format</label>"
+         "<select id=\"set-time\" onchange=\"applySetting('time',this.value)\" style=\"width:100%;padding:.5rem;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:8px;font-family:inherit\">"
+         "<option value=\"24\">24-hour</option><option value=\"12\">12-hour</option></select></div>"
+         "<div><label style=\"display:block;font-size:.75rem;color:var(--muted);margin-bottom:.4rem\">Chart range</label>"
+         "<select id=\"set-range\" onchange=\"applySetting('range',this.value)\" style=\"width:100%;padding:.5rem;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:8px;font-family:inherit\">"
+         "<option value=\"0.5\">30 min</option><option value=\"1\">1 hour</option><option value=\"4\">4 hours</option><option value=\"24\">24 hours</option></select></div>"
+         "<button class=\"btn btn-primary\" onclick=\"toggleSettings()\" style=\"margin-top:.5rem\">Close</button></div></div></div>\n";
+
+    // Test Banner
+    o += "<div id=\"test-banner\" class=\"test-banner\" style=\"display:none;align-items:center;justify-content:space-between;gap:1rem;padding:1rem;background:linear-gradient(135deg,#c2410c 0%,#ea580c 100%);color:#fff;border-radius:12px;margin-bottom:1.5rem;position:sticky;top:4.5rem;z-index:90\">"
+         "<span><strong>Battery test active</strong> &middot; SoC: <span id=\"tb-soc\">—</span>% &middot; Load: <span id=\"tb-load\">—</span> W &middot; Runtime: <span id=\"tb-rt\">—</span> h</span>"
+         "<button class=\"btn\" onclick=\"endTestFromBanner()\" style=\"background:#fff;color:#c2410c;border:none\">End test</button></div>\n";
+
+    // Power Reason Modal
+    o += "<div id=\"pwr-reason-modal\" class=\"pwr-modal\" style=\"display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);z-index:2100;align-items:center;justify-content:center\">"
+         "<div class=\"card\" style=\"min-width:320px;max-width:90vw;margin:0\">"
+         "<div class=\"card-title\" id=\"pwr-modal-title\">Reason required</div>"
+         "<p id=\"pwr-modal-desc\" style=\"font-size:.85rem;color:var(--muted);margin-bottom:1rem\"></p>"
+         "<textarea id=\"pwr-reason-input\" class=\"btn\" style=\"width:100%;background:var(--input-bg);text-align:left;min-height:80px;resize:vertical;padding:.75rem\" placeholder=\"e.g. Starting battery capacity test\"></textarea>"
+         "<div id=\"pwr-modal-err\" style=\"font-size:.8rem;color:var(--red);margin:.5rem 0;display:none\">Please enter a reason.</div>"
+         "<div style=\"display:flex;justify-content:flex-end;gap:.5rem;margin-top:1rem\">"
+         "<button class=\"btn\" id=\"pwr-modal-cancel\">Cancel</button>"
+         "<button class=\"btn btn-primary\" id=\"pwr-modal-submit\" disabled>Submit</button></div></div></div>\n";
+
+    return o;
+}
+
+std::string HttpServer::common_scripts(const std::string& init_settings) {
+    std::string o = "<script>\n";
+    if (!init_settings.empty())
+        o += "var lmSettings=" + init_settings + ";\n";
+    else
+        o += "var lmSettings={theme:\"dark\",time:\"24\",locale:\"auto\"};\n";
+
+    o += R"JS(
+function $(id){return document.getElementById(id)}
+function fmt(v,d){return(v==null||isNaN(+v))?'—':(+v).toFixed(d)}
+function applySetting(k,v){
+  if(!lmSettings)lmSettings={}; lmSettings[k]=v;
+  if(k==='theme'){document.documentElement.classList.toggle('light',v==='light')}
+  fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(lmSettings)})
+}
+function toggleTheme(){
+  var curr=document.documentElement.classList.contains('light')?'light':'dark';
+  var next=curr==='light'?'dark':'light';
+  applySetting('theme',next);
+}
+function toggleSettings(){
+  var m=$('settings-modal'); if(!m)return;
+  var show=m.style.display==='none';
+  m.style.display=show?'flex':'none';
+  if(show){
+    if($('set-theme')) $('set-theme').value=lmSettings.theme||'dark';
+    if($('set-time')) $('set-time').value=lmSettings.time||'24';
+    if($('set-range') && lmSettings.range) $('set-range').value=lmSettings.range;
+  }
+}
+function showPowerReasonModal(opts,onConfirm){
+  var title=opts.title||'Reason required';
+  var desc=opts.desc||'Please provide a reason for this action.';
+  var confirmText=opts.confirmText||'Submit';
+  var modal=$('pwr-reason-modal'),inp=$('pwr-reason-input'),err=$('pwr-modal-err'),sub=$('pwr-modal-submit');
+  if(!modal||!inp)return;
+  $('pwr-modal-title').textContent=title;
+  var dEl=$('pwr-modal-desc'); dEl.textContent=desc; dEl.style.display=desc?'':'none';
+  sub.textContent=confirmText; inp.value=''; err.style.display='none'; sub.disabled=true;
+  modal.style.display='flex'; inp.focus();
+  function close(){modal.style.display='none'}
+  $('pwr-modal-cancel').onclick=close;
+  sub.onclick=function(){var r=inp.value.trim();if(!r){err.style.display='';return}close();onConfirm(r)};
+  inp.oninput=function(){sub.disabled=!inp.value.trim();err.style.display='none'};
+  inp.onkeydown=function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();if(inp.value.trim())sub.click()}};
+  modal.onclick=function(e){if(e.target===modal)close()};
+}
+function endTestFromBanner(){
+  showPowerReasonModal({title:'End battery test',desc:'This will turn grid back on. A reason is required.',confirmText:'End test'},function(r){
+    fetch('/api/shelly/relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({turn:'on',reason:r})}).then(function(x){return x.json()}).then(function(d){
+      if(d.ok){var b=$('test-banner');if(b)b.style.display='none';lmSettings.shelly_test_active='0'}
+    })
+  })
+}
+function upTestBanner(){
+  var b=$('test-banner'); if(!b || b.style.display==='none') return;
+  fetch('/api/shelly/status').then(function(r){return r.json()}).then(function(s){
+    if(!s.test_active){b.style.display='none'; return}
+    Promise.all([fetch('/api/status').then(function(r){return r.json()}),fetch('/api/analytics').then(function(r){return r.json()})]).then(function(arr){
+      var st=arr[0],an=arr[1];
+      var soc=$('tb-soc'),load=$('tb-load'),rt=$('tb-rt');
+      if(soc)soc.textContent=st.valid?fmt(st.soc_pct,1):'—';
+      if(load)load.textContent=an.avg_discharge_24h_w>0?fmt(an.avg_discharge_24h_w,1):'—';
+      if(rt)rt.textContent=an.runtime_from_current_h>0?fmt(an.runtime_from_current_h,1):'—';
+    })
+  })
+}
+fetch('/api/shelly/status').then(function(r){return r.json()}).then(function(s){
+  if(s.test_active){var b=$('test-banner'); if(b){b.style.display='flex'; upTestBanner(); setInterval(upTestBanner,5000)}}
+})
+)JS";
+    o += "</script>\n";
+    return o;
+}
+
 std::string HttpServer::html_dashboard(const BatterySnapshot& s, const std::string& ble_st,
                                        const PwrGateSnapshot& pg,
                                        const AnalyticsSnapshot& a,
@@ -2386,244 +2565,64 @@ std::string HttpServer::html_dashboard(const BatterySnapshot& s, const std::stri
     std::string o;
     o.reserve(65536);
 
-    std::string html_class = (theme == "light") ? " class=\"light\"" : "";
-    o += "<!DOCTYPE html><html lang=\"en\"" + html_class + "><head>\n";
-    o += R"HTML(
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#0d0d11" media="(prefers-color-scheme:dark)">
-<meta name="theme-color" content="#f2f3f7" media="(prefers-color-scheme:light)">
-<link rel="prefetch" href="/solar"><link rel="prefetch" href="/settings">
-<title>limonitor</title>
-<style>
-/* ── Dark theme (default) ── */
-:root{
-  --bg:#0d0d11;--card:#16161c;--border:#2e2e3a;
-  --text:#e0e0ea;--muted:#9090a8;--sub:#686880;
-  --green:#4ade80;--orange:#fb923c;--blue:#60a5fa;--cyan:#22d3ee;--red:#f87171;--violet:#a78bfa;
-  --soc-track:#22222c;--cell-bg:#0f0f16;--alert-bg:#1c0a0a;
-  --chart-bg:#0f0f14;--chart-grid:#252530;--chart-tick:#a0a0b8;
-  --cv:#4caf50;--ca:#ff9800;--csoc:#4080ff;--csol:#00bcd4
-}
-/* ── Light theme ── */
-html.light{
-  --bg:#f2f3f7;--card:#ffffff;--border:#d4d4e0;
-  --text:#1a1a2c;--muted:#5a5a72;
-  --green:#16a34a;--orange:#c2410c;--blue:#1d4ed8;--cyan:#0891b2;--red:#dc2626;--violet:#7c3aed;
-  --soc-track:#dcdce8;--cell-bg:#f8f8fc;--alert-bg:#fff0f0;
-  --chart-bg:#f5f5fa;--chart-grid:#dcdce8;--chart-tick:#4a4a64;
-  --cv:#16a34a;--ca:#c2410c;--csoc:#1d4ed8;--csol:#0891b2
-}
-/* ── Base ── */
-*{box-sizing:border-box;margin:0;padding:0}
-html{transition:background-color .2s;-webkit-tap-highlight-color:transparent}
-body{font-family:'SF Mono',Menlo,Consolas,monospace;background:var(--bg);color:var(--text);font-size:13px;
-  transition:background-color .2s,color .15s}
-a{color:var(--green);text-decoration:none}a:hover{text-decoration:underline}
-.wrap{max-width:1100px;margin:0 auto;padding:1.4rem;
-  padding-top:max(1.4rem,env(safe-area-inset-top));
-  padding-bottom:max(2.5rem,env(safe-area-inset-bottom))}
-/* ── Header ── */
-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:1.2rem;flex-wrap:wrap;gap:.6rem}
-@media(max-width:640px){header{flex-direction:column;align-items:flex-start;gap:.8rem}}
-h1{color:var(--green);font-size:1.7rem;letter-spacing:.2em;font-weight:700}
-.hstat{font-size:.72rem;color:var(--muted);display:flex;align-items:center;gap:.8rem;flex-wrap:wrap}
-.dot{display:inline-block;width:7px;height:7px;border-radius:50%;vertical-align:middle;margin-right:4px}
-.dot-ok{background:var(--green);box-shadow:0 0 7px var(--green)}
+    o += html_head("Dashboard", theme, R"CSS(
+.hstat{display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;font-size:.85rem;margin-bottom:1.5rem;color:var(--muted)}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px}
+.dot-ok{background:var(--green);box-shadow:0 0 8px var(--green)}
 .dot-warn{background:var(--orange)}.dot-err{background:var(--red)}.dot-off{background:#444}
-/* ── Stat cards ── */
-.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:.7rem;margin-bottom:.7rem}
-@media(max-width:560px){.stats{grid-template-columns:repeat(2,1fr)}.stat{padding:1rem}}
-@media(max-width:640px){body{font-size:14px}.wrap{padding:1rem;padding-top:max(1rem,env(safe-area-inset-top))}.card{padding:1rem}
-.stat-lbl{font-size:.7rem}.stat-sub{font-size:.78rem}.sv{font-size:2.2rem}}}
-.stat{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.9rem 1rem;
-  transition:background-color .2s,border-color .2s}
-.stat-lbl{font-size:.6rem;text-transform:uppercase;letter-spacing:.14em;color:var(--muted)}
-.sv{font-size:2rem;font-weight:700;line-height:1.05;margin-top:.2rem}
-.sv .u{font-size:.8rem;font-weight:400;color:var(--muted);margin-left:.08em}
-.stat-sub{font-size:.68rem;color:var(--muted);margin-top:.28rem;min-height:.9em}
-.soc-track{height:3px;background:var(--soc-track);border-radius:2px;margin-top:.45rem}
-.soc-fill{height:3px;border-radius:2px;background:var(--green);transition:width .6s ease}
-/* ── Cards ── */
-.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1.1rem;margin-bottom:.7rem;
-  transition:background-color .2s,border-color .2s}
-.card-title{font-size:.6rem;text-transform:uppercase;letter-spacing:.14em;color:var(--muted);margin-bottom:.75rem}
-/* ── Layout ── */
-.col2{display:grid;grid-template-columns:1fr 1fr;gap:.7rem}
-@media(max-width:640px){.col2{grid-template-columns:1fr}}
-/* ── Data table ── */
-.dt{width:100%;border-collapse:collapse;font-size:.82rem}
-.dt td{padding:.35rem 0;vertical-align:top;border-bottom:1px solid var(--border)}
-.dt tr:last-child td{border-bottom:none}
-.dt td:first-child{color:var(--muted);width:44%;padding-right:.5rem}
-.dt td:last-child{word-break:break-word}
-/* ── Cell grid ── */
-.cells{display:grid;grid-template-columns:repeat(auto-fill,minmax(88px,1fr));gap:.4rem;margin-top:.4rem}
-.cell{background:var(--cell-bg);border:1px solid var(--border);border-radius:5px;padding:.45rem .55rem;
-  transition:background-color .2s,border-color .2s}
-@media(max-width:640px){.cells{grid-template-columns:repeat(auto-fill,minmax(72px,1fr))}}
-.cell-n{font-size:.58rem;color:var(--muted);text-transform:uppercase;letter-spacing:.1em}
-.cell-v{font-size:.92rem;font-weight:700;margin-top:.08rem}
-.cell-track{height:2px;background:var(--soc-track);border-radius:1px;margin-top:.38rem}
-.cell-fill{height:2px;border-radius:1px}
-/* ── Colours ── */
-.ok{color:var(--green)}.warn{color:var(--orange)}.err{color:var(--red)}.dim{color:var(--muted)}
-/* ── Alert ── */
-.alert{background:var(--alert-bg);border:1px solid var(--red);border-radius:8px;
-  padding:.7rem 1rem;margin-bottom:.7rem;font-size:.8rem;color:var(--red)}
-/* ── Help details ── */
-details.card summary{cursor:pointer;color:var(--muted);list-style:none;user-select:none}
-details.card summary::-webkit-details-marker{display:none}
-details.card summary::before{content:'▸  ';font-size:.8em}
-details[open].card summary::before{content:'▾  '}
-.ht{width:100%;border-collapse:collapse;font-size:.78rem;margin-top:.6rem}
-.ht td{padding:.2rem .35rem}.ht td:first-child{color:var(--muted);width:30%}
-.ht .sec td{color:var(--green);padding-top:.75rem;font-weight:600}
-/* ── Footer ── */
-.footer{font-size:.68rem;color:var(--muted);margin-top:1rem;opacity:.7}
-.footer a{color:var(--muted)}.footer a:hover{color:var(--green)}
-/* ── Analytics grid ── */
-.sec-lbl{font-size:.58rem;text-transform:uppercase;letter-spacing:.14em;color:var(--muted);margin:.6rem 0 .35rem}
-.atabs{display:flex;gap:0;margin-bottom:.6rem;border-bottom:1px solid var(--border)}
-.atab{padding:.4rem .9rem;font-size:.8rem;color:var(--muted);background:none;border:none;border-bottom:2px solid transparent;cursor:pointer;font-family:inherit}
-.atab:hover{color:var(--text)}
-.atab.active{color:var(--green);border-bottom-color:var(--green);font-weight:600}
-.atab-pane{display:none}
-.atab-pane.active{display:block}
-.acards{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:.55rem;margin-bottom:.7rem}
-@media(max-width:480px){.acards{grid-template-columns:1fr 1fr}}
-@media(max-width:320px){.acards{grid-template-columns:1fr}}
-.acard{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.75rem .9rem;
-  transition:background-color .2s,border-color .2s}
-.acard .card-title{margin-bottom:.5rem}
-.acard .dt td{padding:.2rem 0;font-size:.78rem}
-.acard .dt td:first-child{width:48%}
-/* ── Buttons ── */
-.btn{background:none;border:1px solid var(--border);border-radius:4px;color:var(--muted);
-  padding:.2rem .6rem;font-size:.72rem;font-family:inherit;cursor:pointer;
-  transition:border-color .15s,color .15s,background .15s}
-.btn:hover{border-color:var(--muted);color:var(--text)}
-.btn:focus-visible,.trng-btn:focus-visible{outline:2px solid var(--green);outline-offset:2px}
-/* ── Settings modal ── */
-.set-modal{position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:1000}
-.set-panel{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1.2rem;min-width:260px}
-.set-title{font-size:.9rem;font-weight:600;margin-bottom:.8rem;color:var(--text)}
-.set-row{margin-bottom:.6rem;display:flex;align-items:center;gap:.6rem}
-.set-row label{min-width:90px;font-size:.8rem;color:var(--muted)}
-.set-row select{flex:1;padding:.35rem .5rem;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-family:inherit;font-size:.8rem}
-/* ── Time range ── */
-.trng{display:flex;gap:.2rem;align-items:center}
-.trng-lbl{font-size:.62rem;color:var(--muted);margin-right:.2rem;text-transform:uppercase;letter-spacing:.1em}
-.trng-btn{background:none;border:1px solid var(--border);border-radius:4px;color:var(--muted);
-  padding:.22rem .65rem;font-size:.72rem;font-family:inherit;cursor:pointer;line-height:1.5;
-  transition:border-color .15s,color .15s,background .15s}
-@media(max-width:640px){.trng-btn,.btn{min-height:44px;padding:.4rem .8rem;font-size:.8rem}}
-.trng-btn:hover{border-color:var(--muted);color:var(--text)}
-.trng-btn.active{background:rgba(74,222,128,.15);border-color:var(--green);color:var(--green);font-weight:600}
-html.light .trng-btn.active{background:rgba(22,163,74,.1);border-color:var(--green);color:var(--green)}
-/* ── Tab nav ── */
-.tabs{display:flex;gap:0;margin-bottom:1rem;border-bottom:1px solid var(--border)}
-.tab{padding:.5rem 1rem;font-size:.8rem;color:var(--muted);background:none;border:none;border-bottom:2px solid transparent;cursor:pointer;font-family:inherit;text-decoration:none}
-.tab:hover{color:var(--text)}
-.tab.active{color:var(--green);border-bottom-color:var(--green);font-weight:600}
-/* ── Performance Toggles ── */
-.p-toggles{display:flex;gap:4px;background:var(--bg);padding:3px;border-radius:6px;margin-bottom:1rem;border:1px solid var(--border);width:fit-content}
-.p-toggle{padding:.3rem .8rem;font-size:.7rem;border-radius:4px;cursor:pointer;color:var(--muted);transition:all .15s;font-weight:600}
-.p-toggle:hover{color:var(--text)}
-.p-toggle.active{background:var(--card);color:var(--green);box-shadow:0 1px 3px rgba(0,0,0,.15)}
-.p-bar-wrap{height:6px;background:var(--bg);border-radius:3px;overflow:hidden;margin-top:4px;border:1px solid var(--border)}
-.p-bar-fill{height:100%;background:var(--green);transition:width .4s ease-out}
-.p-bar-fill.warn{background:var(--orange)}
-.p-bar-fill.err{background:var(--red)}
-.p-grid{display:grid;grid-template-columns:1fr;gap:.8rem}
-.p-sec-title{font-size:.65rem;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:.4rem;font-weight:700}
-.chart-svg{width:100%;display:block;background:var(--chart-bg);border-radius:4px}
-/* ── Energy Flow Diagram ── */
-.flow-wrap{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1.4rem;margin-bottom:.7rem;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.trng{display:flex;gap:.25rem;background:var(--input-bg);padding:.25rem;border-radius:10px;border:1px solid var(--border)}
+.trng-btn{background:none;border:none;color:var(--muted);padding:.35rem .75rem;border-radius:7px;cursor:pointer;font-size:.75rem;font-weight:600;transition:all .2s}
+.trng-btn:hover{color:var(--text)}
+.trng-btn.active{background:var(--card);color:var(--green);box-shadow:0 1px 2px rgba(0,0,0,.1)}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:1.5rem}
+.stat{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.25rem;box-shadow:0 1px 3px rgba(0,0,0,.1);transition:transform .2s}
+.stat:hover{transform:translateY(-2px)}
+.stat-lbl{font-size:.7rem;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:700;margin-bottom:.5rem}
+.sv{font-size:2rem;font-weight:800;line-height:1;margin-top:.25rem;color:var(--text)}
+.sv .u{font-size:.9rem;font-weight:500;color:var(--muted);margin-left:2px}
+.stat-sub{font-size:.8rem;color:var(--muted);margin-top:.75rem}
+.soc-track{height:6px;background:var(--soc-track);border-radius:3px;margin-top:1rem;overflow:hidden}
+.soc-fill{height:100%;background:var(--green);transition:width .6s cubic-bezier(0.4, 0, 0.2, 1)}
+.cells{display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:.5rem}
+.cell{background:var(--cell-bg);border:1px solid var(--border);border-radius:8px;padding:.75rem;transition:all .2s}
+.cell:hover{border-color:var(--green)}
+.cell-n{font-size:.65rem;color:var(--muted);font-weight:700}
+.cell-v{font-size:1.1rem;font-weight:800;margin-top:.1rem}
+.cell-track{height:3px;background:var(--soc-track);border-radius:1.5px;margin-top:.5rem}
+.cell-fill{height:100%;border-radius:1.5px}
+.flow-wrap{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;margin-bottom:1.5rem;box-shadow:0 1px 3px rgba(0,0,0,.1)}
 .flow-diagram{width:100%;max-width:720px;margin:0 auto;display:block}
-.flow-diagram svg{width:100%;height:auto;display:block}
 .flow-node{transition:fill .2s,opacity .2s;stroke:rgba(0,0,0,.08);stroke-width:1}
-.flow-node-solar{fill:#f59e0b}
-.flow-node-grid{fill:#2563eb}
-.flow-node-charger{fill:#4b5563}
-.flow-node-battery{fill:#16a34a}
-.flow-node-load{fill:#252530}
-html.light .flow-node-load{fill:#e2e8f0}
-.flow-node-inactive{opacity:.45}
-.flow-arrow-chg{stroke:#16a34a}
-.flow-arrow-dchg{stroke:#ea580c}
-.flow-arrow-idle{stroke:#94a3b8;opacity:.5}
+.flow-node-solar{fill:#f59e0b}.flow-node-grid{fill:#2563eb}.flow-node-charger{fill:#4b5563}.flow-node-battery{fill:#10b981}.flow-node-load{fill:#252530}
+html.light .flow-node-load{fill:#e2e8f0}.flow-node-inactive{opacity:.45}
+.flow-arrow-chg{stroke:#10b981}.flow-arrow-dchg{stroke:#ea580c}.flow-arrow-idle{stroke:#94a3b8;opacity:.5}
 .flow-arrow{stroke-width:3;fill:none;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:6 6;transition:stroke .2s,opacity .2s}
 .flow-arrow-solar{stroke-width:2}
 .flow-arrow-label{font-size:9px;font-weight:600;font-family:system-ui,sans-serif}
 @keyframes flow{from{stroke-dashoffset:24}to{stroke-dashoffset:0}}
 .flow-arrow-anim{animation:flow linear infinite}
-@media(max-width:640px){.flow-wrap{padding:1rem}.flow-diagram{max-width:100%}}
-/* ── Grid Control (Shelly) ── */
-.grid-control-wrap{margin-top:1rem;padding-top:1rem;border-top:1px solid var(--border);background:linear-gradient(135deg,rgba(251,146,60,.08) 0%,rgba(34,197,94,.06) 100%);border-radius:8px;padding:1rem;margin-bottom:0}
-html.light .grid-control-wrap{background:linear-gradient(135deg,rgba(234,88,12,.06) 0%,rgba(22,163,74,.05) 100%)}
-.grid-control-wrap .card-title{font-size:.9rem;font-weight:600;color:var(--text);margin-bottom:.4rem}
-.grid-control-desc{font-size:.8rem;line-height:1.45;color:var(--text);opacity:.92;margin-bottom:.9rem}
-.grid-control-btns{display:flex;gap:.5rem;flex-wrap:wrap}
-.grid-btn{font-family:inherit;font-size:.85rem;font-weight:600;padding:.5rem 1rem;border-radius:6px;cursor:pointer;border:none;transition:opacity .15s,transform .15s}
-.grid-btn:hover{opacity:.92}
-.grid-btn:active{transform:scale(.98)}
-.grid-btn:focus-visible{outline:2px solid var(--green);outline-offset:2px}
-.grid-btn-off{background:var(--orange);color:#fff}
-html.light .grid-btn-off{background:#ea580c;color:#fff}
-.grid-btn-on{background:var(--green);color:#fff}
-html.light .grid-btn-on{background:#16a34a;color:#fff}
-.grid-btn-test{background:var(--border);color:var(--text);font-size:.8rem}
-html.light .grid-btn-test{background:var(--border);color:var(--text)}
-#shelly-msg{margin-top:.5rem;font-size:.8rem;min-height:1.2em}
-@media(max-width:640px){.grid-control-btns{flex-direction:column}.grid-btn{min-height:44px;padding:.6rem 1rem;font-size:.9rem}}
-)HTML";
-    o += ".main{display:flex;flex-direction:column;gap:.7rem}"
-         "#bat-chart{height:480px}#chg-chart{height:450px}"
-         "@media(max-width:640px){.main{display:flex;flex-direction:column}"
-         ".stats{order:-2;margin-bottom:.5rem}.card-bat{order:-1}.card-chg{order:0}.col2{order:1}"
-         "#bat-chart{height:280px}#chg-chart{height:260px}.card.card-bat,.card.card-chg{padding-bottom:1.5rem}"
-         ".chart-svg{preserve-aspect-ratio:none}}";
-    o += R"HTML(
-/* ── Test banner ── */
-.test-banner{display:none;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.5rem;padding:.6rem 1rem;margin-bottom:1rem;background:linear-gradient(135deg,#c2410c 0%,#ea580c 100%);color:#fff;border-radius:8px;font-size:.85rem}
-.test-banner.show{display:flex}
-.test-banner .tb-btn{background:#fff!important;color:#c2410c!important;border:none;padding:.35rem .8rem;font-weight:600;cursor:pointer;border-radius:4px}
-.test-banner .tb-btn:hover{opacity:.92}
-/* ── Power reason modal ── */
-.pwr-modal{position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;z-index:1100;animation:pwr-fadeIn .2s ease}
-@keyframes pwr-fadeIn{from{opacity:0}to{opacity:1}}
-.pwr-modal-panel{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;min-width:320px;max-width:90vw;box-shadow:0 12px 40px rgba(0,0,0,.35);animation:pwr-slideUp .25s ease}
-@keyframes pwr-slideUp{from{opacity:0;transform:translateY(-12px)}to{opacity:1;transform:translateY(0)}}
-.pwr-modal-title{font-size:1rem;font-weight:600;color:var(--text);margin-bottom:.4rem}
-.pwr-modal-desc{font-size:.85rem;color:var(--muted);line-height:1.4;margin-bottom:1rem}
-.pwr-reason-input{width:100%;padding:.6rem .75rem;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:.9rem;font-family:inherit;resize:vertical;min-height:80px;margin-bottom:.5rem;transition:border-color .15s}
-.pwr-reason-input:focus{outline:none;border-color:var(--green);box-shadow:0 0 0 2px rgba(74,222,128,.2)}
-.pwr-reason-input::placeholder{color:var(--muted);opacity:.8}
-.pwr-modal-err{font-size:.8rem;color:var(--red);margin-bottom:.5rem;display:none}
-.pwr-modal-btns{display:flex;gap:.5rem;justify-content:flex-end;margin-top:1rem}
-.pwr-modal-btn{font-family:inherit;font-size:.85rem;font-weight:600;padding:.5rem 1rem;border-radius:6px;cursor:pointer;border:none;transition:opacity .15s}
-.pwr-modal-cancel{background:var(--border);color:var(--muted)}
-.pwr-modal-cancel:hover{background:var(--border);color:var(--text);opacity:.9}
-.pwr-modal-submit{background:var(--green);color:#fff}
-html.light .pwr-modal-submit{background:#16a34a}
-.pwr-modal-submit:hover:not(:disabled){opacity:.92}
-.pwr-modal-submit:disabled{opacity:.5;cursor:not-allowed}
-</style>
-<link rel="prefetch" href="/solar">
-</head><body><div class="wrap">
-)HTML";
+.grid-control-wrap{background:var(--input-bg);border-radius:12px;padding:1.5rem;margin-top:1rem;border:1px solid var(--border)}
+.grid-control-btns{display:flex;gap:.75rem;margin-top:1rem}
+.chart-svg{width:100%;display:block;background:var(--bg);border-radius:8px;overflow:visible}
+@media(max-width:640px){.stats{grid-template-columns:1fr 1fr}.sv{font-size:1.75rem}}
+)CSS");
 
-    o += "<nav class=\"tabs\"><a href=\"/\" class=\"tab active\">Dashboard</a><a href=\"/solar\" class=\"tab\">Solar</a><a href=\"/settings\" class=\"tab\">Settings</a><a href=\"/ops_log\" class=\"tab\">Ops Log</a><a href=\"/testing\" class=\"tab\">Testing</a></nav>";
-    o += "<header><h1>limonitor</h1><div class=\"hstat\">";
-    o += "<span><span class=\"dot " + dot_cls + "\"></span>" + ble_st + "</span>";
+    o += html_nav("/", theme);
+
+    o += "<header style=\"display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1.5rem;flex-wrap:wrap;gap:1rem\">"
+         "<div><h1>limonitor</h1>"
+         "<div class=\"hstat\">"
+         "<span><span class=\"dot " + dot_cls + "\"></span>" + ble_st + "</span>";
     if (s.valid && s.device && !s.device->device_name.empty())
         o += "<span>" + s.device->device_name + "</span>";
-    o += "<span id=\"ts-disp\" style=\"color:var(--muted)\">—</span>";
-    // Time range selector (JS-driven, no page reload)
+    o += "<span id=\"ts-disp\">—</span></div></div>";
+
+    // Time range selector
     {
         static const double ph[]   = {0.5, 1.0, 4.0, 24.0};
         static const char*  plbl[] = {"30m", "1h", "4h", "24h"};
-        o += "<div class=\"trng\"><span class=\"trng-lbl\">Range</span>";
+        o += "<div style=\"display:flex;gap:.5rem;align-items:center;flex-wrap:wrap\">"
+             "<div class=\"trng\">";
         for (int pi = 0; pi < 4; ++pi) {
             bool active = std::fabs(hours - ph[pi]) < 0.01;
             char tbuf[128];
@@ -2635,31 +2634,10 @@ html.light .pwr-modal-submit{background:#16a34a}
         o += "</div>";
     }
     o += "<button class=\"btn\" onclick=\"loadCharts()\" title=\"Refresh charts\">&#8635;</button>";
-    o += "<button id=\"thm-btn\" class=\"btn\" onclick=\"toggleTheme()\" title=\"Toggle theme\">&#9788;</button>";
     o += "<button id=\"set-btn\" class=\"btn\" onclick=\"toggleSettings()\" title=\"Settings\">&#9881;</button>";
     o += "</div></header>\n";
-    o += "<div id=\"settings-modal\" class=\"set-modal\" style=\"display:none\">"
-         "<div class=\"set-panel\"><div class=\"set-title\">Settings</div>"
-         "<div class=\"set-row\"><label>Theme</label><select id=\"set-theme\" onchange=\"applySetting('theme',this.value)\">"
-         "<option value=\"dark\">Dark</option><option value=\"light\">Light</option></select></div>"
-         "<div class=\"set-row\"><label>Time format</label><select id=\"set-time\" onchange=\"applySetting('time',this.value)\">"
-         "<option value=\"24\">24-hour</option><option value=\"12\">12-hour</option></select></div>"
-         "<div class=\"set-row\"><label>Chart range</label><select id=\"set-range\" onchange=\"applySetting('range',this.value)\">"
-         "<option value=\"0.5\">30 min</option><option value=\"1\">1 hour</option><option value=\"4\">4 hours</option><option value=\"24\">24 hours</option></select></div>"
-         "<button class=\"btn\" onclick=\"toggleSettings()\" style=\"margin-top:.5rem\">Close</button></div></div>\n";
-    o += "<div id=\"test-banner\" class=\"test-banner\">"
-         "<span><strong>Battery test active</strong> &middot; SoC: <span id=\"tb-soc\">—</span>% &middot; Load: <span id=\"tb-load\">—</span> W &middot; Runtime: <span id=\"tb-rt\">—</span> h</span>"
-         "<button class=\"tb-btn\" onclick=\"endTestFromBanner()\">End test</button></div>\n";
-    o += "<div id=\"pwr-reason-modal\" class=\"pwr-modal\" style=\"display:none\">"
-         "<div class=\"pwr-modal-panel\" onclick=\"event.stopPropagation()\">"
-         "<div class=\"pwr-modal-title\" id=\"pwr-modal-title\">Reason required</div>"
-         "<p class=\"pwr-modal-desc\" id=\"pwr-modal-desc\">Please provide a reason for this action.</p>"
-         "<textarea id=\"pwr-reason-input\" class=\"pwr-reason-input\" placeholder=\"e.g. Starting battery capacity test\" rows=\"3\"></textarea>"
-         "<div class=\"pwr-modal-err\" id=\"pwr-modal-err\">Please enter a reason.</div>"
-         "<div class=\"pwr-modal-btns\">"
-         "<button type=\"button\" class=\"pwr-modal-btn pwr-modal-cancel\" id=\"pwr-modal-cancel\">Cancel</button>"
-         "<button type=\"button\" class=\"pwr-modal-btn pwr-modal-submit\" id=\"pwr-modal-submit\" disabled>Submit</button>"
-         "</div></div></div>\n";
+
+    // --- Stats grid follows ---
 
     o += "<main class=\"main\">\n";
     o += "<div id=\"sys-status-panel\" class=\"card\" style=\"margin-bottom:.7rem\">"
@@ -3127,22 +3105,16 @@ html.light .pwr-modal-submit{background:#16a34a}
          "<a href=\"/metrics\">/metrics</a> (Prometheus)"
          "</div>\n";
 
+    o += common_scripts(init_settings);
     {
         char jshdr[256];
         std::snprintf(jshdr, sizeof(jshdr),
             "<script>\nvar currentH=%.4g,pollIvl=%d,lastUpd=Date.now()\n",
             hours, std::max(1, poll_interval_s));
         o += jshdr;
-        if (!init_settings.empty())
-            o += "var lmSettings=" + init_settings + ";\n";
-        else
-            o += "var lmSettings={theme:\"\",time:\"24\",range:\"1\",\"show-extended\":\"0\"};\n";
     }
 
     o += R"(
-function $(id){return document.getElementById(id)}
-function fmt(v,d){return(v==null||isNaN(+v))? '\u2014':(+v).toFixed(d)}
-
 var userTZ;try{userTZ=Intl.DateTimeFormat().resolvedOptions().timeZone}catch(e){userTZ=undefined}
 function localDateStr(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')}
 function tsToLocal(ts){return new Date(ts*1000)}
@@ -3152,37 +3124,11 @@ function setSetting(k,v){if(!lmSettings)lmSettings={};lmSettings[k]=v;fetch('/ap
 function initSettings(){
   if(!lmSettings)lmSettings={theme:'',time:'24',range:'1','show-extended':'0'}
   var t=getSetting('theme','');if(!t)t=window.matchMedia('(prefers-color-scheme:light)').matches?'light':'dark'
-  lmSettings.theme=t;applyTheme(t,false)
+  lmSettings.theme=t; document.documentElement.classList.toggle('light',t==='light');
   var tf=getSetting('time','24');var se=$('set-time');if(se)se.value=tf
   var r=getSetting('range','');if(r&&currentH){var sh=parseFloat(r);if(!isNaN(sh)&&[0.5,1,4,24].indexOf(sh)>=0)currentH=sh}
   var sr=$('set-range');if(sr)sr.value=String(currentH)
   var st=$('set-theme');if(st)st.value=t
-}
-function applyTheme(t,redraw){
-  document.documentElement.classList.toggle('light',t==='light')
-  var b=$('thm-btn');if(b)b.textContent=t==='light'?'\u263d':'\u2600'
-  if(!lmSettings)lmSettings={};lmSettings.theme=t;fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(lmSettings)}).catch(function(){})
-  var st=$('set-theme');if(st)st.value=t
-  if(redraw)loadCharts()
-}
-function toggleTheme(){applyTheme(document.documentElement.classList.contains('light')?'dark':'light',true)}
-function toggleSettings(){
-  var m=$('settings-modal');if(!m)return
-  m.style.display=m.style.display==='none'?'flex':'none'
-  if(m.style.display==='flex'){var st=$('set-theme');if(st)st.value=getSetting('theme','dark');var se=$('set-time');if(se)se.value=getSetting('time','24');var sr=$('set-range');if(sr)sr.value=String(currentH)}
-}
-function applySetting(k,v){
-  if(!lmSettings)lmSettings={};lmSettings[k]=v
-  var toSend={theme:lmSettings.theme||'',time:lmSettings.time||'24',range:lmSettings.range||'1','show-extended':lmSettings['show-extended']||'0',locale:lmSettings.locale||''}
-  Object.keys(lmSettings).forEach(function(x){toSend[x]=lmSettings[x]})
-  fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(toSend)}).catch(function(){})
-  if(k==='theme'){applyTheme(v,true)}
-  else if(k==='time'){loadCharts()}
-  else if(k==='range'){var h=parseFloat(v);if(!isNaN(h))switchRange(h)}
-}
-function initTheme(){
-  var t=getSetting('theme','');if(!t)t=window.matchMedia('(prefers-color-scheme:light)').matches?'light':'dark'
-  applyTheme(t,false)
 }
 function initAtabs(){
   var btns=document.querySelectorAll('.atab'),panes=document.querySelectorAll('.atab-pane')
@@ -3195,9 +3141,6 @@ function initAtabs(){
   })
 }
 (function(){var n=document.querySelectorAll('nav a[href^="/"]');for(var i=0;i<n.length;i++){n[i].addEventListener('click',function(e){if(e.ctrlKey||e.metaKey||e.shiftKey)return;var h=this.getAttribute('href');if(!h)return;e.preventDefault();location.href=h})}})();
-function showPowerReasonModal(opts,onConfirm){var title=opts.title||'Reason required';var desc=opts.desc||'Please provide a reason for this action.';var confirmText=opts.confirmText||'Submit';var modal=$('pwr-reason-modal');var inp=$('pwr-reason-input');var err=$('pwr-modal-err');var submitBtn=$('pwr-modal-submit');if(!modal||!inp)return;$('pwr-modal-title').textContent=title;var descEl=$('pwr-modal-desc');descEl.textContent=desc;descEl.style.display=desc?'':'none';submitBtn.textContent=confirmText;inp.value='';err.style.display='none';submitBtn.disabled=true;modal.style.display='flex';inp.focus();function close(){modal.style.display='none';}$('pwr-modal-cancel').onclick=close;submitBtn.onclick=function(){var r=inp.value.trim();if(!r){err.style.display='';err.textContent='Please enter a reason.';return;}close();onConfirm(r);};inp.oninput=function(){submitBtn.disabled=!inp.value.trim();err.style.display='none';};inp.onkeydown=function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();if(inp.value.trim())submitBtn.click();}};modal.onclick=function(e){if(e.target===modal)close();};}
-function endTestFromBanner(){showPowerReasonModal({title:'End battery test',desc:'This will turn grid back on. A reason is required.',confirmText:'End test'},function(r){fetch('/api/shelly/relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({turn:'on',reason:r})}).then(function(x){return x.json()}).then(function(d){if(d.ok){var b=$('test-banner');if(b)b.classList.remove('show');if(typeof lmSettings!=='undefined')lmSettings.shelly_test_active='0';var te=$('shelly-test-end-btn');var ts=$('shelly-test-start-btn');if(te)te.style.display='none';if(ts)ts.style.display='inline-block'}else if(d.error){var m=$('shelly-msg');if(m){m.textContent='Error: '+d.error;m.className='msg err'}}}).catch(function(){})})}
-function upTestBanner(){var b=$('test-banner');if(!b||!b.classList.contains('show'))return;fetch('/api/shelly/status').then(function(r){return r.json()}).then(function(s){if(!s.test_active){b.classList.remove('show');if(typeof lmSettings!=='undefined')lmSettings.shelly_test_active='0';return}Promise.all([fetch('/api/status').then(function(r){return r.json()}),fetch('/api/analytics').then(function(r){return r.json()})]).then(function(arr){var st=arr[0],an=arr[1];var soc=$('tb-soc'),load=$('tb-load'),rt=$('tb-rt');if(soc)soc.textContent=st.valid?fmt(st.soc_pct,1):'—';if(load)load.textContent=an.avg_discharge_24h_w>0?fmt(an.avg_discharge_24h_w,1):'—';if(rt)rt.textContent=an.runtime_from_current_h>0?fmt(an.runtime_from_current_h,1):'—'})})}
 initSettings()
 initAtabs()
 fetch('/api/shelly/status').then(function(r){return r.json()}).then(function(s){if(s.test_active){var b=$('test-banner');if(b){b.classList.add('show');upTestBanner();setInterval(upTestBanner,5000)}}}).catch(function(){})
@@ -3998,7 +3941,7 @@ function renderChgChart(data){
 loadCharts()
 setInterval(loadCharts,Math.max(pollIvl*1000,10000));
 (function(){var rt;window.addEventListener('resize',function(){clearTimeout(rt);rt=setTimeout(loadCharts,150)})})()
-)" + grid_event_banner_js() + R"(</script></div></body></html>)";
+</script>)HTML" + grid_event_banner_js() + html_footer() + "</body></html>";
 
     return o;
 }
@@ -4007,112 +3950,20 @@ std::string HttpServer::html_solar_page(const std::string& init_settings,
                                         const std::string& theme) {
     std::string o;
     o.reserve(16000);
-    std::string html_class = (theme == "light") ? " class=\"light\"" : "";
-    o += "<!DOCTYPE html><html lang=\"en\"" + html_class + "><head>\n";
-    o += R"HTML(
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Solar Forecast — limonitor</title>
-<style>
-:root{--bg:#0d0d11;--card:#16161c;--border:#2e2e3a;--text:#e0e0ea;--muted:#9090a8;--green:#4ade80;--orange:#fb923c;--cyan:#22d3ee}
-html.light{--bg:#f2f3f7;--card:#fff;--border:#d4d4e0;--text:#1a1a2c;--muted:#5a5a72;--green:#16a34a;--orange:#c2410c;--cyan:#0891b2}
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'SF Mono',Menlo,Consolas,monospace;background:var(--bg);color:var(--text);font-size:13px;padding:1.4rem}
-a{color:var(--green);text-decoration:none}a:hover{text-decoration:underline}
-h1{font-size:1.5rem;color:var(--green);margin-bottom:.5rem}
-.sub{font-size:.72rem;color:var(--muted);margin-bottom:1rem}
-.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem;margin-bottom:.7rem}
-.card-title{font-size:.6rem;text-transform:uppercase;letter-spacing:.14em;color:var(--muted);margin-bottom:.6rem}
-.stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:.6rem;margin-bottom:1rem}
-.stat{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.8rem}
-.stat-best .stat-val{min-width:0;overflow:hidden;text-overflow:ellipsis;font-size:1rem}
-.stat-lbl{font-size:.6rem;color:var(--muted);text-transform:uppercase}
-.stat-val{font-size:1.4rem;font-weight:700;color:var(--green);margin-top:.2rem}
-.stat[title]{cursor:help}
-th[title]{cursor:help;text-decoration:underline dotted var(--muted);text-underline-offset:3px}
-td[title]{cursor:help}
-table{width:100%;border-collapse:collapse;font-size:.85rem}
-th,td{padding:.4rem .5rem;text-align:left;border-bottom:1px solid var(--border)}
-th{color:var(--muted);font-weight:500}
-.ok{color:var(--green)}.warn{color:var(--orange)}.dim{color:var(--muted)}
-.footer{font-size:.68rem;color:var(--muted);margin-top:1rem}
-.tabs{display:flex;gap:0;margin-bottom:1rem;border-bottom:1px solid var(--border)}
-.tab{padding:.5rem 1rem;font-size:.8rem;color:var(--muted);background:none;border:none;border-bottom:2px solid transparent;cursor:pointer;font-family:inherit;text-decoration:none}
-.tab:hover{color:var(--text)}
-.tab.active{color:var(--green);border-bottom-color:var(--green);font-weight:600}
-.theme-wrap{display:flex;align-items:center;gap:.5rem;margin-bottom:1rem}
-.btn{background:var(--card);border:1px solid var(--border);color:var(--text);padding:.4rem .7rem;border-radius:6px;cursor:pointer;font-family:inherit;font-size:.85rem}
-.btn:hover{background:var(--border)}
-.set-modal{position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:1000}
-.set-panel{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1.2rem;min-width:260px}
-.set-title{font-size:.9rem;font-weight:600;margin-bottom:.8rem;color:var(--text)}
-.set-row{margin-bottom:.6rem;display:flex;align-items:center;gap:.6rem}
-.set-row label{min-width:90px;font-size:.8rem;color:var(--muted)}
-.set-row select{flex:1;padding:.35rem .5rem;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-family:inherit;font-size:.8rem}
-.chart-tabs{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:.5rem}
-.chart-tab{padding:.3rem .7rem;font-size:.72rem;color:var(--muted);background:none;border:none;border-bottom:2px solid transparent;cursor:pointer;font-family:inherit}
-.chart-tab:hover{color:var(--text)}
-.chart-tab.active{color:var(--green);border-bottom-color:var(--green);font-weight:600}
-.chart-svg{width:100%;display:block;background:var(--bg);border-radius:4px;overflow:visible}
-.recovery-ci{font-size:.75rem;color:var(--muted)}
-td .rc-main{font-weight:600}
-.chart-tooltip{position:absolute;pointer-events:none;background:var(--card);border:1px solid var(--border);border-radius:6px;padding:.4rem .6rem;font-size:.72rem;line-height:1.4;z-index:100;white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,.3)}
-.chart-tooltip .tt-date{font-weight:600;color:var(--text);margin-bottom:2px}
-.chart-tooltip .tt-row{color:var(--muted)}
-.chart-tooltip .tt-val{color:var(--green);font-weight:600}
-.chart-wrap{position:relative}
-.chart-legend{display:flex;flex-wrap:wrap;gap:.3rem .9rem;padding:.5rem .2rem 0;font-size:.72rem;font-family:inherit}
-.chart-legend .lg{display:inline-flex;align-items:center;gap:.35rem;cursor:help;position:relative;color:var(--muted)}
-.chart-legend .lg:hover{color:var(--text)}
-.chart-legend .lg .swatch{width:18px;height:2px;flex-shrink:0}
-.chart-legend .lg .swatch-band{width:14px;height:8px;border-radius:2px;flex-shrink:0}
-.chart-legend .lg .dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;margin-left:-10px}
-.chart-legend .lg .tip{display:none;position:absolute;bottom:calc(100% + 6px);left:0;background:var(--card);border:1px solid var(--border);border-radius:6px;padding:.4rem .6rem;font-size:.68rem;line-height:1.35;white-space:normal;width:260px;z-index:200;box-shadow:0 4px 12px rgba(0,0,0,.3);color:var(--text);pointer-events:none}
-.chart-legend .lg:hover .tip{display:block}
-.test-banner{display:none;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.5rem;padding:.6rem 1rem;margin-bottom:1rem;background:linear-gradient(135deg,#c2410c 0%,#ea580c 100%);color:#fff;border-radius:8px;font-size:.85rem}
-.test-banner.show{display:flex}
-.test-banner .tb-btn{background:#fff!important;color:#c2410c!important;border:none;padding:.35rem .8rem;font-weight:600;cursor:pointer;border-radius:4px}
-.test-banner .tb-btn:hover{opacity:.92}
-.pwr-modal{position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;z-index:1100}
-.pwr-modal-panel{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;min-width:320px;max-width:90vw;box-shadow:0 12px 40px rgba(0,0,0,.35)}
-.pwr-modal-title{font-size:1rem;font-weight:600;color:var(--text);margin-bottom:.4rem}
-.pwr-modal-desc{font-size:.85rem;color:var(--muted);line-height:1.4;margin-bottom:1rem}
-.pwr-reason-input{width:100%;padding:.6rem .75rem;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:.9rem;font-family:inherit;resize:vertical;min-height:80px;margin-bottom:.5rem}
-.pwr-reason-input:focus{outline:none;border-color:var(--green)}
-.pwr-modal-err{font-size:.8rem;color:var(--red);margin-bottom:.5rem;display:none}
-.pwr-modal-btns{display:flex;gap:.5rem;justify-content:flex-end;margin-top:1rem}
-.pwr-modal-btn{font-family:inherit;font-size:.85rem;font-weight:600;padding:.5rem 1rem;border-radius:6px;cursor:pointer;border:none}
-.pwr-modal-cancel{background:var(--border);color:var(--muted)}
-.pwr-modal-submit{background:var(--green);color:#fff}
-.pwr-modal-submit:disabled{opacity:.5;cursor:not-allowed}
-</style>
-<link rel="prefetch" href="/"><link rel="prefetch" href="/settings">
-</head><body>
-)HTML";
-    o += "<nav class=\"tabs\"><a href=\"/\" class=\"tab\">Dashboard</a><a href=\"/solar\" class=\"tab active\">Solar</a><a href=\"/settings\" class=\"tab\">Settings</a><a href=\"/ops_log\" class=\"tab\">Ops Log</a><a href=\"/testing\" class=\"tab\">Testing</a>";
-    o += "<button id=\"thm-btn\" class=\"btn\" onclick=\"toggleTheme()\" title=\"Toggle theme\" style=\"margin-left:auto\">&#9788;</button>";
-    o += "<button id=\"set-btn\" class=\"btn\" onclick=\"toggleSettings()\" title=\"Settings\">&#9881;</button></nav>";
-    o += "<div id=\"settings-modal\" class=\"set-modal\" style=\"display:none\">"
-         "<div class=\"set-panel\"><div class=\"set-title\">Settings</div>"
-         "<div class=\"set-row\"><label>Theme</label><select id=\"set-theme\" onchange=\"applySetting('theme',this.value)\">"
-         "<option value=\"dark\">Dark</option><option value=\"light\">Light</option></select></div>"
-         "<div class=\"set-row\"><label>Time format</label><select id=\"set-time\" onchange=\"applySetting('time',this.value)\">"
-         "<option value=\"24\">24-hour</option><option value=\"12\">12-hour</option></select></div>"
-         "<div class=\"set-row\"><label>Locale</label><select id=\"set-locale\" onchange=\"applySetting('locale',this.value)\">"
-         "<option value=\"auto\">Auto (browser)</option><option value=\"en-US\">English (US)</option><option value=\"en-GB\">English (UK)</option><option value=\"de-DE\">Deutsch</option><option value=\"fr-FR\">Français</option><option value=\"es-ES\">Español</option></select></div>"
-         "<button class=\"btn\" onclick=\"toggleSettings()\" style=\"margin-top:.5rem\">Close</button></div></div>";
-    o += "<div id=\"test-banner\" class=\"test-banner\">"
-         "<span><strong>Battery test active</strong> &middot; SoC: <span id=\"tb-soc\">—</span>% &middot; Load: <span id=\"tb-load\">—</span> W &middot; Runtime: <span id=\"tb-rt\">—</span> h</span>"
-         "<button class=\"tb-btn\" onclick=\"endTestFromBanner()\">End test</button></div>";
-    o += "<div id=\"pwr-reason-modal\" class=\"pwr-modal\" style=\"display:none\">"
-         "<div class=\"pwr-modal-panel\" onclick=\"event.stopPropagation()\">"
-         "<div class=\"pwr-modal-title\" id=\"pwr-modal-title\">Reason required</div>"
-         "<p class=\"pwr-modal-desc\" id=\"pwr-modal-desc\">Please provide a reason for this action.</p>"
-         "<textarea id=\"pwr-reason-input\" class=\"pwr-reason-input\" placeholder=\"e.g. Ending battery test\" rows=\"3\"></textarea>"
-         "<div class=\"pwr-modal-err\" id=\"pwr-modal-err\">Please enter a reason.</div>"
-         "<div class=\"pwr-modal-btns\">"
-         "<button type=\"button\" class=\"pwr-modal-btn pwr-modal-cancel\" id=\"pwr-modal-cancel\">Cancel</button>"
-         "<button type=\"button\" class=\"pwr-modal-btn pwr-modal-submit\" id=\"pwr-modal-submit\" disabled>Submit</button>"
-         "</div></div></div>";
+    o += html_head("Solar Forecast", theme, R"CSS(
+.stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:1rem;margin-bottom:1.5rem}
+.stat{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.25rem;box-shadow:0 1px 3px rgba(0,0,0,.1)}
+.stat-val{font-size:1.75rem;font-weight:800;color:var(--green);line-height:1.2}
+.stat-lbl{font-size:.7rem;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:700}
+.chart-tabs{display:flex;gap:.25rem;background:var(--input-bg);padding:.25rem;border-radius:10px;border:1px solid var(--border);width:fit-content}
+.chart-tab{background:none;border:none;color:var(--muted);padding:.35rem .75rem;border-radius:7px;cursor:pointer;font-size:.75rem;font-weight:600;transition:all .2s}
+.chart-tab.active{background:var(--card);color:var(--green);box-shadow:0 1px 2px rgba(0,0,0,.1)}
+.chart-tooltip{position:absolute;pointer-events:none;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.75rem;font-size:.8rem;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,.2);backdrop-filter:blur(4px)}
+.chart-legend{display:flex;flex-wrap:wrap;gap:1rem;margin-top:1rem;font-size:.8rem;color:var(--muted)}
+.lg{display:flex;align-items:center;gap:.5rem}
+.swatch{width:12px;height:12px;border-radius:3px}
+)CSS");
+    o += html_nav("/solar", theme);
     o += "<h1>Solar Forecast</h1>";
     o += "<p class=\"sub\">";
     o += "<a href=\"/api/solar_forecast_week\">/api/solar_forecast_week</a> &nbsp;"
@@ -4174,13 +4025,8 @@ td .rc-main{font-weight:600}
          "<button onclick=\"refreshWeather()\" style=\"background:var(--green);color:#fff;border:none;padding:.25rem .7rem;border-radius:4px;cursor:pointer;font-size:.75rem;font-weight:600;vertical-align:middle\">&#8635; Refresh weather</button>"
          " <span id=\"refresh-msg\" style=\"font-size:.75rem\"></span></div>";
 
-    o += "<script>\n";
-    if (!init_settings.empty())
-        o += "var lmSettings=" + init_settings + ";\n";
-    else
-        o += "var lmSettings={theme:\"\",time:\"24\",\"show-extended\":\"0\",\"show-realistic\":\"0\",locale:\"\"};\n";
-    o += "function $(id){return document.getElementById(id)}\n"
-         "function fmt(v,d){return(v==null||isNaN(+v))?'—':(+v).toFixed(d)}\n"
+    o += common_scripts(init_settings);
+    o += "<script>\n"
          "function getSetting(k,d){return(lmSettings&&lmSettings[k]!==undefined)?lmSettings[k]:d}\n"
          "function setSetting(k,v){if(!lmSettings)lmSettings={};lmSettings[k]=v;fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(lmSettings)}).catch(function(){})}\n"
          "function getLocale(){var loc=getSetting('locale','');return loc===''||loc==='auto'?(navigator.language||'en-US'):loc}\n"
@@ -4597,56 +4443,22 @@ std::string HttpServer::html_ops_log_page(Database* db, const std::string& theme
     (void)db;
     std::string o;
     o.reserve(6000);
-    o += R"HTML(<!DOCTYPE html><html lang="en" class=")HTML";
-    o += (theme == "light") ? "light" : "";
-    o += R"HTML("><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Ops Log — limonitor</title>
-<link rel="prefetch" href="/"><link rel="prefetch" href="/solar"><link rel="prefetch" href="/settings">
-<style>
-:root{--bg:#0d0d11;--card:#16161c;--border:#2e2e3a;--text:#e0e0ea;--muted:#9090a8;--green:#4ade80;--orange:#fb923c;--red:#f87171;--blue:#60a5fa}
-html.light{--bg:#f2f3f7;--card:#fff;--border:#d4d4e0;--text:#1a1a2c;--muted:#5a5a72;--green:#16a34a;--orange:#ea580c;--red:#dc2626;--blue:#2563eb}
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:system-ui,sans-serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5;padding:1rem;max-width:640px;margin:0 auto}
-nav{display:flex;align-items:center;gap:.5rem;margin-bottom:1rem;padding-bottom:.75rem;border-bottom:1px solid var(--border)}
-nav a{color:var(--muted);text-decoration:none;font-size:.9rem;padding:.35rem .6rem;border-radius:6px}
-nav a:hover{color:var(--text)}nav a.active{color:var(--green);font-weight:600}
-h1{font-size:1.25rem;color:var(--green);margin-bottom:.75rem}
-.ops-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem;margin-bottom:.75rem}
-.ops-card h2{font-size:.85rem;color:var(--muted);margin-bottom:.5rem;text-transform:uppercase;letter-spacing:.08em}
-.ops-btn{font-family:inherit;font-size:.85rem;font-weight:600;padding:.5rem 1rem;border-radius:6px;cursor:pointer;border:none;margin-right:.5rem;margin-bottom:.5rem}
-.ops-btn-start{background:var(--blue);color:#fff}.ops-btn-end{background:var(--orange);color:#fff}
-.ops-btn:hover{opacity:.92}
-.ops-input{width:100%;padding:.5rem .6rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:.9rem;margin-bottom:.5rem}
-.ops-submit{background:var(--green);color:#fff;border:none;padding:.5rem 1rem;border-radius:6px;cursor:pointer;font-weight:600;font-size:.85rem}
-.ops-timeline{list-style:none}
-.ops-timeline li{padding:.4rem 0;border-bottom:1px solid var(--border);font-size:.85rem;display:flex;gap:.5rem;align-items:flex-start}
+    o += html_head("Ops Log", theme, R"CSS(
+.ops-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;margin-bottom:1.5rem;box-shadow:0 1px 3px rgba(0,0,0,.1)}
+.ops-card h2{font-size:.85rem;color:var(--muted);margin-bottom:1rem;text-transform:uppercase;letter-spacing:.1em;font-weight:700}
+.ops-timeline{list-style:none;padding:0}
+.ops-timeline li{padding:1rem 0;border-bottom:1px solid var(--border);display:flex;gap:1rem;align-items:flex-start}
 .ops-timeline li:last-child{border-bottom:none}
-.ops-time{color:var(--muted);font-family:monospace;font-size:.75rem;min-width:4.5rem;flex-shrink:0}
-.ops-msg{flex:1}
-.ops-type-note{border-left:3px solid var(--green);padding-left:.5rem}
-.ops-type-maintenance_start,.ops-type-maintenance_end,.ops-type-grid_test_start,.ops-type-grid_test_end{border-left:3px solid var(--blue);padding-left:.5rem}
-.ops-type-grid_outage{border-left:3px solid var(--red);padding-left:.5rem}
-.ops-type-system_event{border-left:3px solid var(--orange);padding-left:.5rem}
-.ops-filter{display:flex;gap:.35rem;flex-wrap:wrap;margin-bottom:.5rem}
-.ops-filter button{background:var(--card);border:1px solid var(--border);color:var(--muted);padding:.25rem .5rem;font-size:.75rem;border-radius:4px;cursor:pointer}
-.ops-filter button:hover,.ops-filter button.active{border-color:var(--green);color:var(--green)}
-.maint-active{background:rgba(96,165,250,.15)!important;border:1px solid var(--blue);padding:.75rem;border-radius:6px;margin-bottom:.5rem}
-.pwr-modal{position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;z-index:1100}
-.pwr-modal-panel{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;min-width:320px;max-width:90vw;box-shadow:0 12px 40px rgba(0,0,0,.35)}
-.pwr-modal-title{font-size:1rem;font-weight:600;color:var(--text);margin-bottom:.4rem}
-.pwr-modal-desc{font-size:.85rem;color:var(--muted);line-height:1.4;margin-bottom:1rem}
-.pwr-reason-input{width:100%;padding:.6rem .75rem;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:.9rem;font-family:inherit;resize:vertical;min-height:80px;margin-bottom:.5rem}
-.pwr-reason-input:focus{outline:none;border-color:var(--green)}
-.pwr-modal-err{font-size:.8rem;color:var(--red);margin-bottom:.5rem;display:none}
-.pwr-modal-btns{display:flex;gap:.5rem;justify-content:flex-end;margin-top:1rem}
-.pwr-modal-btn{font-family:inherit;font-size:.85rem;font-weight:600;padding:.5rem 1rem;border-radius:6px;cursor:pointer;border:none}
-.pwr-modal-cancel{background:var(--border);color:var(--muted)}
-.pwr-modal-submit{background:var(--green);color:#fff}
-.pwr-modal-submit:disabled{opacity:.5;cursor:not-allowed}
-</style></head><body>
-<nav><a href="/">Dashboard</a><a href="/solar">Solar</a><a href="/settings">Settings</a><a href="/ops_log" class="active">Ops Log</a><a href="/testing">Testing</a></nav>
-<div id="pwr-reason-modal" class="pwr-modal" style="display:none"><div class="pwr-modal-panel" onclick="event.stopPropagation()"><div class="pwr-modal-title" id="pwr-modal-title">Reason required</div><p class="pwr-modal-desc" id="pwr-modal-desc">Please provide a reason for this action.</p><textarea id="pwr-reason-input" class="pwr-reason-input" placeholder="e.g. Replacing battery cells" rows="3"></textarea><div class="pwr-modal-err" id="pwr-modal-err">Please enter a reason.</div><div class="pwr-modal-btns"><button type="button" class="pwr-modal-btn pwr-modal-cancel" id="pwr-modal-cancel">Cancel</button><button type="button" class="pwr-modal-btn pwr-modal-submit" id="pwr-modal-submit" disabled>Submit</button></div></div></div>
+.ops-time{color:var(--muted);font-family:var(--font-mono);font-size:.8rem;min-width:5rem;flex-shrink:0}
+.ops-msg{flex:1;font-size:.9rem}
+.ops-type-note{border-left:4px solid var(--green);padding-left:1rem}
+.ops-type-maintenance_start,.ops-type-maintenance_end,.ops-type-grid_test_start,.ops-type-grid_test_end{border-left:4px solid var(--blue);padding-left:1rem}
+.ops-type-grid_outage{border-left:4px solid var(--red);padding-left:1rem}
+.ops-type-system_event{border-left:4px solid var(--orange);padding-left:1rem}
+.ops-filter{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1rem}
+.maint-active{background:rgba(59,130,246,.1);border:1px solid var(--blue);padding:1rem;border-radius:10px;margin-bottom:1rem;color:var(--blue);font-weight:600}
+)CSS");
+    o += html_nav("/ops_log", theme);
 <h1>Ops Log</h1>
 <div class="ops-card" id="maint-card">
 <h2>Maintenance</h2>
@@ -4687,9 +4499,9 @@ h1{font-size:1.25rem;color:var(--green);margin-bottom:.75rem}
 </div>
 <ul class="ops-timeline" id="ops-timeline"></ul>
 </div>
-<script>
-function $(id){return document.getElementById(id)}
-function showPowerReasonModal(opts,onConfirm){var title=opts.title||'Reason required';var desc=opts.desc||'Please provide a reason for this action.';var confirmText=opts.confirmText||'Submit';var modal=$('pwr-reason-modal');var inp=$('pwr-reason-input');var err=$('pwr-modal-err');var submitBtn=$('pwr-modal-submit');if(!modal||!inp)return;$('pwr-modal-title').textContent=title;var descEl=$('pwr-modal-desc');descEl.textContent=desc;descEl.style.display=desc?'':'none';submitBtn.textContent=confirmText;inp.value='';err.style.display='none';submitBtn.disabled=true;modal.style.display='flex';inp.focus();function close(){modal.style.display='none';}$('pwr-modal-cancel').onclick=close;submitBtn.onclick=function(){var r=inp.value.trim();if(!r){err.style.display='';err.textContent='Please enter a reason.';return;}close();onConfirm(r);};inp.oninput=function(){submitBtn.disabled=!inp.value.trim();err.style.display='none';};inp.onkeydown=function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();if(inp.value.trim())submitBtn.click();}};modal.onclick=function(e){if(e.target===modal)close();};}
+    o += common_scripts("");
+    o += R"HTML(<script>
+(function(){var n=document.querySelectorAll('nav a[href^="/"]');for(var i=0;i<n.length;i++){n[i].addEventListener('click',function(e){if(e.ctrlKey||e.metaKey||e.shiftKey)return;var h=this.getAttribute('href');if(!h)return;e.preventDefault();location.href=h})}})();
 function loadMaintStatus(){fetch('/api/maintenance_status').then(function(r){return r.json()}).then(function(d){
 var st=$('maint-status'),start=$('maint-start-btn'),end=$('maint-end-btn');
 if(d.maintenance_mode){st.innerHTML='<span class="maint-active">Maintenance window active</span>';if(start)start.style.display='none';if(end)end.style.display='inline-block'}
@@ -4736,7 +4548,7 @@ function loadDiagnostics(){
 }
 setInterval(loadDiagnostics,10000);loadDiagnostics();
 loadMaintStatus();loadOpsLog();
-)HTML" + grid_event_banner_js() + R"HTML(</script></body></html>)HTML";
+</script>)HTML" + grid_event_banner_js() + html_footer() + "</body></html>";
     return o;
 }
 
@@ -4746,54 +4558,20 @@ std::string HttpServer::html_testing_page(Database* db, testing::TestRunner* run
     (void)runner;
     std::string o;
     o.reserve(5000);
-    o += R"HTML(<!DOCTYPE html><html lang="en" class=")HTML";
-    o += (theme == "light") ? "light" : "";
-    o += R"HTML("><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>System Testing — limonitor</title>
-<link rel="prefetch" href="/"><link rel="prefetch" href="/solar"><link rel="prefetch" href="/ops_log">
-<style>
-:root{--bg:#0d0d11;--card:#16161c;--border:#2e2e3a;--text:#e0e0ea;--muted:#9090a8;--green:#4ade80;--orange:#fb923c;--red:#f87171;--blue:#60a5fa}
-html.light{--bg:#f2f3f7;--card:#fff;--border:#d4d4e0;--text:#1a1a2c;--muted:#5a5a72;--green:#16a34a;--orange:#ea580c;--red:#dc2626;--blue:#2563eb}
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:system-ui,sans-serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5;padding:1rem;max-width:720px;margin:0 auto}
-nav{display:flex;align-items:center;gap:.5rem;margin-bottom:1rem;padding-bottom:.75rem;border-bottom:1px solid var(--border)}
-nav a{color:var(--muted);text-decoration:none;font-size:.9rem;padding:.35rem .6rem;border-radius:6px}
-nav a:hover{color:var(--text)}nav a.active{color:var(--green);font-weight:600}
-h1{font-size:1.25rem;color:var(--green);margin-bottom:.75rem}
-.test-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem;margin-bottom:.75rem}
-.test-card h2{font-size:.85rem;color:var(--muted);margin-bottom:.5rem;text-transform:uppercase;letter-spacing:.08em}
-.test-btn{font-family:inherit;font-size:.85rem;font-weight:600;padding:.5rem 1rem;border-radius:6px;cursor:pointer;border:none;margin-right:.5rem;margin-bottom:.5rem}
-.test-btn-start{background:var(--green);color:#fff}.test-btn-stop{background:var(--red);color:#fff}
-.test-btn:disabled{opacity:.5;cursor:not-allowed}
-.test-table{width:100%;border-collapse:collapse;font-size:.85rem}
-.test-table th,.test-table td{padding:.4rem .5rem;text-align:left;border-bottom:1px solid var(--border)}
-.test-table th{color:var(--muted);font-weight:600;font-size:.75rem;text-transform:uppercase}
-.test-table tr:hover{background:var(--card)}
-.test-table a{color:var(--blue);text-decoration:none}
-.test-table a:hover{text-decoration:underline}
-.running{color:var(--green)}.passed{color:var(--green)}.failed{color:var(--red)}.aborted{color:var(--orange)}
-.test-row{cursor:pointer}
-.test-row:hover{background:var(--card)}
-.test-item{display:flex;justify-content:space-between;align-items:center;padding:.6rem 0;border-bottom:1px solid var(--border);gap:.5rem}
-.test-item:last-child{border-bottom:none}
-.test-item-desc{font-size:.8rem;color:var(--muted);margin-top:.2rem}
-.test-item-meta{font-size:.72rem;color:var(--muted);margin-top:.25rem}
-.test-item-btn{flex-shrink:0}
-.active-monitor{background:linear-gradient(135deg,rgba(74,222,128,.08) 0%,rgba(96,165,250,.06) 100%);border:1px solid var(--green)}
-html.light .active-monitor{background:linear-gradient(135deg,rgba(22,163,74,.06) 0%,rgba(37,99,235,.05) 100%)}
-.diag-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:.5rem;margin-bottom:.5rem}
-.diag-item{background:var(--bg);border-radius:6px;padding:.5rem;font-size:.8rem}
-.diag-item .val{font-weight:700;font-size:1rem;color:var(--green)}
-.active-inline{margin-bottom:.5rem}
-.sched-item{display:flex;justify-content:space-between;align-items:center;padding:.4rem 0;font-size:.85rem}
-.sched-placeholder{color:var(--muted);font-size:.85rem;font-style:italic}
-.detail-chart{height:140px;background:var(--bg);border-radius:6px;margin-bottom:.5rem}
-.notes-prompt{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem;margin-top:.5rem}
-.notes-prompt textarea{width:100%;padding:.5rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:.85rem;min-height:60px;margin-bottom:.5rem}
-.export-btns{display:flex;gap:.5rem;margin-top:.5rem}
-</style></head><body>
-<nav><a href="/">Dashboard</a><a href="/solar">Solar</a><a href="/settings">Settings</a><a href="/ops_log">Ops Log</a><a href="/testing" class="active">Testing</a></nav>
+    o += html_head("System Testing", theme, R"CSS(
+.test-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;margin-bottom:1.5rem;box-shadow:0 1px 3px rgba(0,0,0,.1)}
+.test-card h2{font-size:.85rem;color:var(--muted);margin-bottom:1rem;text-transform:uppercase;letter-spacing:.1em;font-weight:700}
+.test-table{width:100%;border-collapse:collapse;font-size:.9rem}
+.test-table th,.test-table td{padding:.75rem 1rem;text-align:left;border-bottom:1px solid var(--border)}
+.test-table th{color:var(--muted);font-weight:700;font-size:.75rem;text-transform:uppercase}
+.test-table tr:hover{background:rgba(16,185,129,.05)}
+.running{color:var(--green);font-weight:600}.passed{color:var(--green)}.failed{color:var(--red)}.aborted{color:var(--orange)}
+.diag-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:1rem;margin-bottom:1rem}
+.diag-item{background:var(--input-bg);border-radius:10px;padding:1rem;border:1px solid var(--border)}
+.diag-item .val{font-weight:800;font-size:1.25rem;color:var(--green);display:block;margin-top:.25rem}
+.active-monitor{background:linear-gradient(135deg,rgba(16,185,129,.1) 0%,rgba(59,130,246,.05) 100%);border:2px solid var(--green)}
+)CSS");
+    o += html_nav("/testing", theme);
 <h1>System Testing</h1>
 <div class="test-card">
 <h2>Run Test</h2>
@@ -4866,8 +4644,9 @@ html.light .active-monitor{background:linear-gradient(135deg,rgba(22,163,74,.06)
 <textarea id="finish-notes" placeholder="e.g. PSU unplugged manually, Radio transmitting during test"></textarea>
 <button type="button" class="test-btn test-btn-start" id="finish-notes-ok">Save & Close</button>
 </div>
-<script>
-function $(id){return document.getElementById(id)}
+    o += common_scripts("");
+    o += R"HTML(<script>
+(function(){var n=document.querySelectorAll('nav a[href^="/"]');for(var i=0;i<n.length;i++){n[i].addEventListener('click',function(e){if(e.ctrlKey||e.metaKey||e.shiftKey)return;var h=this.getAttribute('href');if(!h)return;e.preventDefault();location.href=h})}})();
 var TEST_TYPES=[{id:'capacity',name:'Capacity Test',desc:'Estimate battery capacity by controlled discharge',dur:'2–3 h',impact:'Moderate discharge'},{id:'ups_failover',name:'UPS Failover Test',desc:'Verify grid to battery transition',dur:'~5m',impact:'Brief discharge'},{id:'load_spike',name:'Load Spike Test',desc:'Measure voltage sag during high load',dur:'~12s',impact:'Minimal'},{id:'charger_recovery',name:'Charger Recovery Test',desc:'Verify charging ramp after outage',dur:'~15m',impact:'Charge cycle'},{id:'simulated_outage',name:'Simulated Outage',desc:'Estimate runtime without disconnecting power',dur:'~5m',impact:'Simulation only'}]
 var lastStoppedTestId=null
 function fmtDate(ts){if(!ts)return'—';var d=new Date(ts*1000);return d.toLocaleDateString()+' '+d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})}
@@ -4912,7 +4691,7 @@ function loadSchedules(){fetch('/api/tests/schedules').then(function(r){return r
 loadTests();loadBatteryHealth();loadSafetyLimits();loadActive();loadSchedules();schedFreqChange();
 setInterval(function(){loadTests();loadActive()},3000);
 setInterval(loadBatteryHealth,60000);
-)HTML" + grid_event_banner_js() + R"HTML(</script></body></html>)HTML";
+</script>)HTML" + grid_event_banner_js() + html_footer() + "</body></html>";
     return o;
 }
 
@@ -4940,54 +4719,20 @@ std::string HttpServer::html_settings_page(Database* db) {
     o.reserve(10000);
     std::string theme = g("theme", "");
     if (theme.empty()) theme = "dark";
-    o += R"HTML(<!DOCTYPE html><html lang="en" class=")HTML";
-    o += (theme == "light") ? "light" : "";
-    o += R"HTML("><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Settings — limonitor</title>
-<link rel="prefetch" href="/"><link rel="prefetch" href="/solar">
-<style>
-:root{--bg:#0d0d11;--card:#16161c;--border:#2e2e3a;--text:#e0e0ea;--muted:#9090a8;--green:#4ade80;--input-bg:#1a1a22}
-html.light{--bg:#f2f3f7;--card:#fff;--border:#d4d4e0;--text:#1a1a2c;--muted:#5a5a72;--green:#16a34a;--input-bg:#fafafa}
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5;padding:1.5rem;max-width:660px;margin:0 auto}
-.tab-bar{display:flex;gap:.25rem;margin-bottom:1.25rem;border-bottom:1px solid var(--border);padding-bottom:.5rem}
-.tab-btn{background:none;border:none;padding:.4rem .9rem;border-radius:6px 6px 0 0;cursor:pointer;font-family:inherit;font-size:.85rem;color:var(--muted)}
-.tab-btn.active{background:var(--card);color:var(--green);font-weight:600;border:1px solid var(--border);border-bottom:1px solid var(--card)}
+    o += html_head("Settings", theme, R"CSS(
+.tab-bar{display:flex;gap:.5rem;margin-bottom:1.5rem;border-bottom:1px solid var(--border)}
+.tab-btn{background:none;border:none;padding:.75rem 1.25rem;cursor:pointer;font-family:inherit;font-size:.9rem;color:var(--muted);border-bottom:2px solid transparent;transition:all .2s}
+.tab-btn.active{color:var(--green);border-bottom-color:var(--green);font-weight:700}
 .tab-panel{display:none}.tab-panel.active{display:block}
-nav{display:flex;align-items:center;gap:.5rem;margin-bottom:1.5rem;padding-bottom:1rem;border-bottom:1px solid var(--border)}
-nav a{color:var(--muted);text-decoration:none;font-size:.9rem;padding:.35rem .6rem;border-radius:6px}
-nav a:hover{color:var(--text);background:var(--card)}nav a.active{color:var(--green);font-weight:600}
-nav .spacer{flex:1}nav .thm{background:var(--card);border:1px solid var(--border);color:var(--text);padding:.35rem .6rem;border-radius:6px;cursor:pointer;font-size:.85rem}
-h1{font-size:1.35rem;font-weight:600;color:var(--green);margin-bottom:.25rem}
-.sub{font-size:.8rem;color:var(--muted);margin-bottom:1.25rem}
-.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1.25rem;margin-bottom:1rem;box-shadow:0 1px 3px rgba(0,0,0,.08)}
-.card-title{font-size:.7rem;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:700;margin-bottom:.75rem;padding-bottom:.4rem;border-bottom:1px solid var(--border)}
-.row{margin-bottom:.65rem}.row:last-child{margin-bottom:0}
-.row label{display:block;font-size:.8rem;color:var(--muted);margin-bottom:.3rem;font-weight:500}
-.row input[type=text],.row input[type=number],.row select{width:100%;padding:.5rem .6rem;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text);font-family:inherit;font-size:.9rem}
-.row input:focus,.row select:focus{outline:none;border-color:var(--green)}
-.row input[type=checkbox]{width:auto;margin-right:.4rem;vertical-align:middle;cursor:pointer}
-.hint{font-size:.75rem;color:var(--muted);margin-top:.2rem}
-.btn{background:var(--green);color:#fff;border:none;padding:.55rem 1.25rem;border-radius:6px;cursor:pointer;font-family:inherit;font-size:.9rem;font-weight:600}
-.btn-sm{padding:.35rem .8rem;font-size:.8rem}
-.msg{font-size:.8rem;color:var(--muted);margin-top:.6rem}.err{color:#dc2626}
-.test-banner{display:none;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.5rem;padding:.6rem 1rem;margin-bottom:1rem;background:linear-gradient(135deg,#c2410c 0%,#ea580c 100%);color:#fff;border-radius:8px;font-size:.85rem}
-.test-banner.show{display:flex}.test-banner .tb-btn{background:#fff!important;color:#c2410c!important;border:none;padding:.35rem .8rem;font-weight:600;cursor:pointer;border-radius:4px}
-.pwr-modal{position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;z-index:1100}
-.pwr-modal-panel{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;min-width:320px;max-width:90vw;box-shadow:0 12px 40px rgba(0,0,0,.35)}
-.pwr-modal-title{font-size:1rem;font-weight:600;margin-bottom:.4rem}.pwr-modal-desc{font-size:.85rem;color:var(--muted);line-height:1.4;margin-bottom:1rem}
-.pwr-reason-input{width:100%;padding:.6rem .75rem;border:1px solid var(--border);border-radius:8px;background:var(--input-bg);color:var(--text);font-size:.9rem;font-family:inherit;resize:vertical;min-height:80px;margin-bottom:.5rem}
-.pwr-reason-input:focus{outline:none;border-color:var(--green)}.pwr-modal-err{font-size:.8rem;color:#dc2626;margin-bottom:.5rem;display:none}
-.pwr-modal-btns{display:flex;gap:.5rem;justify-content:flex-end;margin-top:1rem}
-.pwr-modal-btn{font-family:inherit;font-size:.85rem;font-weight:600;padding:.5rem 1rem;border-radius:6px;cursor:pointer;border:none}
-.pwr-modal-cancel{background:var(--border);color:var(--muted)}.pwr-modal-submit{background:var(--green);color:#fff}.pwr-modal-submit:disabled{opacity:.5;cursor:not-allowed}
-</style></head><body>
-<nav><a href="/">Dashboard</a><a href="/solar">Solar</a><a href="/settings" class="active">Settings</a><a href="/ops_log">Ops Log</a><a href="/testing">Testing</a><span class="spacer"></span><button class="thm" id="thm-btn" onclick="toggleTheme()" title="Toggle theme">)HTML";
-    o += (theme == "light") ? "&#9788;" : "&#263d;";
-    o += R"HTML(</button></nav>
-<div id="test-banner" class="test-banner"><span><strong>Battery test active</strong> &middot; SoC: <span id="tb-soc">—</span>% &middot; Load: <span id="tb-load">—</span> W &middot; Runtime: <span id="tb-rt">—</span> h</span><button class="tb-btn" onclick="endTestFromBanner()">End test</button></div>
-<div id="pwr-reason-modal" class="pwr-modal" style="display:none"><div class="pwr-modal-panel" onclick="event.stopPropagation()"><div class="pwr-modal-title" id="pwr-modal-title">Reason required</div><p class="pwr-modal-desc" id="pwr-modal-desc"></p><textarea id="pwr-reason-input" class="pwr-reason-input" placeholder="e.g. Ending battery test" rows="3"></textarea><div class="pwr-modal-err" id="pwr-modal-err">Please enter a reason.</div><div class="pwr-modal-btns"><button type="button" class="pwr-modal-btn pwr-modal-cancel" id="pwr-modal-cancel">Cancel</button><button type="button" class="pwr-modal-btn pwr-modal-submit" id="pwr-modal-submit" disabled>Submit</button></div></div></div>
+.row{margin-bottom:1.25rem}.row:last-child{margin-bottom:0}
+.row label{display:block;font-size:.85rem;color:var(--muted);margin-bottom:.5rem;font-weight:600}
+.row input[type=text],.row input[type=number],.row select{width:100%;padding:.75rem 1rem;border:1px solid var(--border);border-radius:10px;background:var(--input-bg);color:var(--text);font-family:inherit;font-size:.95rem;transition:border-color .2s}
+.row input:focus,.row select:focus{outline:none;border-color:var(--green);box-shadow:0 0 0 2px rgba(16,185,129,.1)}
+.hint{font-size:.8rem;color:var(--muted);margin-top:.4rem;line-height:1.4}
+.msg{font-size:.9rem;color:var(--muted);margin-top:1rem;padding:1rem;border-radius:10px;background:var(--input-bg);display:none}
+.msg:not(:empty){display:block}.msg.err{color:var(--red);background:rgba(239,68,68,.1);border:1px solid var(--red)}
+)CSS");
+    o += html_nav("/settings", theme);
 <h1>Settings</h1>
 <p class="sub">Application configuration. Hardware changes (BLE, serial) require a restart to take effect.</p>
 <div class="tab-bar">
@@ -5371,25 +5116,16 @@ renderComponents();
     for(var i=0;i<sel.options.length;i++){if(sel.options[i].value===v){sel.value=v;break;}}
   }
 })();
-</script>
-<script>
+    o += common_scripts("");
+    o += R"HTML(<script>
 (function(){var n=document.querySelectorAll('nav a[href^="/"]');for(var i=0;i<n.length;i++){n[i].addEventListener('click',function(e){if(e.ctrlKey||e.metaKey||e.shiftKey)return;var h=this.getAttribute('href');if(!h)return;e.preventDefault();location.href=h})}})();
 document.getElementById('cfg-form').onsubmit=function(e){e.preventDefault();var f=e.target;var o={settings_initialized:'1'};
 ['device_name','device_address','adapter_path','http_port','http_bind','log_file','verbose','shelly_host','shelly_enabled','shelly_battery_test_auto','shelly_battery_test_max_hours','shelly_battery_test_low_soc','maintenance_auto_timeout_minutes','serial_device','serial_baud','pwrgate_remote','poll_interval','db_path','db_interval','battery_purchased','rated_capacity_ah','tx_threshold','solar_enabled','solar_panel_watts','solar_system_efficiency','solar_zip_code','weather_api_key','weather_zip_code','daemon'].forEach(function(k){var el=f.elements[k];if(el)o[k]=el.type==='checkbox'?(el.checked?'1':'0'):el.value});
 fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(o)})
-.then(function(r){if(r.ok){document.getElementById('msg').textContent='Saved. Restart limonitor to apply hardware changes.';document.getElementById('msg').className='msg'}else{throw new Error()}})
-.catch(function(){document.getElementById('msg').textContent='Save failed.';document.getElementById('msg').className='msg err'})}
-function toggleTheme(){var isLight=document.documentElement.classList.toggle('light');var t=isLight?'light':'dark';document.getElementById('thm-btn').textContent=isLight?'\u263d':'\u263c';fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme:t})}).catch(function(){})}
-function refreshWx(){var m=document.getElementById('wx-msg');if(m)m.textContent='Refreshing\u2026';fetch('/api/weather_refresh').then(function(r){return r.json()}).then(function(d){if(m)m.textContent=d.ok?'Done! Visit the Solar page to see fresh data.':'Error: '+d.message;if(m)m.style.color=d.ok?'var(--green)':'#dc2626'}).catch(function(e){if(m){m.textContent='Error: '+e.message;m.style.color='#dc2626'}})}
-function $(id){return document.getElementById(id)}
-function fmt(n,p){return n==null||isNaN(n)?'\u2014':n.toFixed(p)}
-function showPowerReasonModal(opts,onConfirm){var title=opts.title||'Reason required';var desc=opts.desc||'';var confirmText=opts.confirmText||'Submit';var modal=$('pwr-reason-modal');var inp=$('pwr-reason-input');var err=$('pwr-modal-err');var submitBtn=$('pwr-modal-submit');if(!modal||!inp)return;$('pwr-modal-title').textContent=title;var descEl=$('pwr-modal-desc');descEl.textContent=desc;descEl.style.display=desc?'':'none';submitBtn.textContent=confirmText;inp.value='';err.style.display='none';submitBtn.disabled=true;modal.style.display='flex';inp.focus();function close(){modal.style.display='none';}$('pwr-modal-cancel').onclick=close;submitBtn.onclick=function(){var r=inp.value.trim();if(!r){err.style.display='';err.textContent='Please enter a reason.';return;}close();onConfirm(r);};inp.oninput=function(){submitBtn.disabled=!inp.value.trim();err.style.display='none';};inp.onkeydown=function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();if(inp.value.trim())submitBtn.click();}};modal.onclick=function(e){if(e.target===modal)close();};}
-function endTestFromBanner(){showPowerReasonModal({title:'End battery test',desc:'This will turn grid back on. A reason is required.',confirmText:'End test'},function(r){fetch('/api/shelly/relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({turn:'on',reason:r})}).then(function(x){return x.json()}).then(function(d){if(d.ok){var b=$('test-banner');if(b)b.classList.remove('show')}}).catch(function(){})})}
-function upTestBanner(){var b=$('test-banner');if(!b||!b.classList.contains('show'))return;fetch('/api/shelly/status').then(function(r){return r.json()}).then(function(s){if(!s.test_active){b.classList.remove('show');return}Promise.all([fetch('/api/status').then(function(r){return r.json()}),fetch('/api/analytics').then(function(r){return r.json()})]).then(function(arr){var st=arr[0],an=arr[1];var soc=$('tb-soc'),load=$('tb-load'),rt=$('tb-rt');if(soc)soc.textContent=st.valid?fmt(st.soc_pct,1):'\u2014';if(load)load.textContent=an.avg_discharge_24h_w>0?fmt(an.avg_discharge_24h_w,1):'\u2014';if(rt)rt.textContent=an.runtime_from_current_h>0?fmt(an.runtime_from_current_h,1):'\u2014'})})}
-fetch('/api/shelly/status').then(function(r){return r.json()}).then(function(s){if(s.test_active){var b=$('test-banner');if(b){b.classList.add('show');upTestBanner();setInterval(upTestBanner,5000)}}}).catch(function(){})
-)HTML";
-    o += grid_event_banner_js();
-    o += R"HTML(</script></body></html>)HTML";
+.then(function(r){if(r.ok){var m=$('msg');m.textContent='Saved. Restart limonitor to apply hardware changes.';m.className='msg';m.style.display='block'}else{throw new Error()}})
+.catch(function(){var m=$('msg');m.textContent='Save failed.';m.className='msg err';m.style.display='block'})}
+function refreshWx(){var m=$('wx-msg');if(m)m.textContent='Refreshing\u2026';fetch('/api/weather_refresh').then(function(r){return r.json()}).then(function(d){if(m)m.textContent=d.ok?'Done! Visit the Solar page to see fresh data.':'Error: '+d.message;if(m)m.style.color=d.ok?'var(--green)':'#dc2626'}).catch(function(e){if(m){m.textContent='Error: '+e.message;m.style.color='#dc2626'}})}
+</script>)HTML" + grid_event_banner_js() + html_footer() + "</body></html>";
     return o;
 }
 
