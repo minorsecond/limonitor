@@ -6,13 +6,13 @@
 
 // EpicPowerGate R2 (West Mountain Radio) status snapshot.
 // Telemetry arrives at ~1 Hz on USB CDC serial (/dev/ttyACM0, 115200 8N1).
-// USB interface is powered by the PS rail — goes silent ~10 min after PS is removed.
+// USB interface stays alive on battery power even when PS is absent.
 //
 // Charger state machine (confirmed via reverse-engineering 2026-03-12/13):
 //   "Chrg Off"  PS present, charger intentionally idle (bat full, idle timer, etc.)
 //   "Charging"  CC-CV charge cycle active; PSS=1, current flowing, PWM ~600-970
 //   "Charged"   Taper complete, current <= stop_a; PSS=0
-//   "PS Off"    PS input absent (ps_v == 0); USB goes silent ~10 min after entry
+//   "PS Off"    PS input absent (ps_v == 0.00); telemetry continues on battery
 struct PwrGateSnapshot {
     std::chrono::system_clock::time_point timestamp;
     bool valid{false};
