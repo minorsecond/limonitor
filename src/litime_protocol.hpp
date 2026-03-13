@@ -3,7 +3,10 @@
 #include <cstdint>
 #include <vector>
 
-// LiTime BLE protocol. Service FFE0, notify FFE1, write FFE2.
+// LiTime BLE protocol (confirmed via live GATT probing 2026-03-13).
+// Device: L-12100BNNA70 (Beken BK343x BLE chip, BMS app FW 6.3.0)
+// Service FFE0: notify FFE1 (responses), write FFE2 (commands), AT-config FFE3.
+// Only one command is supported — see build_request() / parse().
 
 namespace litime {
 

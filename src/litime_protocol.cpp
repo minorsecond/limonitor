@@ -3,11 +3,18 @@
 
 namespace litime {
 
-// Bytes (from reference JS, big-endian uint16 pairs):
-//   setUint16(0, 0x0000) -> 0x00 0x00
-//   setUint16(2, 0x0401) -> 0x04 0x01
-//   setUint16(4, 0x1355) -> 0x13 0x55
-//   setUint16(6, 0xAA17) -> 0xAA 0x17
+// Request: 00 00 04 01 13 55 AA 17
+//   bytes 0-1: fixed frame start
+//   byte  2:   payload length (04)
+//   byte  3:   command (01 = telemetry request; only supported command)
+//   byte  4:   argument (0x13)
+//   bytes 5-6: magic 55 AA
+//   byte  7:   checksum = sum(bytes[2..6]) & 0xFF = 0x17
+// Response header: 00 00 65 01 93 55 AA <status>
+//   byte  2:   0x65 = 101 bytes of data follow
+//   byte  4:   arg | 0x80 (response flag)
+//   byte  7:   0x00 = OK, 0x01/0x03 = error
+// JBD protocol and all other command variants return an error response.
 std::vector<uint8_t> build_request() {
     static const std::vector<uint8_t> req = {0x00, 0x00, 0x04, 0x01, 0x13, 0x55, 0xAA, 0x17};
     return req;
@@ -25,14 +32,28 @@ static inline uint32_t u32le(const uint8_t* p) {
 static inline int32_t s32le(const uint8_t* p) { return static_cast<int32_t>(u32le(p)); }
 static inline int16_t s16le(const uint8_t* p) { return static_cast<int16_t>(u16le(p)); }
 
-// Response layout (offsets into the notification payload, little-endian):
-//   12-15  uint32  total voltage, mV
-//   16-47  16×uint16  cell voltages, mV  (skip zeros = absent cells)
-//   48-51  int32   current, mA  (positive = charging, negative = discharging — negated on parse)
-//   52-53  int16   cell temperature, °C
-//   54-55  int16   BMS temperature, °C
-//   62-63  uint16  remaining capacity, 0.01 Ah
-//   64-65  uint16  nominal capacity, 0.01 Ah
+// 105-byte response layout (offsets, little-endian, confirmed 2026-03-13):
+//    0-7   header  00 00 65 01 93 55 AA 00
+//    8-11  uint32  instantaneous voltage, mV (fluctuates; use [12] for monitoring)
+//   12-15  uint32  filtered total voltage, mV
+//   16-47  16×uint16  cell voltages, mV (zero = slot not populated)
+//   48-51  int32   current, mA (LiTime: positive=charging; negated on parse → positive=discharging)
+//   52-53  int16   cell temperature, °C  (direct, no scaling)
+//   54-55  int16   BMS temperature, °C   (direct, no scaling)
+//   56-75  —       zeros (reserved)
+//   76-79  uint32  protection status bitmask:
+//                    0x00000004 pack overvoltage       0x00000020 pack undervoltage
+//                    0x00000040 charge overcurrent      0x00000080 discharge overcurrent
+//                    0x00000100 charge overtemp         0x00000200 discharge overtemp
+//                    0x00000400 charge undertemp        0x00000800 discharge undertemp
+//                    0x00004000 short circuit
+//   80-87  —       zeros (reserved)
+//   88-89  uint16  battery state flags (0x0004 = charge FET disabled)
+//   90-91  uint16  BMS SoC % (0–100; overrides rem/nom ratio when > 0)
+//   92-95  uint32  unknown constant (observed: 100; likely rated Ah capacity)
+//   96-99  uint32  cycle count
+//  100-103 uint32  unknown constant (observed: 72)
+//     104  uint8   checksum
 bool parse(const uint8_t* d, size_t len, BatterySnapshot& snap) {
     if (len < MIN_RESPONSE_LEN) {
         LOG_WARN("LiTime: response too short (%zu bytes, need %zu)", len, MIN_RESPONSE_LEN);

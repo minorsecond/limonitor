@@ -18,9 +18,16 @@ static int extract_i(const std::string& line, const std::string& key) {
     return static_cast<int>(extract_d(line, key));
 }
 
-static std::string first_word(const std::string& s) {
+// Extract the leading state token from a telemetry line.
+// The firmware emits multi-word states ("Chrg Off", "PS Off") so we must check
+// for two-word prefixes before falling back to single-word matching.
+static std::string extract_state(const std::string& s) {
     size_t p = 0;
     while (p < s.size() && (s[p] == ' ' || s[p] == '\t')) ++p;
+    // Two-word states must be checked first
+    if (s.compare(p, 8, "Chrg Off") == 0) return "Chrg Off";
+    if (s.compare(p, 6, "PS Off")   == 0) return "PS Off";
+    // Single-word states
     size_t e = p;
     while (e < s.size() && s[e] != ' ' && s[e] != '\t') ++e;
     return s.substr(p, e - p);
@@ -29,7 +36,7 @@ static std::string first_word(const std::string& s) {
 bool parse(const std::string& s1, const std::string& s2, PwrGateSnapshot& snap) {
     if (s1.find("PS=") == std::string::npos) return false;
 
-    // Parse all numeric fields before inferring state
+    // Parse all numeric fields
     snap.ps_v    = static_cast<float>(extract_d(s1, "PS"));
     snap.sol_v   = static_cast<float>(extract_d(s1, "Sol"));
     snap.minutes = extract_i(s1, "Min");
@@ -49,37 +56,42 @@ bool parse(const std::string& s1, const std::string& s2, PwrGateSnapshot& snap) 
         }
     }
 
-    // Field source: if s1 has TargetV, it's a single-line update.
-    // Otherwise use s2 for target fields.
+    // Extended telemetry line ('g' command): may arrive as s2 or inline in s1
     const std::string& t_src = (s1.find("TargetV=") != std::string::npos) ? s1 : s2;
-
     snap.target_v = static_cast<float>(extract_d(t_src, "TargetV"));
     snap.target_a = static_cast<float>(extract_d(t_src, "TargetI"));
     snap.stop_a   = static_cast<float>(extract_d(t_src, "Stop"));
     snap.temp     = extract_i(t_src, "Temp");
     snap.pss      = extract_i(t_src, "PSS");
 
-    // State: use first word if it looks like a known keyword (no '='), otherwise
-    // infer from measurements. Older firmware prefixed lines with "Charging"/"Float"/
-    // "Idle"; newer firmware omits the keyword and starts with a field like "TargetV=".
+    // State: firmware prefixes every line with a state token.
+    // Confirmed states (FW 1.34, reverse-engineered 2026-03-12/13):
+    //   "Chrg Off"  PS present, charger idle
+    //   "Charging"  CC-CV charge active
+    //   "Charged"   Taper complete
+    //   "PS Off"    PS input absent (ps_v == 0.00)
+    // "Chrg Off" and "PS Off" are two-word tokens — first_word() alone is insufficient.
+    // Fall back to measurement inference only when no state token is present.
+    static auto s_chrg_off = std::make_shared<std::string>("Chrg Off");
     static auto s_charging = std::make_shared<std::string>("Charging");
-    static auto s_float    = std::make_shared<std::string>("Float");
-    static auto s_idle     = std::make_shared<std::string>("Idle");
+    static auto s_charged  = std::make_shared<std::string>("Charged");
+    static auto s_ps_off   = std::make_shared<std::string>("PS Off");
 
-    std::string fw = first_word(s1);
-    if (fw.find('=') == std::string::npos && !fw.empty()) {
-        if      (fw == "Charging") snap.state = s_charging;
-        else if (fw == "Float")    snap.state = s_float;
-        else if (fw == "Idle")     snap.state = s_idle;
-        else                       snap.state = std::make_shared<std::string>(fw);
+    std::string st = extract_state(s1);
+    if (st.find('=') == std::string::npos && !st.empty()) {
+        if      (st == "Chrg Off") snap.state = s_chrg_off;
+        else if (st == "Charging") snap.state = s_charging;
+        else if (st == "Charged")  snap.state = s_charged;
+        else if (st == "PS Off")   snap.state = s_ps_off;
+        else                       snap.state = std::make_shared<std::string>(st);
     } else {
-        // Infer: Float when bat_v is within 0.10 V of target; Charging when current
-        // is flowing; Idle otherwise.
-        if (snap.bat_a > 0.05f) {
-            snap.state = (snap.bat_v >= snap.target_v - 0.10f) ? s_float : s_charging;
-        } else {
-            snap.state = s_idle;
-        }
+        // Infer from measurements when no state token is present
+        if (snap.bat_a > 0.05f)
+            snap.state = s_charging;
+        else if (snap.ps_v < 0.5f)
+            snap.state = s_ps_off;
+        else
+            snap.state = s_chrg_off;
     }
 
     snap.timestamp = std::chrono::system_clock::now();
