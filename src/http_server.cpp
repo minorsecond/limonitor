@@ -3114,7 +3114,7 @@ html.light .flow-node-load{fill:#e2e8f0}.flow-node-inactive{opacity:.45}
         o += jshdr;
     }
 
-    o += R"(
+    o += R"JS(
 var userTZ;try{userTZ=Intl.DateTimeFormat().resolvedOptions().timeZone}catch(e){userTZ=undefined}
 function localDateStr(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')}
 function tsToLocal(ts){return new Date(ts*1000)}
@@ -3941,7 +3941,7 @@ function renderChgChart(data){
 loadCharts()
 setInterval(loadCharts,Math.max(pollIvl*1000,10000));
 (function(){var rt;window.addEventListener('resize',function(){clearTimeout(rt);rt=setTimeout(loadCharts,150)})})()
-</script>)HTML" + grid_event_banner_js() + html_footer() + "</body></html>";
+</script>)JS" + grid_event_banner_js() + html_footer() + "</body></html>";
 
     return o;
 }
@@ -4459,6 +4459,7 @@ std::string HttpServer::html_ops_log_page(Database* db, const std::string& theme
 .maint-active{background:rgba(59,130,246,.1);border:1px solid var(--blue);padding:1rem;border-radius:10px;margin-bottom:1rem;color:var(--blue);font-weight:600}
 )CSS");
     o += html_nav("/ops_log", theme);
+    o += R"HTML(
 <h1>Ops Log</h1>
 <div class="ops-card" id="maint-card">
 <h2>Maintenance</h2>
@@ -4499,8 +4500,9 @@ std::string HttpServer::html_ops_log_page(Database* db, const std::string& theme
 </div>
 <ul class="ops-timeline" id="ops-timeline"></ul>
 </div>
+)HTML";
     o += common_scripts("");
-    o += R"HTML(<script>
+    o += R"JS(<script>
 (function(){var n=document.querySelectorAll('nav a[href^="/"]');for(var i=0;i<n.length;i++){n[i].addEventListener('click',function(e){if(e.ctrlKey||e.metaKey||e.shiftKey)return;var h=this.getAttribute('href');if(!h)return;e.preventDefault();location.href=h})}})();
 function loadMaintStatus(){fetch('/api/maintenance_status').then(function(r){return r.json()}).then(function(d){
 var st=$('maint-status'),start=$('maint-start-btn'),end=$('maint-end-btn');
@@ -4548,7 +4550,7 @@ function loadDiagnostics(){
 }
 setInterval(loadDiagnostics,10000);loadDiagnostics();
 loadMaintStatus();loadOpsLog();
-</script>)HTML" + grid_event_banner_js() + html_footer() + "</body></html>";
+</script>)JS" + grid_event_banner_js() + html_footer() + "</body></html>";
     return o;
 }
 
@@ -4572,6 +4574,7 @@ std::string HttpServer::html_testing_page(Database* db, testing::TestRunner* run
 .active-monitor{background:linear-gradient(135deg,rgba(16,185,129,.1) 0%,rgba(59,130,246,.05) 100%);border:2px solid var(--green)}
 )CSS");
     o += html_nav("/testing", theme);
+    o += R"HTML(
 <h1>System Testing</h1>
 <div class="test-card">
 <h2>Run Test</h2>
@@ -4644,8 +4647,9 @@ std::string HttpServer::html_testing_page(Database* db, testing::TestRunner* run
 <textarea id="finish-notes" placeholder="e.g. PSU unplugged manually, Radio transmitting during test"></textarea>
 <button type="button" class="test-btn test-btn-start" id="finish-notes-ok">Save & Close</button>
 </div>
+)HTML";
     o += common_scripts("");
-    o += R"HTML(<script>
+    o += R"JS(<script>
 (function(){var n=document.querySelectorAll('nav a[href^="/"]');for(var i=0;i<n.length;i++){n[i].addEventListener('click',function(e){if(e.ctrlKey||e.metaKey||e.shiftKey)return;var h=this.getAttribute('href');if(!h)return;e.preventDefault();location.href=h})}})();
 var TEST_TYPES=[{id:'capacity',name:'Capacity Test',desc:'Estimate battery capacity by controlled discharge',dur:'2–3 h',impact:'Moderate discharge'},{id:'ups_failover',name:'UPS Failover Test',desc:'Verify grid to battery transition',dur:'~5m',impact:'Brief discharge'},{id:'load_spike',name:'Load Spike Test',desc:'Measure voltage sag during high load',dur:'~12s',impact:'Minimal'},{id:'charger_recovery',name:'Charger Recovery Test',desc:'Verify charging ramp after outage',dur:'~15m',impact:'Charge cycle'},{id:'simulated_outage',name:'Simulated Outage',desc:'Estimate runtime without disconnecting power',dur:'~5m',impact:'Simulation only'}]
 var lastStoppedTestId=null
@@ -4691,7 +4695,7 @@ function loadSchedules(){fetch('/api/tests/schedules').then(function(r){return r
 loadTests();loadBatteryHealth();loadSafetyLimits();loadActive();loadSchedules();schedFreqChange();
 setInterval(function(){loadTests();loadActive()},3000);
 setInterval(loadBatteryHealth,60000);
-</script>)HTML" + grid_event_banner_js() + html_footer() + "</body></html>";
+</script>)JS" + grid_event_banner_js() + html_footer() + "</body></html>";
     return o;
 }
 
@@ -4733,6 +4737,7 @@ std::string HttpServer::html_settings_page(Database* db) {
 .msg:not(:empty){display:block}.msg.err{color:var(--red);background:rgba(239,68,68,.1);border:1px solid var(--red)}
 )CSS");
     o += html_nav("/settings", theme);
+    o += R"HTML(
 <h1>Settings</h1>
 <p class="sub">Application configuration. Hardware changes (BLE, serial) require a restart to take effect.</p>
 <div class="tab-bar">
@@ -5116,8 +5121,9 @@ renderComponents();
     for(var i=0;i<sel.options.length;i++){if(sel.options[i].value===v){sel.value=v;break;}}
   }
 })();
+)HTML";
     o += common_scripts("");
-    o += R"HTML(<script>
+    o += R"JS(<script>
 (function(){var n=document.querySelectorAll('nav a[href^="/"]');for(var i=0;i<n.length;i++){n[i].addEventListener('click',function(e){if(e.ctrlKey||e.metaKey||e.shiftKey)return;var h=this.getAttribute('href');if(!h)return;e.preventDefault();location.href=h})}})();
 document.getElementById('cfg-form').onsubmit=function(e){e.preventDefault();var f=e.target;var o={settings_initialized:'1'};
 ['device_name','device_address','adapter_path','http_port','http_bind','log_file','verbose','shelly_host','shelly_enabled','shelly_battery_test_auto','shelly_battery_test_max_hours','shelly_battery_test_low_soc','maintenance_auto_timeout_minutes','serial_device','serial_baud','pwrgate_remote','poll_interval','db_path','db_interval','battery_purchased','rated_capacity_ah','tx_threshold','solar_enabled','solar_panel_watts','solar_system_efficiency','solar_zip_code','weather_api_key','weather_zip_code','daemon'].forEach(function(k){var el=f.elements[k];if(el)o[k]=el.type==='checkbox'?(el.checked?'1':'0'):el.value});
@@ -5125,7 +5131,7 @@ fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'}
 .then(function(r){if(r.ok){var m=$('msg');m.textContent='Saved. Restart limonitor to apply hardware changes.';m.className='msg';m.style.display='block'}else{throw new Error()}})
 .catch(function(){var m=$('msg');m.textContent='Save failed.';m.className='msg err';m.style.display='block'})}
 function refreshWx(){var m=$('wx-msg');if(m)m.textContent='Refreshing\u2026';fetch('/api/weather_refresh').then(function(r){return r.json()}).then(function(d){if(m)m.textContent=d.ok?'Done! Visit the Solar page to see fresh data.':'Error: '+d.message;if(m)m.style.color=d.ok?'var(--green)':'#dc2626'}).catch(function(e){if(m){m.textContent='Error: '+e.message;m.style.color='#dc2626'}})}
-</script>)HTML" + grid_event_banner_js() + html_footer() + "</body></html>";
+</script>)JS" + grid_event_banner_js() + html_footer() + "</body></html>";
     return o;
 }
 
