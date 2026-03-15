@@ -2167,7 +2167,7 @@ std::string HttpServer::grid_event_banner_js() {
     // Raw JS injected into every page. Uses \uXXXX escapes so JS handles Unicode.
     // checkGridEvents() fetches unclassified events and shows a fixed red banner.
     // clsGrid() POSTs the classification and re-checks for more events.
-    return R"JS(
+    return R"JS(<script>
 function checkGridEvents(){
 fetch('/api/grid_events?unclassified=1').then(function(r){return r.json()}).then(function(evs){
 var b=document.getElementById('grid-evt-banner');if(b)b.remove();
@@ -2204,7 +2204,7 @@ var n=document.getElementById('grid-evt-notes');
 fetch('/api/grid_events/'+id+'/classify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({classification:cls,notes:n?n.value:''})}).then(function(r){if(r.ok)checkGridEvents()}).catch(function(){});
 };
 checkGridEvents();
-)JS";
+</script>)JS";
 }
 
 shelly::Status HttpServer::fetch_shelly_status() {
@@ -2581,30 +2581,54 @@ std::string HttpServer::html_dashboard(const BatterySnapshot& s, const std::stri
     o.reserve(65536);
 
     o += html_head("Dashboard", theme, R"CSS(
-.hstat{display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;font-size:.85rem;margin-bottom:1.5rem;color:var(--muted)}
-.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px}
-.dot-ok{background:var(--green);box-shadow:0 0 8px var(--green)}
-.dot-warn{background:var(--orange)}.dot-err{background:var(--red)}.dot-off{background:#444}
-.trng{display:flex;gap:.25rem;background:var(--input-bg);padding:.25rem;border-radius:10px;border:1px solid var(--border)}
+/* ── Status color classes ── */
+.ok{color:var(--green)}.warn{color:var(--orange)}.err{color:var(--red)}.dim{color:var(--muted)}
+
+/* ── BLE status dot ── */
+.hstat{display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;font-size:.82rem;margin-bottom:0;color:var(--muted)}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:4px}
+.dot-ok{background:var(--green);box-shadow:0 0 0 3px rgba(16,185,129,.18),0 0 10px rgba(16,185,129,.45)}
+.dot-warn{background:var(--orange);box-shadow:0 0 0 3px rgba(245,158,11,.18)}
+.dot-err{background:var(--red);box-shadow:0 0 0 3px rgba(239,68,68,.18)}
+.dot-off{background:#444}
+
+/* ── Time-range selector ── */
+.trng{display:flex;gap:.25rem;background:var(--input-bg);padding:.3rem;border-radius:10px;border:1px solid var(--border)}
 .trng-btn{background:none;border:none;color:var(--muted);padding:.35rem .75rem;border-radius:7px;cursor:pointer;font-size:.75rem;font-weight:600;transition:all .2s}
 .trng-btn:hover{color:var(--text)}
-.trng-btn.active{background:var(--card);color:var(--green);box-shadow:0 1px 2px rgba(0,0,0,.1)}
+.trng-btn.active{background:var(--card);color:var(--green);box-shadow:0 1px 4px rgba(0,0,0,.15)}
+
+/* ── Hero stats grid ── */
 .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:1.5rem}
-.stat{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.25rem;box-shadow:0 1px 3px rgba(0,0,0,.1);transition:transform .2s}
-.stat:hover{transform:translateY(-2px)}
-.stat-lbl{font-size:.7rem;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:700;margin-bottom:.5rem}
-.sv{font-size:2rem;font-weight:800;line-height:1;margin-top:.25rem;color:var(--text)}
-.sv .u{font-size:.9rem;font-weight:500;color:var(--muted);margin-left:2px}
-.stat-sub{font-size:.8rem;color:var(--muted);margin-top:.75rem}
-.soc-track{height:6px;background:var(--soc-track);border-radius:3px;margin-top:1rem;overflow:hidden}
-.soc-fill{height:100%;background:var(--green);transition:width .6s cubic-bezier(0.4, 0, 0.2, 1)}
-.cells{display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:.5rem}
-.cell{background:var(--cell-bg);border:1px solid var(--border);border-radius:8px;padding:.75rem;transition:all .2s}
-.cell:hover{border-color:var(--green)}
-.cell-n{font-size:.65rem;color:var(--muted);font-weight:700}
-.cell-v{font-size:1.1rem;font-weight:800;margin-top:.1rem}
+.stat{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:1.5rem 1.25rem;box-shadow:0 2px 8px rgba(0,0,0,.15);transition:transform .2s,box-shadow .2s;position:relative;overflow:hidden}
+.stat::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;border-radius:14px 14px 0 0;background:var(--border)}
+.stat-v::before{background:linear-gradient(90deg,var(--blue),var(--cyan))}
+.stat-a::before{background:linear-gradient(90deg,var(--green),#34d399)}
+.stat-soc::before{background:linear-gradient(90deg,var(--orange),#fbbf24)}
+.stat-w::before{background:linear-gradient(90deg,var(--cyan),var(--blue))}
+.stat:hover{transform:translateY(-2px);box-shadow:0 6px 20px rgba(0,0,0,.2)}
+.stat-lbl{font-size:.65rem;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);font-weight:700;margin-bottom:.6rem}
+.sv{font-size:2.25rem;font-weight:900;line-height:1;margin-top:.2rem;color:var(--text);letter-spacing:-.02em}
+.sv .u{font-size:.95rem;font-weight:500;color:var(--muted);margin-left:3px;letter-spacing:0}
+.stat-sub{font-size:.78rem;color:var(--muted);margin-top:.75rem;line-height:1.4}
+
+/* ── SoC bar ── */
+.soc-track{height:8px;background:var(--soc-track);border-radius:4px;margin-top:1rem;overflow:hidden}
+.soc-fill{height:100%;background:linear-gradient(90deg,var(--green),#34d399);transition:width .8s cubic-bezier(0.4,0,0.2,1);border-radius:4px}
+
+/* ── Two-column card layout ── */
+.col2{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1.5rem;align-items:start}
+
+/* ── Cell voltages ── */
+.cells{display:grid;grid-template-columns:repeat(auto-fill,minmax(88px,1fr));gap:.5rem}
+.cell{background:var(--cell-bg);border:1px solid var(--border);border-radius:10px;padding:.85rem .75rem;transition:all .2s}
+.cell:hover{border-color:var(--green);transform:translateY(-1px)}
+.cell-n{font-size:.6rem;color:var(--muted);font-weight:700;letter-spacing:.04em;text-transform:uppercase}
+.cell-v{font-size:1.1rem;font-weight:800;margin-top:.2rem}
 .cell-track{height:3px;background:var(--soc-track);border-radius:1.5px;margin-top:.5rem}
-.cell-fill{height:100%;border-radius:1.5px}
+.cell-fill{height:100%;border-radius:1.5px;transition:width .6s ease}
+
+/* ── Energy flow ── */
 .flow-wrap{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;margin-bottom:1.5rem;box-shadow:0 1px 3px rgba(0,0,0,.1)}
 .flow-diagram{width:100%;max-width:720px;margin:0 auto;display:block}
 .flow-node{transition:fill .2s,opacity .2s;stroke:rgba(0,0,0,.08);stroke-width:1}
@@ -2617,9 +2641,65 @@ html.light .flow-node-load{fill:#e2e8f0}.flow-node-inactive{opacity:.45}
 @keyframes flow{from{stroke-dashoffset:24}to{stroke-dashoffset:0}}
 .flow-arrow-anim{animation:flow linear infinite}
 .grid-control-wrap{background:var(--input-bg);border-radius:12px;padding:1.5rem;margin-top:1rem;border:1px solid var(--border)}
-.grid-control-btns{display:flex;gap:.75rem;margin-top:1rem}
+.grid-control-btns{display:flex;gap:.75rem;margin-top:1rem;flex-wrap:wrap}
+.grid-control-desc{font-size:.82rem;color:var(--muted);margin:.5rem 0 0;line-height:1.5}
+
+/* ── Grid control buttons ── */
+.grid-btn{padding:.5rem 1rem;border-radius:8px;border:1px solid var(--border);cursor:pointer;font-family:inherit;font-size:.82rem;font-weight:600;transition:all .2s}
+.grid-btn-off{background:rgba(239,68,68,.08);color:var(--red);border-color:rgba(239,68,68,.35)}
+.grid-btn-off:hover{background:var(--red);color:#fff;border-color:var(--red)}
+.grid-btn-on{background:rgba(16,185,129,.08);color:var(--green);border-color:rgba(16,185,129,.35)}
+.grid-btn-on:hover{background:var(--green);color:#fff;border-color:var(--green)}
+.grid-btn-test{background:rgba(245,158,11,.08);color:var(--orange);border-color:rgba(245,158,11,.35)}
+.grid-btn-test:hover{background:var(--orange);color:#fff;border-color:var(--orange)}
+
+/* ── Section label ── */
+.sec-lbl{font-size:.65rem;text-transform:uppercase;letter-spacing:.15em;color:var(--muted);font-weight:700;margin:1.75rem 0 .75rem;padding-bottom:.5rem;border-bottom:1px solid var(--border)}
+
+/* ── Analytics tabs ── */
+.atabs{display:flex;gap:.25rem;background:var(--input-bg);padding:.3rem;border-radius:12px;border:1px solid var(--border);margin-bottom:1.25rem;width:fit-content}
+.atab{background:none;border:none;color:var(--muted);padding:.45rem 1.1rem;border-radius:8px;cursor:pointer;font-size:.8rem;font-weight:600;transition:all .2s;white-space:nowrap}
+.atab:hover{color:var(--text)}
+.atab.active{background:var(--card);color:var(--text);box-shadow:0 2px 8px rgba(0,0,0,.15)}
+.atab-pane{display:none}.atab-pane.active{display:block}
+
+/* ── Analytics cards ── */
+.acards{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:1rem;margin-bottom:1.5rem}
+.acard{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.25rem;box-shadow:0 1px 3px rgba(0,0,0,.1)}
+
+/* ── Charts ── */
 .chart-svg{width:100%;display:block;background:var(--bg);border-radius:8px;overflow:visible}
-@media(max-width:640px){.stats{grid-template-columns:1fr 1fr}.sv{font-size:1.75rem}}
+
+/* ── Footer API links ── */
+.footer{font-size:.72rem;color:var(--muted);padding:1.5rem 0;border-top:1px solid var(--border);margin-top:.5rem;line-height:2.2}
+.footer a{color:var(--muted);opacity:.8}.footer a:hover{color:var(--green);opacity:1}
+
+/* ── Protection alert ── */
+.alert{background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.3);border-radius:10px;padding:1rem 1.25rem;margin-bottom:1rem;color:var(--red);font-size:.88rem;font-weight:600}
+
+/* ── Help table ── */
+details.card>summary{cursor:pointer;color:var(--muted);font-size:.82rem;font-weight:600;list-style:none;padding:.25rem 0}
+details.card>summary::-webkit-details-marker{display:none}
+.ht{width:100%;border-collapse:collapse;font-size:.82rem;margin-top:1rem}
+.ht td{padding:.45rem 0;border-bottom:1px solid var(--border);vertical-align:top}
+.ht td:first-child{color:var(--muted);padding-right:1rem;width:32%;font-weight:600}
+.ht tr.sec td{background:var(--input-bg);color:var(--muted);font-weight:700;font-size:.65rem;text-transform:uppercase;letter-spacing:.1em;padding:.4rem .6rem;border-radius:4px}
+.ht tr:last-child td{border-bottom:none}
+
+/* ── Performance panel ── */
+.p-toggles{display:flex;gap:.5rem;margin-bottom:1rem;flex-wrap:wrap}
+.p-toggle{padding:.35rem .9rem;border-radius:8px;cursor:pointer;font-size:.78rem;font-weight:600;color:var(--muted);background:var(--input-bg);border:1px solid var(--border);transition:all .2s;user-select:none}
+.p-toggle:hover{color:var(--text)}
+.p-toggle.active{background:var(--card);color:var(--text);border-color:var(--green)}
+.p-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem}
+.p-sec-title{font-size:.7rem;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:700;margin-bottom:.75rem}
+.p-bar-wrap{height:6px;background:var(--soc-track);border-radius:3px;margin-top:.35rem;overflow:hidden}
+.p-bar-fill{height:100%;border-radius:3px;background:var(--green);transition:width .4s ease}
+.p-bar-fill.warn{background:var(--orange)}.p-bar-fill.err{background:var(--red)}
+
+/* ── Responsive ── */
+@media(max-width:760px){.col2{grid-template-columns:1fr}}
+@media(max-width:640px){.stats{grid-template-columns:1fr 1fr}.sv{font-size:1.85rem}.acards{grid-template-columns:1fr}.atabs{width:100%}.atab{padding:.4rem .75rem;font-size:.75rem}}
 )CSS");
 
     o += html_nav("/", theme);
@@ -2666,7 +2746,7 @@ html.light .flow-node-load{fill:#e2e8f0}.flow-node-inactive{opacity:.45}
 
     // Voltage (with trend indicator)
     snprintf(buf, sizeof(buf),
-        "<div class=\"stat\"><div class=\"stat-lbl\">Battery Voltage</div>"
+        "<div class=\"stat stat-v\"><div class=\"stat-lbl\">Battery Voltage</div>"
         "<div class=\"sv ok\"><span id=\"sv\">%.2f</span><span class=\"u\">V</span>"
         "<span id=\"sv-trend\" style=\"font-size:1rem;margin-left:.2em\"></span></div>"
         "<div class=\"stat-sub\" id=\"sv-sub\">%.3f&nbsp;min &middot; %.3f&nbsp;max</div></div>\n",
@@ -2676,7 +2756,7 @@ html.light .flow-node-load{fill:#e2e8f0}.flow-node-inactive{opacity:.45}
     o += buf;
 
     snprintf(buf, sizeof(buf),
-        "<div class=\"stat\" title=\"Battery current. Positive = discharging (from battery), Negative = charging (into battery).\"><div class=\"stat-lbl\">Current</div>"
+        "<div class=\"stat stat-a\" title=\"Battery current. Positive = discharging (from battery), Negative = charging (into battery).\"><div class=\"stat-lbl\">Current</div>"
         "<div class=\"%s\" id=\"sa-wrap\"><span id=\"sa\">%.2f</span><span class=\"u\">A</span></div>"
         "<div class=\"stat-sub\" id=\"sa-sub\">%s</div></div>\n",
         cur_cls, std::abs(s.valid ? s.current_a : 0.0), cur_dir);
@@ -2685,7 +2765,7 @@ html.light .flow-node-load{fill:#e2e8f0}.flow-node-inactive{opacity:.45}
     // SoC
     int soc_bar = static_cast<int>(std::max(0.0f, std::min(100.0f, s.soc_pct)));
     snprintf(buf, sizeof(buf),
-        "<div class=\"stat\"><div class=\"stat-lbl\">State of Charge</div>"
+        "<div class=\"stat stat-soc\"><div class=\"stat-lbl\">State of Charge</div>"
         "<div class=\"sv ok\"><span id=\"ssoc\">%.1f</span><span class=\"u\">%%</span>"
         "<span id=\"ssoc-trend\" style=\"font-size:1rem;margin-left:.2em\"></span></div>"
         "<div class=\"soc-track\"><div class=\"soc-fill\" id=\"soc-bar\" style=\"width:%d%%\"></div></div>"
@@ -2718,7 +2798,7 @@ html.light .flow-node-load{fill:#e2e8f0}.flow-node-inactive{opacity:.45}
     if (load_estimated) tooltip += " (Estimated from historical or grid data)";
 
     snprintf(buf, sizeof(buf),
-        "<div class=\"stat\" id=\"spw-panel\" title=\"%s\">"
+        "<div class=\"stat stat-w\" id=\"spw-panel\" title=\"%s\">"
         "<div class=\"stat-lbl\">System Load</div>"
         "<div class=\"sv ok\"><span id=\"spw\">%.1f</span><span class=\"u\">W</span></div>"
         "<div class=\"stat-sub\" id=\"spw-sub\">Battery: %.1f&nbsp;W&nbsp;%s</div></div>\n",
