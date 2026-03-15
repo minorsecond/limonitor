@@ -2616,8 +2616,8 @@ std::string HttpServer::html_dashboard(const BatterySnapshot& s, const std::stri
 .stat-sub{font-size:.72rem;color:var(--muted);margin-top:.5rem;line-height:1.3}
 
 /* ── SoC bar ── */
-.soc-track{height:8px;background:var(--soc-track);border-radius:4px;margin-top:1rem;overflow:hidden}
-.soc-fill{height:100%;background:linear-gradient(90deg,var(--green),#34d399);transition:width .8s cubic-bezier(0.4,0,0.2,1);border-radius:4px}
+.soc-track{height:5px;background:var(--soc-track);border-radius:3px;margin-top:.5rem;overflow:hidden}
+.soc-fill{height:100%;background:linear-gradient(90deg,var(--green),#34d399);transition:width .8s cubic-bezier(0.4,0,0.2,1);border-radius:3px}
 
 /* ── Two-column card layout ── */
 .col2{display:grid;grid-template-columns:1fr 1fr;gap:.6rem;margin-bottom:.75rem;align-items:start}
@@ -2772,7 +2772,7 @@ details.card>summary::-webkit-details-marker{display:none}
         "<div class=\"sv ok\"><span id=\"ssoc\">%.1f</span><span class=\"u\">%%</span>"
         "<span id=\"ssoc-trend\" style=\"font-size:1rem;margin-left:.2em\"></span></div>"
         "<div class=\"soc-track\"><div class=\"soc-fill\" id=\"soc-bar\" style=\"width:%d%%\"></div></div>"
-        "<div class=\"stat-sub\" id=\"ssoc-sub\">%.2f&nbsp;/&nbsp;%.2f&nbsp;Ah</div></div>\n",
+        "<div class=\"stat-sub\" id=\"ssoc-sub\">%.2f&nbsp;Ah&nbsp;of&nbsp;%.2f&nbsp;Ah</div></div>\n",
         static_cast<double>(s.soc_pct), soc_bar, static_cast<double>(s.remaining_ah), static_cast<double>(s.nominal_ah));
     o += buf;
 
@@ -3265,7 +3265,8 @@ function upBat(){fetch('/api/status').then(function(r){return r.json()}).then(fu
   $('soc-bar').style.width=Math.max(0,Math.min(100,d.soc_pct))+'%'
   var v=d.voltage_v||0;if(v<1)v=51.2
   var remWh=d.remaining_ah*v,nomWh=d.nominal_ah*v
-  $('ssoc-sub').textContent=fmt(d.remaining_ah,2)+'\xa0/\xa0'+fmt(d.nominal_ah,2)+'\xa0Ah\xa0('+fmt(remWh,0)+'\xa0/\xa0'+fmt(nomWh,0)+'\xa0Wh)'
+  var remTxt=Math.abs(d.remaining_ah-d.nominal_ah)<0.1?fmt(d.nominal_ah,2)+'\xa0Ah':fmt(d.remaining_ah,2)+'\xa0Ah\xa0of\xa0'+fmt(d.nominal_ah,2)+'\xa0Ah'
+  $('ssoc-sub').textContent=remTxt+'\xa0\u00b7\xa0'+fmt(remWh,0)+'\xa0Wh'
   
   // Power & Load calculation
   window.lastBatV = d.voltage_v;
