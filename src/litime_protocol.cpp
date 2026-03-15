@@ -112,8 +112,13 @@ bool parse(const uint8_t* d, size_t len, BatterySnapshot& snap) {
         uint16_t bstate = u16le(d + 88);
         snap.charge_mosfet = !(bstate & 0x0004);  // off when charge explicitly disabled
         uint16_t bms_soc = u16le(d + 90);
-        if (bms_soc > 0)
+        if (bms_soc > 0) {
             snap.soc_pct = static_cast<float>(bms_soc);
+            // If Ah registers say remaining >= nominal, trust them over the
+            // coulomb counter (BMS can lag by 1-2% at full charge).
+            if (snap.nominal_ah > 0.0f && snap.remaining_ah >= snap.nominal_ah)
+                snap.soc_pct = 100.0f;
+        }
     }
 
     // Cycle count at offset 96 (uint32 LE)
