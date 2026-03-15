@@ -2379,6 +2379,8 @@ std::string HttpServer::html_head(const std::string& title, const std::string& t
   --bg:#0d0d12;--card:#17171e;--border:#2d2d3d;--text:#e2e8f0;--muted:#94a3b8;
   --green:#10b981;--orange:#f59e0b;--red:#ef4444;--blue:#3b82f6;--cyan:#06b6d4;
   --input-bg:#1f1f29;--soc-track:#252535;--cell-bg:#12121a;
+  --chart-bg:#12121a;--chart-grid:#2d2d3d;--chart-tick:#94a3b8;
+  --cv:#10b981;--csoc:#f59e0b;--ca:#3b82f6;--csol:#f59e0b;
   --font-main:system-ui,-apple-system,sans-serif;
   --font-mono:'SF Mono',Menlo,monospace;
 }
@@ -2386,16 +2388,18 @@ html.light{
   --bg:#f8fafc;--card:#ffffff;--border:#e2e8f0;--text:#0f172a;--muted:#64748b;
   --green:#059669;--orange:#d97706;--red:#dc2626;--blue:#2563eb;--cyan:#0891b2;
   --input-bg:#f1f5f9;--soc-track:#e2e8f0;--cell-bg:#f8fafc;
+  --chart-bg:#f0f4f8;--chart-grid:#e2e8f0;--chart-tick:#64748b;
+  --cv:#059669;--csoc:#d97706;--ca:#2563eb;--csol:#d97706;
 }
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:var(--font-main);background:var(--bg);color:var(--text);line-height:1.5;padding:0;margin:0;-webkit-font-smoothing:antialiased}
-.wrap{max-width:1200px;margin:0 auto;padding:1.5rem;padding-top:max(1.5rem,env(safe-area-inset-top));padding-bottom:max(2.5rem,env(safe-area-inset-bottom))}
+.wrap{max-width:1200px;margin:0 auto;padding:1rem;padding-top:max(1rem,env(safe-area-inset-top));padding-bottom:max(1.5rem,env(safe-area-inset-bottom))}
 a{color:var(--green);text-decoration:none;transition:opacity .2s}a:hover{opacity:.8}
 nav{display:flex;align-items:center;gap:.5rem;padding:1rem 1.5rem;background:var(--card);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:100}
 nav a{color:var(--muted);font-weight:500;font-size:.9rem;padding:.5rem .75rem;border-radius:8px;transition:all .2s}
 nav a:hover{color:var(--text);background:var(--input-bg)}
 nav a.active{color:var(--green);background:rgba(16,185,129,.1)}
-.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;margin-bottom:1.5rem;box-shadow:0 1px 3px rgba(0,0,0,.1)}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem;margin-bottom:.75rem}
 .card-title{font-size:.75rem;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:700;margin-bottom:1rem;display:flex;justify-content:space-between;align-items:center}
 h1{font-size:1.5rem;font-weight:800;letter-spacing:-.02em;margin-bottom:1rem;color:var(--text)}
 .btn{background:var(--input-bg);border:1px solid var(--border);color:var(--text);padding:.5rem 1rem;border-radius:8px;cursor:pointer;font-family:inherit;font-size:.85rem;font-weight:600;transition:all .2s;display:inline-flex;align-items:center;gap:.5rem}
@@ -2599,25 +2603,24 @@ std::string HttpServer::html_dashboard(const BatterySnapshot& s, const std::stri
 .trng-btn.active{background:var(--card);color:var(--green);box-shadow:0 1px 4px rgba(0,0,0,.15)}
 
 /* ── Hero stats grid ── */
-.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:1.5rem}
-.stat{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:1.5rem 1.25rem;box-shadow:0 2px 8px rgba(0,0,0,.15);transition:transform .2s,box-shadow .2s;position:relative;overflow:hidden}
-.stat::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;border-radius:14px 14px 0 0;background:var(--border)}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:.6rem;margin-bottom:1rem}
+.stat{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.85rem 1rem;position:relative;overflow:hidden}
+.stat::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;border-radius:8px 8px 0 0;background:var(--border)}
 .stat-v::before{background:linear-gradient(90deg,var(--blue),var(--cyan))}
 .stat-a::before{background:linear-gradient(90deg,var(--green),#34d399)}
 .stat-soc::before{background:linear-gradient(90deg,var(--orange),#fbbf24)}
 .stat-w::before{background:linear-gradient(90deg,var(--cyan),var(--blue))}
-.stat:hover{transform:translateY(-2px);box-shadow:0 6px 20px rgba(0,0,0,.2)}
-.stat-lbl{font-size:.65rem;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);font-weight:700;margin-bottom:.6rem}
-.sv{font-size:2.25rem;font-weight:900;line-height:1;margin-top:.2rem;color:var(--text);letter-spacing:-.02em}
-.sv .u{font-size:.95rem;font-weight:500;color:var(--muted);margin-left:3px;letter-spacing:0}
-.stat-sub{font-size:.78rem;color:var(--muted);margin-top:.75rem;line-height:1.4}
+.stat-lbl{font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:700;margin-bottom:.35rem}
+.sv{font-size:1.7rem;font-weight:800;line-height:1;color:var(--text);letter-spacing:-.02em}
+.sv .u{font-size:.8rem;font-weight:500;color:var(--muted);margin-left:2px}
+.stat-sub{font-size:.72rem;color:var(--muted);margin-top:.5rem;line-height:1.3}
 
 /* ── SoC bar ── */
 .soc-track{height:8px;background:var(--soc-track);border-radius:4px;margin-top:1rem;overflow:hidden}
 .soc-fill{height:100%;background:linear-gradient(90deg,var(--green),#34d399);transition:width .8s cubic-bezier(0.4,0,0.2,1);border-radius:4px}
 
 /* ── Two-column card layout ── */
-.col2{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1.5rem;align-items:start}
+.col2{display:grid;grid-template-columns:1fr 1fr;gap:.6rem;margin-bottom:.75rem;align-items:start}
 
 /* ── Cell voltages ── */
 .cells{display:grid;grid-template-columns:repeat(auto-fill,minmax(88px,1fr));gap:.5rem}
@@ -2654,7 +2657,7 @@ html.light .flow-node-load{fill:#e2e8f0}.flow-node-inactive{opacity:.45}
 .grid-btn-test:hover{background:var(--orange);color:#fff;border-color:var(--orange)}
 
 /* ── Section label ── */
-.sec-lbl{font-size:.65rem;text-transform:uppercase;letter-spacing:.15em;color:var(--muted);font-weight:700;margin:1.75rem 0 .75rem;padding-bottom:.5rem;border-bottom:1px solid var(--border)}
+.sec-lbl{font-size:.6rem;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);font-weight:700;margin:1rem 0 .5rem;padding-bottom:.35rem;border-bottom:1px solid var(--border)}
 
 /* ── Analytics tabs ── */
 .atabs{display:flex;gap:.25rem;background:var(--input-bg);padding:.3rem;border-radius:12px;border:1px solid var(--border);margin-bottom:1.25rem;width:fit-content}
@@ -2664,8 +2667,8 @@ html.light .flow-node-load{fill:#e2e8f0}.flow-node-inactive{opacity:.45}
 .atab-pane{display:none}.atab-pane.active{display:block}
 
 /* ── Analytics cards ── */
-.acards{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:1rem;margin-bottom:1.5rem}
-.acard{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.25rem;box-shadow:0 1px 3px rgba(0,0,0,.1)}
+.acards{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:.6rem;margin-bottom:1rem}
+.acard{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:.85rem 1rem}
 
 /* ── Charts ── */
 .chart-svg{width:100%;display:block;background:var(--bg);border-radius:8px;overflow:visible}
@@ -2704,7 +2707,7 @@ details.card>summary::-webkit-details-marker{display:none}
 
     o += html_nav("/", theme);
 
-    o += "<header style=\"display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1.5rem;flex-wrap:wrap;gap:1rem\">"
+    o += "<header style=\"display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:.75rem;flex-wrap:wrap;gap:.5rem\">"
          "<div><h1>limonitor</h1>"
          "<div class=\"hstat\">"
          "<span><span class=\"dot " + dot_cls + "\"></span>" + ble_st + "</span>";
@@ -3868,8 +3871,14 @@ function fmtTime(h,m){
   if(getSetting('time','24')==='12'){var h12=h%12;if(h12===0)h12=12;return h12+':'+pad(m)+(h<12?' AM':' PM')}
   return pad(h)+':'+pad(m)
 }
-function timeTicks(t0,t1,tspan,pl,cw,chartTop,chartH,labelY,fsTick){
+function chartColors(){
+  var lt=document.documentElement.classList.contains('light')
+  return{bg:lt?'#f0f4f8':'#13131c',grid:lt?'#dde3ec':'#272737',tick:lt?'#6b7280':'#8892a4',
+    v:lt?'#059669':'#34d399',soc:lt?'#d97706':'#fbbf24',a:lt?'#2563eb':'#60a5fa',sol:lt?'#ca8a04':'#fcd34d',muted:lt?'#6b7280':'#8892a4'}
+}
+function timeTicks(t0,t1,tspan,pl,cw,chartTop,chartH,labelY,fsTick,cc){
   if(tspan<1000) return ''
+  if(!cc)cc=chartColors()
   var fs=fsTick||10
   var ss=tspan/1000
   var ts=ss<=600?120:ss<=1800?300:ss<=5400?900:ss<=21600?3600:ss<=86400?14400:43200
@@ -3894,12 +3903,12 @@ function timeTicks(t0,t1,tspan,pl,cw,chartTop,chartH,labelY,fsTick){
   var firstTkClose=firstTkX<pl+minGap*2
   var startLbl=fmtStart(t0,firstTkClose)
   var startW=Math.max(minGap,startLbl.length*fs*0.7)
-  var s="<g stroke='var(--chart-grid)' stroke-width='1' stroke-dasharray='2,4'>"
+  var s="<g stroke='"+cc.grid+"' stroke-width='1' stroke-dasharray='2,4'>"
   for(var tk=firstTk;tk<t1;tk+=tms){
     var f=(tk-t0)/tspan; if(f<0.01||f>0.99) continue
     s+="<line x1='"+(pl+f*cw).toFixed(1)+"' y1='"+chartTop+"' x2='"+(pl+f*cw).toFixed(1)+"' y2='"+(chartTop+chartH)+"'/>"
   }
-  s+="</g><g font-size='"+fs+"' font-family='monospace' style='fill:var(--chart-tick)'>"
+  s+="</g><g font-size='"+fs+"' font-family='monospace' fill='"+cc.tick+"'>"
   s+="<text x='"+pl+"' y='"+labelY+"' text-anchor='start'>"+startLbl+"</text>"
   var lastX=pl+startW,prevDay=new Date(t0).toDateString()
   for(var tk=firstTk;tk<t1;tk+=tms){
@@ -3923,9 +3932,10 @@ function sma(arr,w){return arr.map(function(_,i){var a=0,c=0;for(var j=Math.max(
 
 function renderBatChart(data,txEvs){
   var el=$('bat-chart'); if(!el) return
+  var cc=chartColors()
   txEvs=txEvs||[]
   if(!data||data.length<2){
-    el.innerHTML="<text x='50%' y='50%' font-size='14' font-family='monospace' text-anchor='middle' dominant-baseline='middle' style='fill:var(--muted)'>Collecting data\u2026</text>"
+    el.innerHTML="<text x='50%' y='50%' font-size='14' font-family='monospace' text-anchor='middle' dominant-baseline='middle' fill='"+cc.muted+"'>Collecting data\u2026</text>"
     return
   }
   var md=chartDims(el,280,260)
@@ -3946,34 +3956,34 @@ function renderBatChart(data,txEvs){
   function xp(i){return (PL+(ts[i]-t0)/tspan*CW).toFixed(1)}
   function yv(v){return (PT+CH-(v-vlo)/vrng*CH).toFixed(1)}
   function ys(s){return (PT+CH-(s/100)*CH).toFixed(1)}
-  var s="<rect width='"+W+"' height='"+H+"' style='fill:var(--chart-bg)' rx='6'/>"
-  s+="<g stroke='var(--chart-grid)' stroke-width='1'>"
+  var s="<rect width='"+W+"' height='"+H+"' fill='"+cc.bg+"' rx='4'/>"
+  s+="<g stroke='"+cc.grid+"' stroke-width='1'>"
   for(var i=0;i<=4;i++){var gy=(PT+CH*i/4).toFixed(1);s+="<line x1='"+PL+"' y1='"+gy+"' x2='"+(W-PR)+"' y2='"+gy+"'/>"}
   s+="</g>"
-  s+="<g font-size='"+fs+"' font-family='monospace' text-anchor='end' style='fill:var(--cv)'>"
+  s+="<g font-size='"+fs+"' font-family='monospace' text-anchor='end' fill='"+cc.v+"'>"
   for(var i=0;i<=4;i++) s+="<text x='"+(PL-6)+"' y='"+(PT+CH*i/4+5).toFixed(1)+"'>"+(vhi-vrng*i/4).toFixed(2)+"V</text>"
   s+="</g>"
-  s+="<g font-size='"+fs+"' font-family='monospace' text-anchor='start' style='fill:var(--csoc)'>"
+  s+="<g font-size='"+fs+"' font-family='monospace' text-anchor='start' fill='"+cc.soc+"'>"
   for(var i=0;i<=4;i++) s+="<text x='"+(W-PR+6)+"' y='"+(PT+CH*i/4+5).toFixed(1)+"'>"+(100-25*i)+"%</text>"
   s+="</g>"
-  s+=timeTicks(t0,t1,tspan,PL,CW,PT,CH,H-8,fsTick)
+  s+=timeTicks(t0,t1,tspan,PL,CW,PT,CH,H-8,fsTick,cc)
   txEvs.forEach(function(e){
     var x=PL+(e.start*1000-t0)/tspan*CW
     if(x>=PL&&x<=PL+CW){
-      s+="<g><line x1='"+x.toFixed(1)+"' y1='"+PT+"' x2='"+x.toFixed(1)+"' y2='"+(PT+CH)+"' stroke='var(--ca)' stroke-width='1' stroke-dasharray='2,3' opacity='0.7'/>"
-      s+="<text x='"+x.toFixed(1)+"' y='"+(PT-4)+"' text-anchor='middle' font-size='12' fill='var(--ca)'>\u26a1</text>"
+      s+="<g><line x1='"+x.toFixed(1)+"' y1='"+PT+"' x2='"+x.toFixed(1)+"' y2='"+(PT+CH)+"' stroke='"+cc.a+"' stroke-width='1' stroke-dasharray='2,3' opacity='0.7'/>"
+      s+="<text x='"+x.toFixed(1)+"' y='"+(PT-4)+"' text-anchor='middle' font-size='12' fill='"+cc.a+"'>\u26a1</text>"
       s+="<title>TX Event\nDuration: "+e.duration.toFixed(1)+" s\nPeak Power: "+e.peak_power.toFixed(0)+" W</title></g>"
     }
   })
   var pts=data.map(function(d,i){return xp(i)+','+yv(d.v)}).join(' ')
-  s+="<polyline fill='none' stroke='var(--cv)' stroke-width='"+sw+"' stroke-linecap='round' stroke-linejoin='round' points='"+pts+"'/>"
+  s+="<polyline fill='none' stroke='"+cc.v+"' stroke-width='"+sw+"' stroke-linecap='round' stroke-linejoin='round' points='"+pts+"'/>"
   pts=data.map(function(d,i){return xp(i)+','+ys(d.soc)}).join(' ')
-  s+="<polyline fill='none' stroke='var(--csoc)' stroke-width='"+sw2+"' stroke-dasharray='6,4' stroke-linecap='round' stroke-linejoin='round' points='"+pts+"'/>"
+  s+="<polyline fill='none' stroke='"+cc.soc+"' stroke-width='"+sw2+"' stroke-dasharray='6,4' stroke-linecap='round' stroke-linejoin='round' points='"+pts+"'/>"
   s+="<g font-size='"+fs+"' font-family='monospace'>"
-  s+="<line x1='"+(PL+8)+"' y1='"+legY+"' x2='"+(PL+28)+"' y2='"+legY+"' stroke='var(--cv)' stroke-width='"+sw+"' stroke-linecap='round'/>"
-  s+="<text x='"+(PL+34)+"' y='"+(legY+4)+"' style='fill:var(--cv)'>Voltage</text>"
-  s+="<line x1='"+(PL+110)+"' y1='"+legY+"' x2='"+(PL+130)+"' y2='"+legY+"' stroke='var(--csoc)' stroke-width='"+sw2+"' stroke-dasharray='6,4' stroke-linecap='round'/>"
-  s+="<text x='"+(PL+136)+"' y='"+(legY+4)+"' style='fill:var(--csoc)'>SoC</text>"
+  s+="<line x1='"+(PL+8)+"' y1='"+legY+"' x2='"+(PL+28)+"' y2='"+legY+"' stroke='"+cc.v+"' stroke-width='"+sw+"' stroke-linecap='round'/>"
+  s+="<text x='"+(PL+34)+"' y='"+(legY+4)+"' fill='"+cc.v+"'>Voltage</text>"
+  s+="<line x1='"+(PL+110)+"' y1='"+legY+"' x2='"+(PL+130)+"' y2='"+legY+"' stroke='"+cc.soc+"' stroke-width='"+sw2+"' stroke-dasharray='6,4' stroke-linecap='round'/>"
+  s+="<text x='"+(PL+136)+"' y='"+(legY+4)+"' fill='"+cc.soc+"'>SoC</text>"
   s+="</g>"
   el.setAttribute('viewBox','0 0 '+W+' '+H)
   el.innerHTML=s
@@ -3981,8 +3991,9 @@ function renderBatChart(data,txEvs){
 
 function renderChgChart(data){
   var el=$('chg-chart'); if(!el) return
+  var cc=chartColors()
   if(!data||data.length<2){
-    el.innerHTML="<text x='50%' y='50%' font-size='14' font-family='monospace' text-anchor='middle' dominant-baseline='middle' style='fill:var(--muted)'>Collecting data\u2026</text>"
+    el.innerHTML="<text x='50%' y='50%' font-size='14' font-family='monospace' text-anchor='middle' dominant-baseline='middle' fill='"+cc.muted+"'>Collecting data\u2026</text>"
     return
   }
   var md=chartDims(el,280,260)
@@ -4013,32 +4024,32 @@ function renderChgChart(data){
   function xp(i){return (PL+(ts[i]-t0)/tspan*CW).toFixed(1)}
   function yv(v){return (PT+CH-(v-vlo)/vrng*CH).toFixed(1)}
   function ya(a){return (PT+CH-(a-alo)/arng*CH).toFixed(1)}
-  var s="<rect width='"+W+"' height='"+H+"' style='fill:var(--chart-bg)' rx='6'/>"
-  s+="<g stroke='var(--chart-grid)' stroke-width='1'>"
+  var s="<rect width='"+W+"' height='"+H+"' fill='"+cc.bg+"' rx='4'/>"
+  s+="<g stroke='"+cc.grid+"' stroke-width='1'>"
   for(var i=0;i<=4;i++){var gy=(PT+CH*i/4).toFixed(1);s+="<line x1='"+PL+"' y1='"+gy+"' x2='"+(W-PR)+"' y2='"+gy+"'/>"}
   s+="</g>"
-  s+="<g font-size='"+fs+"' font-family='monospace' text-anchor='end' style='fill:var(--cv)'>"
+  s+="<g font-size='"+fs+"' font-family='monospace' text-anchor='end' fill='"+cc.v+"'>"
   for(var i=0;i<=4;i++) s+="<text x='"+(PL-6)+"' y='"+(PT+CH*i/4+5).toFixed(1)+"'>"+(vhi-vrng*i/4).toFixed(2)+"V</text>"
   s+="</g>"
-  s+="<g font-size='"+fs+"' font-family='monospace' text-anchor='start' style='fill:var(--ca)'>"
+  s+="<g font-size='"+fs+"' font-family='monospace' text-anchor='start' fill='"+cc.a+"'>"
   for(var i=0;i<=4;i++) s+="<text x='"+(W-PR+6)+"' y='"+(PT+CH*i/4+5).toFixed(1)+"'>"+(ahi-arng*i/4).toFixed(1)+"A</text>"
   s+="</g>"
-  s+=timeTicks(t0,t1,tspan,PL,CW,PT,CH,H-8,fsTick)
+  s+=timeTicks(t0,t1,tspan,PL,CW,PT,CH,H-8,fsTick,cc)
   var pts=smoothV.map(function(v,i){return xp(i)+','+yv(v)}).join(' ')
-  s+="<polyline fill='none' stroke='var(--cv)' stroke-width='"+sw+"' stroke-linecap='round' stroke-linejoin='round' points='"+pts+"'/>"
+  s+="<polyline fill='none' stroke='"+cc.v+"' stroke-width='"+sw+"' stroke-linecap='round' stroke-linejoin='round' points='"+pts+"'/>"
   pts=smoothA.map(function(a,i){return xp(i)+','+ya(a)}).join(' ')
-  s+="<polyline fill='none' stroke='var(--ca)' stroke-width='"+sw2+"' stroke-dasharray='6,4' stroke-linecap='round' stroke-linejoin='round' points='"+pts+"'/>"
+  s+="<polyline fill='none' stroke='"+cc.a+"' stroke-width='"+sw2+"' stroke-dasharray='6,4' stroke-linecap='round' stroke-linejoin='round' points='"+pts+"'/>"
   if(hasSol){
     pts=data.map(function(d,i){return xp(i)+','+yv(d.sol_v)}).join(' ')
-    s+="<polyline fill='none' stroke='var(--csol)' stroke-width='"+sw2+"' stroke-dasharray='4,5' stroke-linecap='round' stroke-linejoin='round' points='"+pts+"'/>"
-    s+="<line x1='"+(PL+180)+"' y1='"+legY+"' x2='"+(PL+200)+"' y2='"+legY+"' stroke='var(--csol)' stroke-width='"+sw2+"' stroke-dasharray='4,5' stroke-linecap='round'/>"
-    s+="<text x='"+(PL+206)+"' y='"+(legY+4)+"' font-size='"+fs+"' style='fill:var(--csol)'>Solar</text>"
+    s+="<polyline fill='none' stroke='"+cc.sol+"' stroke-width='"+sw2+"' stroke-dasharray='4,5' stroke-linecap='round' stroke-linejoin='round' points='"+pts+"'/>"
+    s+="<line x1='"+(PL+180)+"' y1='"+legY+"' x2='"+(PL+200)+"' y2='"+legY+"' stroke='"+cc.sol+"' stroke-width='"+sw2+"' stroke-dasharray='4,5' stroke-linecap='round'/>"
+    s+="<text x='"+(PL+206)+"' y='"+(legY+4)+"' font-size='"+fs+"' fill='"+cc.sol+"'>Solar</text>"
   }
   s+="<g font-size='"+fs+"' font-family='monospace'>"
-  s+="<line x1='"+(PL+8)+"' y1='"+legY+"' x2='"+(PL+28)+"' y2='"+legY+"' stroke='var(--cv)' stroke-width='"+sw+"' stroke-linecap='round'/>"
-  s+="<text x='"+(PL+34)+"' y='"+(legY+4)+"' style='fill:var(--cv)'>Bat V</text>"
-  s+="<line x1='"+(PL+100)+"' y1='"+legY+"' x2='"+(PL+120)+"' y2='"+legY+"' stroke='var(--ca)' stroke-width='"+sw2+"' stroke-dasharray='6,4' stroke-linecap='round'/>"
-  s+="<text x='"+(PL+126)+"' y='"+(legY+4)+"' style='fill:var(--ca)'>Charge A</text>"
+  s+="<line x1='"+(PL+8)+"' y1='"+legY+"' x2='"+(PL+28)+"' y2='"+legY+"' stroke='"+cc.v+"' stroke-width='"+sw+"' stroke-linecap='round'/>"
+  s+="<text x='"+(PL+34)+"' y='"+(legY+4)+"' fill='"+cc.v+"'>Bat V</text>"
+  s+="<line x1='"+(PL+100)+"' y1='"+legY+"' x2='"+(PL+120)+"' y2='"+legY+"' stroke='"+cc.a+"' stroke-width='"+sw2+"' stroke-dasharray='6,4' stroke-linecap='round'/>"
+  s+="<text x='"+(PL+126)+"' y='"+(legY+4)+"' fill='"+cc.a+"'>Charge A</text>"
   s+="</g>"
   el.setAttribute('viewBox','0 0 '+W+' '+H)
   el.innerHTML=s
@@ -4540,8 +4551,9 @@ std::string HttpServer::html_solar_page(const std::string& init_settings,
          "(function(){var n=document.querySelectorAll('nav a[href^=\"/\"]');for(var i=0;i<n.length;i++){n[i].addEventListener('click',function(e){if(e.ctrlKey||e.metaKey||e.shiftKey)return;var h=this.getAttribute('href');if(!h)return;e.preventDefault();location.href=h})}})();\n"
          "initSettings();loadAll();setInterval(loadAll,300000)\n"
          "fetch('/api/shelly/status').then(function(r){return r.json()}).then(function(s){if(s.test_active){var b=$('test-banner');if(b){b.classList.add('show');upTestBanner();setInterval(upTestBanner,5000)}}}).catch(function(){})\n"
-         + grid_event_banner_js() +
-         "</script></body></html>";
+         "</script>"
+         + grid_event_banner_js()
+         + "</body></html>";
     return o;
 }
 
