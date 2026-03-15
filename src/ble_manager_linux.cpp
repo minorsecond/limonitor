@@ -64,7 +64,12 @@ struct BleManager::Impl {
     guint               poll_src{0};
     guint               reconnect_src{0};
     guint               char_find_src{0};
+    guint               scan_stuck_src{0};
     int                 char_find_attempt{0};
+    int                 hard_reset_count{0};
+    int                 connect_fail_count{0};
+    static constexpr int SCAN_STUCK_TIMEOUT_S  = 90;
+    static constexpr int CONNECT_FAIL_THRESHOLD = 3;
     std::chrono::steady_clock::time_point last_data_time;
 
     std::thread thread;
@@ -96,11 +101,12 @@ struct BleManager::Impl {
 
         g_autoptr(GVariant) nv = g_dbus_proxy_get_cached_property(dev, "Name");
         std::string name = gv_str(nv);
-        if (!name.empty() && str_icontains(name, target)) return true;
+        // Match if name contains target OR target contains name (handles truncated ad names)
+        if (!name.empty() && (str_icontains(name, target) || str_icontains(target, name))) return true;
 
         g_autoptr(GVariant) al = g_dbus_proxy_get_cached_property(dev, "Alias");
         std::string alias = gv_str(al);
-        if (!alias.empty() && str_icontains(alias, target)) return true;
+        if (!alias.empty() && (str_icontains(alias, target) || str_icontains(target, alias))) return true;
 
         return false;
     }
@@ -174,9 +180,10 @@ struct BleManager::Impl {
 
         g_main_loop_run(gloop);
 
-        if (char_find_src) { g_source_remove(char_find_src); char_find_src = 0; }
-        if (poll_src)      { g_source_remove(poll_src);      poll_src = 0; }
-        if (reconnect_src) { g_source_remove(reconnect_src); reconnect_src = 0; }
+        if (char_find_src)  { g_source_remove(char_find_src);  char_find_src  = 0; }
+        if (poll_src)       { g_source_remove(poll_src);       poll_src       = 0; }
+        if (reconnect_src)  { g_source_remove(reconnect_src);  reconnect_src  = 0; }
+        if (scan_stuck_src) { g_source_remove(scan_stuck_src); scan_stuck_src = 0; }
         if (notify_char) {
             if (char_sig) { g_signal_handler_disconnect(notify_char, char_sig); char_sig = 0; }
             g_dbus_proxy_call_sync(notify_char, "StopNotify",
@@ -242,6 +249,7 @@ struct BleManager::Impl {
         g_autoptr(GVariant) d = g_dbus_proxy_get_cached_property(adapter, "Discovering");
         if (d && g_variant_get_boolean(d)) {
             LOG_INFO("BLE: discovery already active");
+            start_scan_stuck_timer();
             return;
         }
 
@@ -258,6 +266,7 @@ struct BleManager::Impl {
             g_error_free(err);
         } else {
             LOG_INFO("BLE: scanning for devices…");
+            start_scan_stuck_timer();
         }
     }
 
@@ -297,7 +306,13 @@ struct BleManager::Impl {
                     if (!g_error_matches(e, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
                         LOG_WARN("BLE: Connect failed: %s", e->message);
                         self->set_state(BleState::DISCONNECTED);
-                        self->schedule_reconnect();
+                        if (++self->connect_fail_count >= CONNECT_FAIL_THRESHOLD) {
+                            LOG_WARN("BLE: %d consecutive connect failures — hard reset", self->connect_fail_count);
+                            self->connect_fail_count = 0;
+                            self->hard_reset_device();
+                        } else {
+                            self->schedule_reconnect();
+                        }
                     }
                     g_error_free(e);
                 } else {
@@ -340,6 +355,7 @@ struct BleManager::Impl {
                         g_error_free(e);
                     } else {
                         LOG_INFO("BLE: ready");
+                        self->connect_fail_count = 0;
                         self->set_state(BleState::READY);
                         self->schedule_poll();
                     }
@@ -481,10 +497,115 @@ struct BleManager::Impl {
         }
     }
 
+    void start_scan_stuck_timer() {
+        if (scan_stuck_src) { g_source_remove(scan_stuck_src); scan_stuck_src = 0; }
+        GSource* src = g_timeout_source_new_seconds(SCAN_STUCK_TIMEOUT_S);
+        g_source_set_callback(src, cb_scan_stuck, this, nullptr);
+        scan_stuck_src = g_source_attach(src, gctx);
+        g_source_unref(src);
+    }
+
+    // Hard reset: disconnect the device from BlueZ and remove it from BlueZ's
+    // device cache so the next scan rediscovers it fresh.  This clears stale
+    // connection state that can get the BLE stack stuck in SCANNING indefinitely.
+    void hard_reset_device() {
+        LOG_WARN("BLE: hard reset #%d — removing stale device from BlueZ cache", ++hard_reset_count);
+
+        // Locate the target device in the object manager
+        std::string dev_path;
+        if (obj_mgr) {
+            GList* objects = g_dbus_object_manager_get_objects(obj_mgr);
+            for (GList* l = objects; l && dev_path.empty(); l = l->next) {
+                GDBusObject*    obj   = G_DBUS_OBJECT(l->data);
+                GDBusInterface* iface = g_dbus_object_get_interface(obj, "org.bluez.Device1");
+                if (iface) {
+                    GDBusProxy* proxy = G_DBUS_PROXY(iface);
+                    if (is_target(proxy))
+                        dev_path = g_dbus_object_get_object_path(obj);
+                    g_object_unref(iface);
+                }
+            }
+            g_list_free_full(objects, g_object_unref);
+        }
+
+        if (dev_path.empty()) {
+            LOG_WARN("BLE: hard reset — device not in BlueZ cache; stopping stuck scan and restarting");
+            // Stop the current (stuck) discovery so start_discovery() gets a fresh scan.
+            // Without this, BlueZ reports Discovering=true indefinitely and we skip out early.
+            GError* err2 = nullptr;
+            g_autoptr(GDBusProxy) adp = g_dbus_proxy_new_for_bus_sync(
+                G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, nullptr,
+                "org.bluez", adapter_path.c_str(), "org.bluez.Adapter1", nullptr, &err2);
+            if (err2) { g_error_free(err2); err2 = nullptr; }
+            if (adp) {
+                g_dbus_proxy_call_sync(adp, "StopDiscovery",
+                    nullptr, G_DBUS_CALL_FLAGS_NONE, 5000, nullptr, &err2);
+                if (err2) { g_error_free(err2); err2 = nullptr; }
+                LOG_INFO("BLE: hard reset — StopDiscovery done, will restart scan in 3s");
+            }
+            // If we've been failing for a long time, also power-cycle the adapter
+            if (hard_reset_count >= 4) {
+                LOG_WARN("BLE: %d hard resets — power-cycling BT adapter", hard_reset_count);
+                g_autoptr(GDBusProxy) props = g_dbus_proxy_new_for_bus_sync(
+                    G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, nullptr,
+                    "org.bluez", adapter_path.c_str(), "org.freedesktop.DBus.Properties", nullptr, nullptr);
+                if (props) {
+                    g_dbus_proxy_call_sync(props, "Set",
+                        g_variant_new("(ssv)", "org.bluez.Adapter1", "Powered", g_variant_new_boolean(FALSE)),
+                        G_DBUS_CALL_FLAGS_NONE, 5000, nullptr, nullptr);
+                    g_usleep(2000000); // 2s — blocks GLib loop intentionally during adapter reset
+                    g_dbus_proxy_call_sync(props, "Set",
+                        g_variant_new("(ssv)", "org.bluez.Adapter1", "Powered", g_variant_new_boolean(TRUE)),
+                        G_DBUS_CALL_FLAGS_NONE, 5000, nullptr, nullptr);
+                    LOG_INFO("BLE: adapter power-cycled");
+                    hard_reset_count = 0; // restart the escalation counter
+                }
+            }
+            schedule_reconnect(3);
+            return;
+        }
+
+        // Disconnect first (best-effort; ignore errors)
+        GError* err = nullptr;
+        g_autoptr(GDBusProxy) dev_proxy = g_dbus_proxy_new_for_bus_sync(
+            G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, nullptr,
+            "org.bluez", dev_path.c_str(), "org.bluez.Device1", nullptr, &err);
+        if (err) { g_error_free(err); err = nullptr; }
+        if (dev_proxy) {
+            g_autoptr(GVariant) conn = g_dbus_proxy_get_cached_property(dev_proxy, "Connected");
+            if (conn && g_variant_get_boolean(conn)) {
+                LOG_INFO("BLE: hard reset — disconnecting device");
+                g_dbus_proxy_call_sync(dev_proxy, "Disconnect",
+                    nullptr, G_DBUS_CALL_FLAGS_NONE, 5000, nullptr, nullptr);
+            }
+        }
+
+        // Remove device from adapter cache so the next scan is fresh
+        g_autoptr(GDBusProxy) adapter = g_dbus_proxy_new_for_bus_sync(
+            G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, nullptr,
+            "org.bluez", adapter_path.c_str(), "org.bluez.Adapter1", nullptr, &err);
+        if (err) { g_error_free(err); err = nullptr; }
+        if (adapter) {
+            LOG_INFO("BLE: hard reset — calling RemoveDevice(%s)", dev_path.c_str());
+            g_autoptr(GVariant) r = g_dbus_proxy_call_sync(adapter, "RemoveDevice",
+                g_variant_new("(o)", dev_path.c_str()),
+                G_DBUS_CALL_FLAGS_NONE, 10000, nullptr, &err);
+            if (err) {
+                LOG_WARN("BLE: RemoveDevice failed: %s — will retry via normal reconnect", err->message);
+                g_error_free(err);
+            } else {
+                LOG_INFO("BLE: hard reset — device removed, scanning fresh");
+            }
+        }
+
+        schedule_reconnect(3);
+    }
+
     void schedule_reconnect(int delay_s = 5) {
-        if (char_find_src) { g_source_remove(char_find_src); char_find_src = 0; }
-        if (reconnect_src) { g_source_remove(reconnect_src); reconnect_src = 0; }
-        if (poll_src)      { g_source_remove(poll_src);      poll_src = 0; }
+        if (char_find_src)  { g_source_remove(char_find_src);  char_find_src  = 0; }
+        if (reconnect_src)  { g_source_remove(reconnect_src);  reconnect_src  = 0; }
+        if (poll_src)       { g_source_remove(poll_src);       poll_src       = 0; }
+        if (scan_stuck_src) { g_source_remove(scan_stuck_src); scan_stuck_src = 0; }
         if (notify_char) {
             if (char_sig) { g_signal_handler_disconnect(notify_char, char_sig); char_sig = 0; }
             g_object_unref(notify_char); notify_char = nullptr;
@@ -496,6 +617,9 @@ struct BleManager::Impl {
         }
         device_path.clear();
         { std::lock_guard<std::mutex> lk(state_mu); device_address.clear(); device_name.clear(); }
+        // Always land in DISCONNECTED so try_find_device() and start_discovery() can re-enter
+        // (they guard on DISCONNECTED/ERROR/SCANNING; DISCOVERING/CONNECTING would deadlock them)
+        set_state(BleState::DISCONNECTED);
         LOG_INFO("BLE: reconnect in %d s", delay_s);
         GSource* src = g_timeout_source_new_seconds(delay_s);
         g_source_set_callback(src, cb_reconnect, this, nullptr);
@@ -570,6 +694,15 @@ struct BleManager::Impl {
             self->data_cb(std::vector<uint8_t>(d, d + n));
     }
 
+    static gboolean cb_scan_stuck(gpointer ud) {
+        auto* self = static_cast<Impl*>(ud);
+        self->scan_stuck_src = 0;
+        if (self->state.load() == BleState::SCANNING) {
+            LOG_WARN("BLE: stuck in SCANNING for >%ds — initiating hard reset", SCAN_STUCK_TIMEOUT_S);
+            self->hard_reset_device();
+        }
+        return G_SOURCE_REMOVE;
+    }
     static gboolean cb_try_find_chars(gpointer ud) {
         auto* self = static_cast<Impl*>(ud); self->char_find_src = 0; self->do_find_chars(); return G_SOURCE_REMOVE;
     }
