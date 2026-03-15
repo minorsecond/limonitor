@@ -2406,7 +2406,8 @@ h1{font-size:1.5rem;font-weight:800;letter-spacing:-.02em;margin-bottom:1rem;col
 .dt td:first-child{color:var(--muted);width:40%}
 @media(max-width:640px){.wrap{padding:1rem}nav{padding:.75rem 1rem;overflow-x:auto;white-space:nowrap}.card{padding:1.25rem}}
 </style>)CSS";
-    o += extra_style;
+    if (!extra_style.empty())
+        o += "<style>" + extra_style + "</style>\n";
     o += "</head><body>\n";
     return o;
 }

@@ -262,6 +262,87 @@ void test_default_config_full_roundtrip() {
            "Default round-trip preserves TX level count");
 }
 
+// ─── idle_w_override / effective_idle_w ──────────────────────────────────────
+
+void test_effective_idle_w_default_is_minus1() {
+    SystemLoadConfig cfg;
+    ASSERT(approx_eq(cfg.idle_w_override, -1.0), "Default idle_w_override is -1");
+}
+
+void test_effective_idle_w_no_override_returns_total() {
+    SystemLoadConfig cfg = SystemLoadConfig::default_config();
+    // No override set → effective_idle_w() == total_idle_w()
+    ASSERT(approx_eq(cfg.effective_idle_w(), cfg.total_idle_w()),
+           "effective_idle_w with no override equals total_idle_w");
+}
+
+void test_effective_idle_w_override_used() {
+    SystemLoadConfig cfg = SystemLoadConfig::default_config();
+    cfg.idle_w_override = 15.0;
+    ASSERT(approx_eq(cfg.effective_idle_w(), 15.0),
+           "effective_idle_w returns override value when set");
+}
+
+void test_effective_idle_w_override_zero_allowed() {
+    SystemLoadConfig cfg = SystemLoadConfig::default_config();
+    cfg.idle_w_override = 0.0;
+    ASSERT(approx_eq(cfg.effective_idle_w(), 0.0),
+           "effective_idle_w returns 0 when override is 0");
+}
+
+void test_runtime_receive_h_uses_override() {
+    SystemLoadConfig cfg = SystemLoadConfig::default_config();
+    // Default total_idle_w = 9.80; override to 5.0 → runtime doubles
+    double rt_default = cfg.runtime_receive_h(980.0); // 980 / 9.80 = 100h
+    cfg.idle_w_override = 5.0;
+    double rt_override = cfg.runtime_receive_h(980.0); // 980 / 5.0 = 196h
+    ASSERT(approx_eq(rt_default, 100.0, 0.01), "Baseline receive runtime = 100h");
+    ASSERT(approx_eq(rt_override, 196.0, 0.01), "Override halves load → runtime doubles");
+}
+
+void test_effective_load_w_uses_override() {
+    SystemLoadConfig cfg = SystemLoadConfig::default_config();
+    // Idle override changes the idle portion of the TX duty calculation.
+    // comp_idx=2 (radio), level_idx=0 (5W RF, dc_in_w=44.2)
+    // total_idle = 9.80; radio idle = 3.80; non-radio = 6.00
+    // With 0% TX: effective_load = effective_idle_w = 20.0 (override)
+    cfg.idle_w_override = 20.0;
+    double load_0tx = cfg.effective_load_w(0.0, 2, 0);
+    ASSERT(approx_eq(load_0tx, 20.0, 0.01),
+           "0% TX with override returns override value");
+
+    // With 100% TX: total_tx_w = override - comp.idle_w + tx.dc_in_w
+    //             = 20.0 - 3.80 + 44.2 = 60.4
+    double load_100tx = cfg.effective_load_w(100.0, 2, 0);
+    ASSERT(approx_eq(load_100tx, 60.4, 0.01),
+           "100% TX with override adjusts formula correctly");
+}
+
+void test_json_roundtrip_idle_w_override_negative() {
+    SystemLoadConfig cfg = SystemLoadConfig::default_config();
+    // Default -1 should survive round-trip
+    auto cfg2 = SystemLoadConfig::from_json(cfg.to_json());
+    ASSERT(approx_eq(cfg2.idle_w_override, -1.0),
+           "Default idle_w_override=-1 preserved in JSON round-trip");
+}
+
+void test_json_roundtrip_idle_w_override_positive() {
+    SystemLoadConfig cfg = SystemLoadConfig::default_config();
+    cfg.idle_w_override = 12.5;
+    auto cfg2 = SystemLoadConfig::from_json(cfg.to_json());
+    ASSERT(approx_eq(cfg2.idle_w_override, 12.5, 1e-6),
+           "Positive idle_w_override preserved in JSON round-trip");
+}
+
+void test_json_from_old_format_defaults_override_to_minus1() {
+    // Old JSON without idle_w_override field should default to -1
+    std::string old_json = R"({"components":[{"name":"Pi","purpose":"ctrl","idle_a":0.4,"idle_w":5.0,"tx_levels":[]}]})";
+    auto cfg = SystemLoadConfig::from_json(old_json);
+    ASSERT(cfg.components.size() == 1, "Old format parsed correctly");
+    ASSERT(approx_eq(cfg.idle_w_override, -1.0),
+           "Old JSON without idle_w_override defaults to -1 (backwards compat)");
+}
+
 // ─── DB storage / retrieval ──────────────────────────────────────────────────
 
 void test_db_system_load_default_when_empty() {

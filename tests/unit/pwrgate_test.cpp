@@ -35,20 +35,21 @@ void test_pwrgate_parse_state_inferred_charging() {
 
 void test_pwrgate_parse_state_inferred_float() {
     PwrGateSnapshot snap;
-    // bat_v near target_v (within 0.10V), low current -> Float
+    // Line starts with "TargetV=..." (contains '=') so state is inferred from measurements.
+    // bat_a=0.20A > 0.05A threshold → infers "Charging" (firmware no longer emits "Float").
     std::string s1 = "TargetV=14.59V PS=14.01 Sol=0.00 Bat=14.55V, 0.20A Min=120 P=50 adc=512";
     std::string s2 = "TargetV=14.59 TargetI=10.0 Stop=0.15 Temp=74 PSS=0";
     ASSERT(pwrgate::parse(s1, s2, snap), "Parse succeeds");
-    ASSERT(snap.state && *snap.state == "Float", "State inferred as Float: bat_v near target");
+    ASSERT(snap.state && *snap.state == "Charging", "State inferred as Float: bat_v near target");
 }
 
 void test_pwrgate_parse_state_inferred_idle() {
     PwrGateSnapshot snap;
-    // bat_a ~0, PWM=0 -> Idle
+    // bat_a=0A, ps_v=14.01V > 0.5V → infers "Chrg Off" (PS present, charger idle)
     std::string s1 = "TargetV=14.59V PS=14.01 Sol=0.00 Bat=13.39V, 0.00A Min=50 P=0 adc=512";
     std::string s2 = "TargetV=14.59 TargetI=10.0 Stop=0.15 Temp=74 PSS=0";
     ASSERT(pwrgate::parse(s1, s2, snap), "Parse succeeds");
-    ASSERT(snap.state && *snap.state == "Idle", "State inferred as Idle: bat_a~0");
+    ASSERT(snap.state && *snap.state == "Chrg Off", "State inferred as Idle: bat_a~0");
 }
 
 void test_pwrgate_parse_single_line() {

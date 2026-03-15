@@ -164,6 +164,15 @@ void test_default_config_full_roundtrip();
 void test_db_system_load_default_when_empty();
 void test_db_system_load_store_and_retrieve();
 void test_db_system_load_overwrite();
+void test_effective_idle_w_default_is_minus1();
+void test_effective_idle_w_no_override_returns_total();
+void test_effective_idle_w_override_used();
+void test_effective_idle_w_override_zero_allowed();
+void test_runtime_receive_h_uses_override();
+void test_effective_load_w_uses_override();
+void test_json_roundtrip_idle_w_override_negative();
+void test_json_roundtrip_idle_w_override_positive();
+void test_json_from_old_format_defaults_override_to_minus1();
 
 void test_ble_icontains_basic_match();
 void test_ble_icontains_no_match();
@@ -370,6 +379,15 @@ int main() {
     test_db_system_load_default_when_empty();
     test_db_system_load_store_and_retrieve();
     test_db_system_load_overwrite();
+    test_effective_idle_w_default_is_minus1();
+    test_effective_idle_w_no_override_returns_total();
+    test_effective_idle_w_override_used();
+    test_effective_idle_w_override_zero_allowed();
+    test_runtime_receive_h_uses_override();
+    test_effective_load_w_uses_override();
+    test_json_roundtrip_idle_w_override_negative();
+    test_json_roundtrip_idle_w_override_positive();
+    test_json_from_old_format_defaults_override_to_minus1();
     printf("PASS: System load calibration\n");
 
     test_ble_icontains_basic_match();
