@@ -27,17 +27,20 @@ struct SystemComponent {
 // Full system load configuration — a collection of components.
 struct SystemLoadConfig {
     std::vector<SystemComponent> components;
+    double idle_w_override{-1.0}; // -1 = auto (use total_idle_w())
 
     bool empty() const { return components.empty(); }
 
     double total_idle_w() const;
     double total_idle_a() const;
+    // Returns idle_w_override if >= 0, otherwise total_idle_w()
+    double effective_idle_w() const;
 
     // Effective average load given TX duty cycle at one specific TX level.
     //   comp_idx  — index into components[] that has TX levels (-1 = no TX)
     //   level_idx — which TxLevel in that component (0-based)
-    // Formula: total_idle_w * (1 - duty/100) + total_tx_system_w * (duty/100)
-    // where total_tx_system_w = total_idle_w - comp.idle_w + tx.dc_in_w
+    // Formula: effective_idle_w * (1 - duty/100) + total_tx_system_w * (duty/100)
+    // where total_tx_system_w = effective_idle_w - comp.idle_w + tx.dc_in_w
     double effective_load_w(double tx_duty_pct,
                             int comp_idx = -1,
                             int level_idx = 0) const;

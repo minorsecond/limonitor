@@ -1555,9 +1555,20 @@ std::string HttpServer::analytics_json(const AnalyticsSnapshot& a,
                 total_tx_w = slc.total_idle_w() - tc.idle_w + tc.tx_levels[tx_level].dc_in_w;
             }
 
+            // Active mode label and wattage
+            std::string active_mode_label = (tx_comp >= 0)
+                ? slc.components[tx_comp].name + " \u2014 " + slc.components[tx_comp].tx_levels[tx_level].label
+                : "Idle";
+            double active_load_w = (tx_comp >= 0)
+                ? slc.effective_load_w(10.0, tx_comp, tx_level)
+                : slc.effective_idle_w();
+            double active_runtime_h = (tx_comp >= 0) ? tx_h : rx_h;
+
             o += ",\n  \"system_load\": {";
             o += "\n    \"total_idle_w\": " + jdbl(slc.total_idle_w(), 2);
             o += ",\n    \"total_idle_a\": " + jdbl(slc.total_idle_a(), 3);
+            o += ",\n    \"effective_idle_w\": " + jdbl(slc.effective_idle_w(), 2);
+            o += ",\n    \"idle_w_override\": " + jdbl(slc.idle_w_override, 2);
             o += ",\n    \"runtime_receive_h\": " + jdbl(rx_h, 1);
             o += ",\n    \"runtime_receive_d\": " + jdbl(rx_h / 24.0, 2);
             o += ",\n    \"runtime_tx_h\": " + jdbl(tx_h, 1);
@@ -1566,6 +1577,9 @@ std::string HttpServer::analytics_json(const AnalyticsSnapshot& a,
             o += ",\n    \"total_tx_w\": " + jdbl(total_tx_w, 1);
             o += ",\n    \"active_tx_comp\": " + std::to_string(tx_comp);
             o += ",\n    \"active_tx_level\": " + std::to_string(tx_level);
+            o += ",\n    \"active_mode_label\": " + jstr(active_mode_label);
+            o += ",\n    \"active_load_w\": " + jdbl(active_load_w, 2);
+            o += ",\n    \"active_runtime_h\": " + jdbl(active_runtime_h, 1);
             o += ",\n    \"usable_wh\": " + jdbl(usable_wh, 0);
             o += "\n  }";
         }
@@ -2893,6 +2907,8 @@ html.light .flow-node-load{fill:#e2e8f0}.flow-node-inactive{opacity:.45}
          "<tr><td>Full → 10%</td><td><span id=\"an-runtime-full\">—</span></td></tr>\n"
          "<tr><td>Current → 10%</td><td><span id=\"an-runtime-now\">—</span></td></tr>\n"
          "<tr><td>24h avg load</td><td><span id=\"an-avg-load-24h\">—</span></td></tr>\n"
+         "<tr id=\"an-cal-mode-row\" style=\"display:none\"><td>Active mode</td><td><span id=\"an-active-mode\">—</span></td></tr>\n"
+         "<tr id=\"an-cal-runtime-row\" style=\"display:none\"><td>Calibrated (current)</td><td><span id=\"an-cal-runtime\">—</span></td></tr>\n"
          "</table></div>\n";
     o += "<div class=\"acard\"><div class=\"card-title\">Battery Internal Resistance</div><table class=\"dt\">\n"
          "<tr><td>Resistance</td><td><span id=\"resistance-mohm\">—</span> mΩ</td></tr>\n"
@@ -3507,6 +3523,15 @@ function upAnalytics(){fetch('/api/analytics').then(function(r){return r.json()}
   sv('an-runtime-full',rf>0?(excF?'> 1000 h':fmt(rf,1)+' h'):'—')
   sv('an-runtime-now', rn>0?(excN?'> 1000 h':fmt(rn,1)+' h'):'—')
   sv('an-avg-load-24h',avg24>0?fmt(avg24,1)+' W':'—')
+  if(d.system_load){
+    var sl=d.system_load
+    var mRow=$('an-cal-mode-row'),rtRow=$('an-cal-runtime-row')
+    if(mRow)mRow.style.display=''
+    if(rtRow)rtRow.style.display=''
+    sv('an-active-mode',(sl.active_mode_label||'Idle')+' \u2014 '+fmt(sl.active_load_w||sl.effective_idle_w||sl.total_idle_w,2)+' W')
+    var arh=sl.active_runtime_h
+    sv('an-cal-runtime',arh>0?fmt(arh,1)+' h / '+(arh/24).toFixed(1)+' d':'—')
+  }
 
   // Performance Update
   (function(){
@@ -4874,10 +4899,35 @@ std::string HttpServer::html_settings_page(Database* db) {
 </div>
 
 <div class="card" id="summary-card">
-<div class="card-title">System Summary</div>
-<div class="row" style="display:flex;gap:1.5rem">
-  <div><span class="hint">Total idle current</span><br><strong id="sum-a">—</strong> A</div>
-  <div><span class="hint">Total idle power</span><br><strong id="sum-w">—</strong> W</div>
+<div class="card-title">System Wattage</div>
+<div style="display:flex;gap:1.5rem;flex-wrap:wrap;align-items:flex-end">
+  <div>
+    <span class="hint">From components</span><br>
+    <strong id="sum-a">—</strong> A &nbsp; / &nbsp; <strong id="sum-w">—</strong> W
+  </div>
+  <div style="flex:1;min-width:160px">
+    <span class="hint">Manual override &nbsp;<button type="button" class="btn btn-sm" id="sys-w-reset-btn" onclick="resetSysWOverride()" style="display:none">Reset</button></span><br>
+    <div style="display:flex;gap:.35rem;align-items:center">
+      <input type="number" id="sys-w-override" min="0" step="0.1" placeholder="auto"
+             style="width:90px;padding:.3rem .5rem;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text)">
+      <span>W</span>
+    </div>
+  </div>
+</div>
+<div id="eff-w-row" style="display:none;margin-top:.5rem;padding:.25rem .5rem;border-radius:6px;background:var(--bg2);font-size:.85rem">
+  Effective idle: <strong id="sum-eff-w">—</strong> W
+</div>
+</div>
+
+<div class="card">
+<div class="card-title">Active Operating Mode</div>
+<p style="font-size:.8rem;color:var(--muted);margin:.0 0 .6rem">Which load profile is currently active? Saved and used for dashboard runtime calculations.</p>
+<div style="display:flex;gap:.75rem;align-items:center;flex-wrap:wrap">
+  <select id="active-mode-sel"
+          style="flex:1;min-width:180px;padding:.4rem .5rem;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text)">
+    <option value="">Idle (receive only)</option>
+  </select>
+  <div id="active-mode-wattage" style="font-size:.85rem;color:var(--muted);white-space:nowrap">—</div>
 </div>
 </div>
 
@@ -4890,7 +4940,7 @@ std::string HttpServer::html_settings_page(Database* db) {
            style="width:100%;padding:.4rem .5rem;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text)">
   </div>
   <div class="row" style="flex:2;min-width:180px">
-    <label>TX power level</label>
+    <label>TX power level (what-if)</label>
     <select id="tx-level-sel"
             style="width:100%;padding:.4rem .5rem;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text)">
       <option value="">No TX levels defined</option>
@@ -4945,7 +4995,7 @@ function renderComponents(){
         +'<th style="text-align:right;padding:.2rem .4rem">RF out</th>'
         +'<th style="text-align:right;padding:.2rem .4rem">Radio A</th>'
         +'<th style="text-align:right;padding:.2rem .4rem">Radio W</th>'
-        +'<th style="text-align:right;padding:.2rem .4rem">Total W</th>'
+        +'<th style="text-align:right;padding:.2rem .4rem" title="Auto-calculated: system idle + radio TX draw">Sys W&#x2193;</th>'
         +'<th style="text-align:right;padding:.2rem .4rem">Eff.</th>'
         +'<th style="width:2rem"></th>'
         +'</tr></thead><tbody>';
@@ -4983,11 +5033,66 @@ function totalIdleA(){
   return (sysLoad.components||[]).reduce(function(s,c){return s+(+c.idle_a||0);},0);
 }
 
+function getOverrideW(){
+  var inp=document.getElementById('sys-w-override');
+  var v=inp?parseFloat(inp.value):-1;
+  return(!isNaN(v)&&v>=0)?v:-1;
+}
+
 function updateSummary(){
   var aw=document.getElementById('sum-w');
   var aa=document.getElementById('sum-a');
   if(aw)aw.textContent=totalIdleW().toFixed(2);
   if(aa)aa.textContent=totalIdleA().toFixed(3);
+  var ovr=getOverrideW();
+  var effW=ovr>=0?ovr:totalIdleW();
+  var effRow=document.getElementById('eff-w-row');
+  var effEl=document.getElementById('sum-eff-w');
+  var rstBtn=document.getElementById('sys-w-reset-btn');
+  if(effRow)effRow.style.display=ovr>=0?'':'none';
+  if(effEl)effEl.textContent=effW.toFixed(2);
+  if(rstBtn)rstBtn.style.display=ovr>=0?'':'none';
+}
+
+function resetSysWOverride(){
+  var inp=document.getElementById('sys-w-override');
+  if(inp){inp.value='';updateSummary();updateActiveModeDisplay();}
+}
+
+function buildActiveModeOptions(){
+  var sel=document.getElementById('active-mode-sel');
+  if(!sel)return;
+  var prev=sel.value;
+  sel.innerHTML='<option value="">Idle (receive only)</option>';
+  (sysLoad.components||[]).forEach(function(c,ci){
+    (c.tx_levels||[]).forEach(function(tx,ti){
+      var o=document.createElement('option');
+      o.value=ci+':'+ti;
+      o.textContent=c.name+' \u2014 '+tx.label;
+      sel.appendChild(o);
+    });
+  });
+  if(prev){for(var i=0;i<sel.options.length;i++){if(sel.options[i].value===prev){sel.value=prev;break;}}}
+}
+
+function updateActiveModeDisplay(){
+  var sel=document.getElementById('active-mode-sel');
+  var div=document.getElementById('active-mode-wattage');
+  if(!sel||!div)return;
+  var ovr=getOverrideW();
+  var effIdle=ovr>=0?ovr:totalIdleW();
+  if(!sel.value){
+    div.textContent='Idle draw: '+effIdle.toFixed(2)+' W / '+totalIdleA().toFixed(3)+' A';
+  } else {
+    var parts=sel.value.split(':');
+    var ci=parseInt(parts[0]),ti=parseInt(parts[1]);
+    var comps=sysLoad.components||[];
+    if(ci<comps.length&&ti<(comps[ci].tx_levels||[]).length){
+      var tx=comps[ci].tx_levels[ti];
+      var txSysW=effIdle-comps[ci].idle_w+tx.dc_in_w;
+      div.textContent='TX draw: '+txSysW.toFixed(1)+' W total (radio DC: '+tx.dc_in_w.toFixed(1)+' W)';
+    }
+  }
 }
 
 function buildTxLevelSel(){
@@ -5012,6 +5117,8 @@ function buildTxLevelSel(){
 
 function updateRtEstimates(){
   buildTxLevelSel();
+  buildActiveModeOptions();
+  updateActiveModeDisplay();
   computeRt();
 }
 
@@ -5092,19 +5199,22 @@ function editTxLevel(ci,ti){
 }
 
 function saveComponents(){
-  var sel=document.getElementById('tx-level-sel');
-  var activeParts=(sel&&sel.value)?sel.value.split(':'):[];
+  var modeSel=document.getElementById('active-mode-sel');
+  var activeParts=(modeSel&&modeSel.value)?modeSel.value.split(':'):[];
   var activeTxComp=activeParts.length===2?activeParts[0]:'-1';
   var activeTxLevel=activeParts.length===2?activeParts[1]:'0';
+  // Include idle_w_override in payload
+  var payload=JSON.parse(JSON.stringify(sysLoad));
+  payload.idle_w_override=getOverrideW();
   // Save component config
-  fetch('/api/system_load',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(sysLoad)})
+  fetch('/api/system_load',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
   .then(function(r){
     if(!r.ok)throw new Error();
-    // Save active TX level selection to settings
+    // Save active mode selection to settings
     return fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({active_tx_comp_idx:activeTxComp,active_tx_level_idx:activeTxLevel})});
   })
-  .then(function(r){
+  .then(function(){
     var m=document.getElementById('comp-msg');
     if(m){m.textContent='Saved.';m.className='msg'}
   })
@@ -5113,7 +5223,22 @@ function saveComponents(){
 
 // Init
 renderComponents();
-// Restore active TX level selection
+// Restore idle_w_override from saved config
+(function(){
+  var inp=document.getElementById('sys-w-override');
+  if(inp&&initSysLoad.idle_w_override>=0){inp.value=initSysLoad.idle_w_override;}
+  updateSummary();
+})();
+// Restore active mode selection
+(function(){
+  var sel=document.getElementById('active-mode-sel');
+  if(sel&&initActiveTxComp>=0){
+    var v=initActiveTxComp+':'+initActiveTxLevel;
+    for(var i=0;i<sel.options.length;i++){if(sel.options[i].value===v){sel.value=v;break;}}
+  }
+  updateActiveModeDisplay();
+})();
+// Restore what-if tx-level-sel
 (function(){
   var sel=document.getElementById('tx-level-sel');
   if(sel&&initActiveTxComp>=0){
@@ -5121,6 +5246,8 @@ renderComponents();
     for(var i=0;i<sel.options.length;i++){if(sel.options[i].value===v){sel.value=v;break;}}
   }
 })();
+document.getElementById('sys-w-override').addEventListener('input',function(){updateSummary();updateActiveModeDisplay();});
+document.getElementById('active-mode-sel').addEventListener('change',updateActiveModeDisplay);
 )HTML";
     o += common_scripts("");
     o += R"JS(<script>

@@ -183,10 +183,15 @@ double SystemLoadConfig::total_idle_a() const {
     return sum;
 }
 
+double SystemLoadConfig::effective_idle_w() const {
+    if (idle_w_override >= 0.0) return idle_w_override;
+    return total_idle_w();
+}
+
 double SystemLoadConfig::effective_load_w(double tx_duty_pct,
                                            int comp_idx,
                                            int level_idx) const {
-    double idle = total_idle_w();
+    double idle = effective_idle_w();
     if (comp_idx < 0 || comp_idx >= static_cast<int>(components.size())) return idle;
     const auto& comp = components[comp_idx];
     if (level_idx < 0 || level_idx >= static_cast<int>(comp.tx_levels.size())) return idle;
@@ -198,7 +203,7 @@ double SystemLoadConfig::effective_load_w(double tx_duty_pct,
 }
 
 double SystemLoadConfig::runtime_receive_h(double usable_wh) const {
-    double load = total_idle_w();
+    double load = effective_idle_w();
     if (load < 0.01 || usable_wh <= 0) return 0.0;
     return usable_wh / load;
 }
@@ -215,7 +220,7 @@ double SystemLoadConfig::runtime_with_tx_h(double usable_wh,
 std::string SystemLoadConfig::to_json() const {
     std::string o;
     o.reserve(1024);
-    o += "{\"components\":[";
+    o += "{\"idle_w_override\":" + dbl_str(idle_w_override) + ",\"components\":[";
     for (size_t i = 0; i < components.size(); ++i) {
         const auto& c = components[i];
         if (i > 0) o += ',';
@@ -241,6 +246,7 @@ std::string SystemLoadConfig::to_json() const {
 
 SystemLoadConfig SystemLoadConfig::from_json(const std::string& json) {
     SystemLoadConfig cfg;
+    cfg.idle_w_override = parse_double_field(json, "idle_w_override", -1.0);
     std::string arr_str = extract_array_field(json, "components");
     auto comp_objs = split_json_objects(arr_str);
     cfg.components.reserve(comp_objs.size());
