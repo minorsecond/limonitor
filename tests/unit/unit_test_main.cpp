@@ -165,6 +165,32 @@ void test_db_system_load_default_when_empty();
 void test_db_system_load_store_and_retrieve();
 void test_db_system_load_overwrite();
 
+void test_ble_icontains_basic_match();
+void test_ble_icontains_no_match();
+void test_ble_icontains_edge_cases();
+void test_ble_icontains_device_names();
+void test_ble_address_match_exact();
+void test_ble_address_match_case_insensitive();
+void test_ble_address_no_match();
+void test_ble_address_empty();
+void test_ble_name_match_exact();
+void test_ble_name_match_target_is_longer();
+void test_ble_name_match_name_is_longer();
+void test_ble_name_match_case_insensitive();
+void test_ble_name_no_match();
+void test_ble_name_empty();
+void test_ble_reconnect_constants();
+void test_ble_reconnect_connect_fail_below_threshold();
+void test_ble_reconnect_connect_fail_at_threshold();
+void test_ble_reconnect_connect_fail_above_threshold();
+void test_ble_reconnect_success_resets_fail_count();
+void test_ble_reconnect_hard_reset_increments();
+void test_ble_reconnect_hard_reset_below_power_cycle();
+void test_ble_reconnect_hard_reset_at_power_cycle_threshold();
+void test_ble_reconnect_power_cycle_resets_count();
+void test_ble_reconnect_begin_hard_reset_clears_connect_fails();
+void test_ble_reconnect_full_lifecycle();
+
 int main() {
     printf("=== limonitor unit tests ===\n");
 
@@ -345,6 +371,33 @@ int main() {
     test_db_system_load_store_and_retrieve();
     test_db_system_load_overwrite();
     printf("PASS: System load calibration\n");
+
+    test_ble_icontains_basic_match();
+    test_ble_icontains_no_match();
+    test_ble_icontains_edge_cases();
+    test_ble_icontains_device_names();
+    test_ble_address_match_exact();
+    test_ble_address_match_case_insensitive();
+    test_ble_address_no_match();
+    test_ble_address_empty();
+    test_ble_name_match_exact();
+    test_ble_name_match_target_is_longer();
+    test_ble_name_match_name_is_longer();
+    test_ble_name_match_case_insensitive();
+    test_ble_name_no_match();
+    test_ble_name_empty();
+    test_ble_reconnect_constants();
+    test_ble_reconnect_connect_fail_below_threshold();
+    test_ble_reconnect_connect_fail_at_threshold();
+    test_ble_reconnect_connect_fail_above_threshold();
+    test_ble_reconnect_success_resets_fail_count();
+    test_ble_reconnect_hard_reset_increments();
+    test_ble_reconnect_hard_reset_below_power_cycle();
+    test_ble_reconnect_hard_reset_at_power_cycle_threshold();
+    test_ble_reconnect_power_cycle_resets_count();
+    test_ble_reconnect_begin_hard_reset_clears_connect_fails();
+    test_ble_reconnect_full_lifecycle();
+    printf("PASS: BLE reconnect logic\n");
 
     printf("\nALL UNIT TESTS PASSED\n");
     return 0;
