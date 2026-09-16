@@ -40,7 +40,12 @@ static bool run_checks(const BatterySnapshot& s, std::vector<Check>& out) {
     add("voltage < 65 V",                  s.total_voltage_v < 65.0);
     add("SoC in [0 %, 100 %]",             s.soc_pct >= 0.0 && s.soc_pct <= 100.0);
     add("nominal capacity > 0 Ah",         s.nominal_ah > 0.0);
-    add("remaining <= nominal + epsilon",  s.remaining_ah <= s.nominal_ah * 1.02);
+    // A LiFePO4 BMS commonly reports learned/remaining capacity above the rated
+    // nominal, especially right after a full charge before the coulomb counter
+    // recalibrates (seen at ~110/101 Ah on a freshly topped-off pack). Allow a
+    // generous margin so this stays a sanity check for absurd values, not a trip
+    // on normal over-nominal readings.
+    add("remaining within sane bound of nominal", s.remaining_ah <= s.nominal_ah * 1.15);
     add("at least 4 cells reported",       s.cell_voltages_v.size() >= 4);
     add("no more than 16 cells",           s.cell_voltages_v.size() <= 16);
     add("cell min >= 2.5 V",               s.cell_min_v >= 2.5);
