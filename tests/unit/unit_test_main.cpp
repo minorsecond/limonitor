@@ -22,6 +22,7 @@ void test_http_solar_page_theme();
 void test_http_tests_api();
 void test_http_tests_start_stop_with_battery();
 void test_http_tests_telemetry_and_notes();
+void test_http_grid_event_classify_route();
 void test_charger_history_api_empty();
 void test_charger_history_api_with_data();
 void test_charger_history_persistence_via_store();
@@ -223,6 +224,7 @@ int main() {
     test_http_tests_api();
     test_http_tests_start_stop_with_battery();
     test_http_tests_telemetry_and_notes();
+    test_http_grid_event_classify_route();
     test_charger_history_api_empty();
     test_charger_history_api_with_data();
     test_charger_history_persistence_via_store();

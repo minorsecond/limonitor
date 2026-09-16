@@ -310,7 +310,36 @@ void test_shelly_api_visibility() {
     ASSERT(parse_http_status(resp) == 200, "GET /api/flow returns 200");
     ASSERT(resp.find("grid_enabled") != std::string::npos, "Flow API has grid_enabled");
     ASSERT(resp.find("grid_relay_on") != std::string::npos, "Flow API has grid_relay_on");
-    
+
+    server.stop();
+    remove(db_path.c_str());
+}
+
+void test_http_grid_event_classify_route() {
+    // Regression: POST /api/grid_events/{id}/classify used to be swallowed by the
+    // blanket "method != GET -> 405" guard because the route was defined below it.
+    // It must be reachable and return 200 (not 405), and reject a bad value with 400.
+    DataStore store;
+    std::string db_path = "/tmp/test_grid_classify_" + std::to_string(getpid()) + ".db";
+    remove(db_path.c_str());
+    Database db(db_path);
+    db.open();
+
+    HttpServer server(store, &db, "127.0.0.1", 8096);
+    server.start();
+    usleep(100000);
+
+    std::string body = "{\"classification\":\"false_alarm\",\"notes\":\"\"}";
+    std::string resp = http_request("127.0.0.1", 8096, "POST", "/api/grid_events/1/classify", body);
+    int status = parse_http_status(resp);
+    ASSERT(status != 405, "classify route is reachable (not 405 Method Not Allowed)");
+    ASSERT(status == 200, "POST /api/grid_events/{id}/classify returns 200");
+    ASSERT(resp.find("\"ok\":true") != std::string::npos, "classify returns ok:true");
+
+    std::string bad = http_request("127.0.0.1", 8096, "POST", "/api/grid_events/1/classify",
+                                   "{\"classification\":\"bogus\"}");
+    ASSERT(parse_http_status(bad) == 400, "invalid classification value returns 400");
+
     server.stop();
     remove(db_path.c_str());
 }

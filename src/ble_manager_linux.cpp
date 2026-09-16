@@ -350,8 +350,13 @@ struct BleManager::Impl {
                 }, this);
             return;
         }
-        if (char_find_attempt < 4) {
-            LOG_INFO("BLE: characteristics not found yet, retrying in 1s... (attempt %d/5)", char_find_attempt + 1);
+        // BlueZ can take ~10s to expose the GATT characteristics on a fresh
+        // (uncached) discovery -- which is what we get with `Cache = no` in
+        // main.conf, set to dodge the stale-empty-cache bug. Five tries (~5s)
+        // used to be enough with caching on; give it ~30s now so discovery
+        // actually finishes before we give up and reconnect.
+        if (char_find_attempt < 29) {
+            LOG_INFO("BLE: characteristics not found yet, retrying in 1s... (attempt %d/30)", char_find_attempt + 1);
             char_find_attempt++;
             schedule_char_find(1);
         } else {
@@ -363,29 +368,46 @@ struct BleManager::Impl {
     bool find_characteristics() {
         std::string notify_path, write_path;
         int char_count = 0;
-        GList* objects = g_dbus_object_manager_get_objects(obj_mgr);
-        for (GList* l = objects; l; l = l->next) {
-            GDBusObject* obj = G_DBUS_OBJECT(l->data);
-            const char* path = g_dbus_object_get_object_path(obj);
-            if (device_path.empty() || strncmp(path, device_path.c_str(), device_path.size()) != 0)
-                continue;
-
-            GDBusInterface* iface = g_dbus_object_get_interface(obj, "org.bluez.GattCharacteristic1");
-            if (iface) {
-                char_count++;
-                GDBusProxy* proxy = G_DBUS_PROXY(iface);
-                g_autoptr(GVariant) uv = g_dbus_proxy_get_cached_property(proxy, "UUID");
-                std::string uuid = gv_str(uv);
-                LOG_DEBUG("BLE: found char at %s: UUID=%s", path, uuid.c_str());
-                if (uuid == notify_uuid && notify_path.empty())
-                    notify_path = path;
-                else if (uuid == write_uuid && write_path.empty())
-                    write_path = path;
-                g_object_unref(iface);
-            }
-            if (!notify_path.empty() && !write_path.empty()) break;
+        // Query BlueZ's managed objects fresh over D-Bus rather than trusting the
+        // GDBusObjectManager cache. On a fresh (uncached) GATT discovery -- which is
+        // what `Cache = no` forces -- the cached manager never surfaced the
+        // characteristic objects, so get_objects() returned 0 characteristics
+        // forever even though `bluetoothctl` could see them. A direct
+        // GetManagedObjects call sees exactly what BlueZ has exported.
+        GDBusConnection* conn = g_dbus_object_manager_client_get_connection(
+            G_DBUS_OBJECT_MANAGER_CLIENT(obj_mgr));
+        GError* qerr = nullptr;
+        g_autoptr(GVariant) reply = g_dbus_connection_call_sync(
+            conn, "org.bluez", "/", "org.freedesktop.DBus.ObjectManager",
+            "GetManagedObjects", nullptr, G_VARIANT_TYPE("(a{oa{sa{sv}}})"),
+            G_DBUS_CALL_FLAGS_NONE, 5000, nullptr, &qerr);
+        if (!reply) {
+            LOG_WARN("BLE: GetManagedObjects failed: %s", qerr ? qerr->message : "?");
+            if (qerr) g_error_free(qerr);
+            return false;
         }
-        g_list_free_full(objects, g_object_unref);
+        g_autoptr(GVariant) objs = g_variant_get_child_value(reply, 0);
+        GVariantIter it;
+        g_variant_iter_init(&it, objs);
+        const gchar* opath = nullptr;
+        GVariant* ifaces = nullptr;
+        while ((notify_path.empty() || write_path.empty()) &&
+               g_variant_iter_loop(&it, "{&o@a{sa{sv}}}", &opath, &ifaces)) {
+            if (device_path.empty() ||
+                strncmp(opath, device_path.c_str(), device_path.size()) != 0)
+                continue;
+            g_autoptr(GVariant) ch = g_variant_lookup_value(
+                ifaces, "org.bluez.GattCharacteristic1", G_VARIANT_TYPE("a{sv}"));
+            if (!ch) continue;
+            char_count++;
+            g_autoptr(GVariant) uv = g_variant_lookup_value(ch, "UUID", G_VARIANT_TYPE_STRING);
+            std::string uuid = uv ? g_variant_get_string(uv, nullptr) : "";
+            LOG_DEBUG("BLE: found char at %s: UUID=%s", opath, uuid.c_str());
+            if (uuid == notify_uuid && notify_path.empty())
+                notify_path = opath;
+            else if (uuid == write_uuid && write_path.empty())
+                write_path = opath;
+        }
 
         if (notify_path.empty() || write_path.empty()) {
             LOG_WARN("BLE: find_characteristics failed (found %d chars, notify=%s, write=%s)",

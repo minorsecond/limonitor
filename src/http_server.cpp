@@ -586,6 +586,37 @@ void HttpServer::handle(int fd) {
         return;
     }
 
+    // Classify a grid event. This is a POST, so it has to live above the
+    // GET-only guard below. It used to sit down in the GET dispatch chain, where
+    // the guard made it unreachable and every classify came back 405.
+    if (method == "POST" && path.size() > 17 &&
+        path.substr(0, 17) == "/api/grid_events/" &&
+        path.find("/classify") != std::string::npos) {
+        int64_t event_id = 0;
+        try { event_id = std::stoll(path.substr(17)); } catch (...) {}
+        std::string body;
+        { auto p = req.find("\r\n\r\n"); if (p != std::string::npos) body = req.substr(p + 4);
+          else { p = req.find("\n\n"); if (p != std::string::npos) body = req.substr(p + 2); } }
+        auto jfield = [&](const std::string& key) -> std::string {
+            std::string pat = "\"" + key + "\":\"";
+            auto p = body.find(pat);
+            if (p == std::string::npos) return "";
+            p += pat.size();
+            auto q = body.find('"', p);
+            return q == std::string::npos ? "" : body.substr(p, q - p);
+        };
+        std::string cls   = jfield("classification");
+        std::string notes = jfield("notes");
+        if (event_id > 0 && db_ &&
+            (cls == "outage" || cls == "maintenance" || cls == "false_alarm")) {
+            db_->classify_grid_event(event_id, cls, notes);
+            send_response(fd, 200, "application/json", "{\"ok\":true}\n");
+        } else {
+            send_response(fd, 400, "application/json", "{\"ok\":false,\"error\":\"invalid\"}\n");
+        }
+        return;
+    }
+
     if (method != "GET") { send_response(fd, 405, "text/plain", "Method Not Allowed"); return; }
 
     auto snap_opt = store_.latest();
@@ -693,33 +724,6 @@ void HttpServer::handle(int fd) {
         }
         out += "]\n";
         send_response(fd, 200, "application/json", out);
-    } else if (method == "POST" && path.size() > 17 &&
-               path.substr(0, 17) == "/api/grid_events/" &&
-               path.find("/classify") != std::string::npos) {
-        // POST /api/grid_events/{id}/classify
-        int64_t event_id = 0;
-        try { event_id = std::stoll(path.substr(17)); } catch (...) {}
-        std::string body;
-        { auto p = req.find("\r\n\r\n"); if (p != std::string::npos) body = req.substr(p + 4);
-          else { p = req.find("\n\n"); if (p != std::string::npos) body = req.substr(p + 2); } }
-        auto jfield = [&](const std::string& key) -> std::string {
-            std::string pat = "\"" + key + "\":\"";
-            auto p = body.find(pat);
-            if (p == std::string::npos) return "";
-            p += pat.size();
-            auto q = body.find('"', p);
-            return q == std::string::npos ? "" : body.substr(p, q - p);
-        };
-        std::string cls   = jfield("classification");
-        std::string notes = jfield("notes");
-        // Validate classification value
-        if (event_id > 0 && db_ &&
-            (cls == "outage" || cls == "maintenance" || cls == "false_alarm")) {
-            db_->classify_grid_event(event_id, cls, notes);
-            send_response(fd, 200, "application/json", "{\"ok\":true}\n");
-        } else {
-            send_response(fd, 400, "application/json", "{\"ok\":false,\"error\":\"invalid\"}\n");
-        }
     } else if (path == "/api/shelly/status") {
         bool active = db_ && db_->get_setting("shelly_test_active") == "1";
         std::string start = db_ ? db_->get_setting("shelly_test_start_ts") : "";
