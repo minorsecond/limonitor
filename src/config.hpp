@@ -38,6 +38,11 @@ struct Config {
     // EpicPowerGate 2 — local serial (Pi) or remote HTTP poll (Mac)
     std::string serial_device;          // e.g. "/dev/ttyACM0"
     int         serial_baud = 115200;
+    // Read-only serial: never proactively write the PWRgate setup menu (no 'S' to
+    // reconfigure the charger or restart a stuck charge cycle). Default true, which
+    // avoids the failure mode where entering the menu stops the stream and the unit
+    // gets wedged. Set false in the conf to restore the old auto-reconfigure.
+    bool        serial_readonly = true;
     std::string pwrgate_remote;         // e.g. "ham-pi:8081"
 
     // SQLite database (empty = use Database::default_path())

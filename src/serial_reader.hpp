@@ -32,7 +32,7 @@ public:
     using SnapCb     = std::function<void(const PwrGateSnapshot&)>;
     using RecoveryCb = std::function<void(const std::string& reason)>;
 
-    SerialReader(std::string device, int baud = 115200);
+    SerialReader(std::string device, int baud = 115200, bool read_only = true);
     ~SerialReader();
 
     bool start();
@@ -64,6 +64,12 @@ private:
     std::atomic<int>  reconnect_count_{0};
 
     // State for process_charger_logic
+    // When true, never proactively write to the PWRgate serial menu (no 'S' to
+    // reconfigure or to restart a stuck charge cycle). Set from cfg.serial_readonly;
+    // defaults true. The device is charge-configured in hardware (jumpers out) or
+    // once over USB, so limonitor only needs to read. It will still respond to a
+    // menu prompt to escape back to streaming if it ever finds the unit in one.
+    bool read_only_{true};
     bool reconfigure_sent_{false};
     bool charger_was_stuck_{false};
     std::chrono::steady_clock::time_point charger_stuck_since_;

@@ -16,3 +16,4 @@ yarn.lock
 dist/
 .npm
 .eslintcache
+build_test/

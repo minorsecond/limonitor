@@ -139,8 +139,8 @@ bool is_unterminated_prompt(const std::string& partial) {
 
 // ---------------------------------------------------------------------------
 
-SerialReader::SerialReader(std::string device, int baud)
-    : device_(std::move(device)), baud_(baud) {}
+SerialReader::SerialReader(std::string device, int baud, bool read_only)
+    : device_(std::move(device)), baud_(baud) { read_only_ = read_only; }
 
 SerialReader::~SerialReader() { stop(); }
 
@@ -207,7 +207,7 @@ void SerialReader::stop() {
 void SerialReader::process_charger_logic(const PwrGateSnapshot& snap,
                                            std::chrono::steady_clock::time_point now) {
     // ── Charger reconfiguration (jumper reset) ───────────────
-    if (!reconfigure_sent_ && serial_prompts::needs_reconfigure(snap.target_a)) {
+    if (!read_only_ && !reconfigure_sent_ && serial_prompts::needs_reconfigure(snap.target_a)) {
         LOG_INFO("Serial: target_a=%.2fA, sending 'S' to reconfigure",
                  snap.target_a);
         (void)write(fd_, "S\r", 2);
@@ -237,7 +237,7 @@ void SerialReader::process_charger_logic(const PwrGateSnapshot& snap,
         long since_rec = std::chrono::duration_cast<std::chrono::seconds>(
             now - last_charger_recovery_).count();
 
-        if (stuck_s >= STUCK_TIMEOUT_S && since_rec >= RECOVERY_COOLDOWN_S) {
+        if (!read_only_ && stuck_s >= STUCK_TIMEOUT_S && since_rec >= RECOVERY_COOLDOWN_S) {
             ++charger_recovery_count_;
             std::string reason = "Charger idle for " + std::to_string(stuck_s) +
                 "s (PSU " + std::to_string(static_cast<int>(snap.ps_v * 100) / 100.0) +

@@ -248,6 +248,7 @@ static void load_config_file(const std::string& path, Config& cfg) {
             else if (key == "no_ble")         cfg.no_ble             = strtobool(val);
             else if (key == "serial_device")  cfg.serial_device      = val;
             else if (key == "serial_baud")    cfg.serial_baud        = std::stoi(val);
+            else if (key == "serial_readonly") cfg.serial_readonly   = strtobool(val);
             else if (key == "pwrgate_remote") cfg.pwrgate_remote     = val;
             else if (key == "db_path")        cfg.db_path            = val;
             else if (key == "db_interval")    cfg.db_write_interval_s= std::stoi(val);
@@ -655,7 +656,7 @@ int main(int argc, char** argv) {
     // Serial reader for EpicPowerGate 2 (optional)
     std::unique_ptr<SerialReader> serial;
     if (!cfg.serial_device.empty()) {
-        serial = std::make_unique<SerialReader>(cfg.serial_device, cfg.serial_baud);
+        serial = std::make_unique<SerialReader>(cfg.serial_device, cfg.serial_baud, cfg.serial_readonly);
         serial->set_callback([&store](const PwrGateSnapshot& snap) {
             store.update_pwrgate(snap);
             LOG_DEBUG("PwrGate: %s  PS=%.2fV  Bat=%.2fV %.2fA  Sol=%.2fV",
