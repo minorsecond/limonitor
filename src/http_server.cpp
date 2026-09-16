@@ -173,6 +173,19 @@ void HttpServer::serve_loop() {
     }
 }
 
+// Pull an "&hours=" value out of a query string, clamped to a sane range.
+// Falls back to the given default when absent or unparseable.
+static double query_hours(const std::string& query, double fallback) {
+    auto hi = query.find("hours=");
+    if (hi == std::string::npos) return fallback;
+    try {
+        double h = std::stod(query.substr(hi + 6));
+        if (h < 0.01) return fallback;
+        if (h > 24.0 * 400) h = 24.0 * 400;   // ~13 months, guards against absurd input
+        return h;
+    } catch (...) { return fallback; }
+}
+
 void HttpServer::handle(int fd) {
     char buf[8192] = {};
     ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
@@ -634,7 +647,7 @@ void HttpServer::handle(int fd) {
         if (hi != std::string::npos) {
             try { h = std::stod(query.substr(hi + 2)); } catch (...) {}
         }
-        h = std::max(0.1, std::min(h, 168.0));
+        h = std::max(0.1, std::min(h, 720.0));   // up to the 30d range button
     }
     if (path == "/settings" || path == "/settings.html") {
         send_response(fd, 200, "text/html", html_settings_page(db_));
@@ -748,13 +761,30 @@ void HttpServer::handle(int fd) {
         size_t count = 100;
         auto ni = query.find("n=");
         if (ni != std::string::npos) { try { count = std::stoul(query.substr(ni + 2)); } catch (...) {} }
-        send_response(fd, 200, "application/json", history_json(store_.history(count)));
+        // db=1 serves from the SQLite history (months of data) instead of the
+        // in-memory ring (~4h). The DB query decimates in SQL to ~2000 points
+        // over the requested "hours" window, so long ranges stay light.
+        if (db_ && query.find("db=1") != std::string::npos) {
+            time_t since = std::time(nullptr) -
+                           static_cast<time_t>(query_hours(query, 24.0) * 3600.0);
+            send_response(fd, 200, "application/json",
+                          history_json(db_->load_battery_history_range(since, 2000)));
+        } else {
+            send_response(fd, 200, "application/json", history_json(store_.history(count)));
+        }
     } else if (path == "/api/charger/history") {
         size_t count = 300;
         auto ni = query.find("n=");
         if (ni != std::string::npos) { try { count = std::stoul(query.substr(ni + 2)); } catch (...) {} }
-        send_response(fd, 200, "application/json",
-                      charger_history_json(store_.pwrgate_history(count)));
+        if (db_ && query.find("db=1") != std::string::npos) {
+            time_t since = std::time(nullptr) -
+                           static_cast<time_t>(query_hours(query, 24.0) * 3600.0);
+            send_response(fd, 200, "application/json",
+                          charger_history_json(db_->load_charger_history_range(since, 2000)));
+        } else {
+            send_response(fd, 200, "application/json",
+                          charger_history_json(store_.pwrgate_history(count)));
+        }
     } else if (path == "/api/flow") {
         send_response(fd, 200, "application/json", flow_json(snap, pg, fetch_shelly_status(), store_, store_.analytics()));
     } else if (path == "/api/tx_events") {
@@ -2721,11 +2751,11 @@ details.card>summary::-webkit-details-marker{display:none}
 
     // Time range selector
     {
-        static const double ph[]   = {0.5, 1.0, 4.0, 24.0};
-        static const char*  plbl[] = {"30m", "1h", "4h", "24h"};
+        static const double ph[]   = {0.5, 1.0, 4.0, 24.0, 168.0, 720.0};
+        static const char*  plbl[] = {"30m", "1h", "4h", "24h", "7d", "30d"};
         o += "<div style=\"display:flex;gap:.5rem;align-items:center;flex-wrap:wrap\">"
              "<div class=\"trng\">";
-        for (int pi = 0; pi < 4; ++pi) {
+        for (int pi = 0; pi < 6; ++pi) {
             bool active = std::fabs(hours - ph[pi]) < 0.01;
             char tbuf[128];
             std::snprintf(tbuf, sizeof(tbuf),
@@ -3844,17 +3874,23 @@ function switchRange(h){
 
 function loadCharts(){
   var cutoff=Date.now()-currentH*3600000
-  var batN=Math.round(currentH*3600/pollIvl*1.15)+50
-  var chgN=Math.round(currentH*7200)+100
+  // Ranges up to 4h come from the in-memory ring at full poll resolution.
+  // Longer ranges pull from the on-disk history (db=1), which the server
+  // decimates in SQL over the requested hours window.
+  var longRange=currentH>4
+  var dbq=longRange?'&db=1&hours='+currentH:''
+  var batN,chgN
+  if(longRange){ batN=2100; chgN=2100 }
+  else { batN=Math.round(currentH*3600/pollIvl*1.15)+50; chgN=Math.round(currentH*7200)+100 }
   Promise.all([
-    fetch('/api/history?n='+batN).then(function(r){return r.json()}),
+    fetch('/api/history?n='+batN+dbq).then(function(r){return r.json()}),
     fetch('/api/tx_events?n=200').then(function(r){return r.json()})
   ]).then(function(res){
     var hist=res[0].filter(function(p){return new Date(p.ts).getTime()>=cutoff})
     var txEvs=res[1].filter(function(e){return e.start*1000>=cutoff})
     renderBatChart(hist,txEvs)
   }).catch(function(){})
-  fetch('/api/charger/history?n='+chgN)
+  fetch('/api/charger/history?n='+chgN+dbq)
     .then(function(r){return r.json()})
     .then(function(d){
       var filtered=d.filter(function(p){return new Date(p.ts).getTime()>=cutoff});
@@ -3919,9 +3955,12 @@ function timeTicks(t0,t1,tspan,pl,cw,chartTop,chartH,labelY,fsTick,cc){
   for(var tk=firstTk;tk<t1;tk+=tms){
     var f=(tk-t0)/tspan; if(f<0.01||f>0.99) continue
     var x=pl+f*cw
-    if(x<lastX||x>pl+cw-minGap) continue
     var d=new Date(tk)
     var lbl=fmtT(tk,prevDay)
+    // Labels are center-anchored, so keep the label's own left/right edges clear
+    // of the start label and the trailing "now" (not just the tick's center).
+    var halfW=lbl.length*fs*0.3
+    if(x-halfW<lastX||x+halfW>pl+cw-fs*3) continue
     var gap=minGap
     if(lbl.length>6) gap=Math.max(gap,fs*lbl.length*0.6)
     lastX=x+gap
@@ -3940,7 +3979,7 @@ function renderBatChart(data,txEvs){
   var cc=chartColors()
   txEvs=txEvs||[]
   if(!data||data.length<2){
-    el.innerHTML="<text x='50%' y='50%' font-size='14' font-family='monospace' text-anchor='middle' dominant-baseline='middle' fill='"+cc.muted+"'>Collecting data\u2026</text>"
+    el.innerHTML="<text x='50%' y='50%' font-size='14' font-family='monospace' text-anchor='middle' dominant-baseline='middle' fill='"+cc.muted+"'>No data for this range yet</text>"
     return
   }
   var md=chartDims(el,280,260)
@@ -3998,7 +4037,7 @@ function renderChgChart(data){
   var el=$('chg-chart'); if(!el) return
   var cc=chartColors()
   if(!data||data.length<2){
-    el.innerHTML="<text x='50%' y='50%' font-size='14' font-family='monospace' text-anchor='middle' dominant-baseline='middle' fill='"+cc.muted+"'>Collecting data\u2026</text>"
+    el.innerHTML="<text x='50%' y='50%' font-size='14' font-family='monospace' text-anchor='middle' dominant-baseline='middle' fill='"+cc.muted+"'>No data for this range yet</text>"
     return
   }
   var md=chartDims(el,280,260)

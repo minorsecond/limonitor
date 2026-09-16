@@ -61,6 +61,13 @@ public:
     std::vector<BatterySnapshot>  load_battery_history(size_t n = 2880) const;
     std::vector<PwrGateSnapshot>  load_charger_history(size_t n = 2880) const;
 
+    // Load rows since a Unix timestamp (oldest first), decimated in SQL to at
+    // most max_points by picking the latest row in each of max_points equal time
+    // buckets. Lets the dashboard chart multi-day and multi-week ranges without
+    // pulling hundreds of thousands of rows off disk.
+    std::vector<BatterySnapshot>  load_battery_history_range(time_t since, size_t max_points) const;
+    std::vector<PwrGateSnapshot>  load_charger_history_range(time_t since, size_t max_points) const;
+
     // Average power consumption by 3-hour slot (0-7), from recent battery discharge data.
     std::vector<UsageSlotProfile> get_usage_profile(int days_back = 7) const;
 

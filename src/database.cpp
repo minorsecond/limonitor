@@ -880,6 +880,127 @@ std::vector<PwrGateSnapshot> Database::load_charger_history(size_t n) const {
     return result;
 }
 
+std::vector<BatterySnapshot> Database::load_battery_history_range(time_t since, size_t max_points) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<BatterySnapshot> result;
+    if (!db_ || max_points == 0) return result;
+    result.reserve(std::min(max_points, size_t{4096}));
+
+    // One row per time bucket: MAX(ts) makes the bare columns come from the
+    // latest row in each bucket (a documented SQLite behavior for a lone MAX).
+    time_t now    = std::time(nullptr);
+    time_t span   = (now > since) ? (now - since) : 1;
+    int64_t bucket = static_cast<int64_t>(span) / static_cast<int64_t>(max_points);
+    if (bucket < 1) bucket = 1;
+
+    const char* sql =
+        "SELECT MAX(ts),device,v,a,soc,rem_ah,nom_ah,pwr,cell_min,cell_max,cell_delta,cells,t1,t2 "
+        "FROM battery_readings WHERE ts >= ?1 GROUP BY (ts - ?1)/?2 ORDER BY ts";
+
+    sqlite3_stmt* stmt = nullptr;
+    auto* db = db_handle(db_);
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return result;
+    sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(since));
+    sqlite3_bind_int64(stmt, 2, bucket);
+
+    std::shared_ptr<DeviceInfo> shared_device;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        BatterySnapshot s;
+        s.timestamp = std::chrono::system_clock::from_time_t(
+            static_cast<time_t>(sqlite3_column_int64(stmt, 0)));
+        if (auto* t = sqlite3_column_text(stmt, 1)) {
+            const char* dname = reinterpret_cast<const char*>(t);
+            if (!shared_device || shared_device->device_name != dname) {
+                shared_device = std::make_shared<DeviceInfo>();
+                shared_device->device_name = dname;
+            }
+            s.device = shared_device;
+        }
+        s.total_voltage_v = static_cast<float>(sqlite3_column_double(stmt, 2));
+        s.current_a       = static_cast<float>(sqlite3_column_double(stmt, 3));
+        s.soc_pct         = static_cast<float>(sqlite3_column_double(stmt, 4));
+        s.remaining_ah    = static_cast<float>(sqlite3_column_double(stmt, 5));
+        s.nominal_ah      = static_cast<float>(sqlite3_column_double(stmt, 6));
+        s.power_w         = static_cast<float>(sqlite3_column_double(stmt, 7));
+        s.cell_min_v      = static_cast<float>(sqlite3_column_double(stmt, 8));
+        s.cell_max_v      = static_cast<float>(sqlite3_column_double(stmt, 9));
+        s.cell_delta_v    = static_cast<float>(sqlite3_column_double(stmt, 10));
+        if (auto* c = sqlite3_column_text(stmt, 11)) {
+            const char* p = reinterpret_cast<const char*>(c);
+            while (*p) {
+                char* end;
+                float v = std::strtof(p, &end);
+                if (end == p) break;
+                s.cell_voltages_v.push_back(v);
+                p = (*end == ',') ? end + 1 : end;
+            }
+        }
+        float t1 = static_cast<float>(sqlite3_column_double(stmt, 12));
+        float t2 = static_cast<float>(sqlite3_column_double(stmt, 13));
+        if (t1 != 0.0f) s.temperatures_c.push_back(t1);
+        if (t2 != 0.0f) s.temperatures_c.push_back(t2);
+        s.valid = true;
+        result.push_back(std::move(s));
+    }
+    sqlite3_finalize(stmt);
+    LOG_INFO("DB: loaded %zu battery rows (range, bucket=%llds)",
+             result.size(), static_cast<long long>(bucket));
+    return result;
+}
+
+std::vector<PwrGateSnapshot> Database::load_charger_history_range(time_t since, size_t max_points) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<PwrGateSnapshot> result;
+    if (!db_ || max_points == 0) return result;
+    result.reserve(std::min(max_points, size_t{4096}));
+
+    time_t now    = std::time(nullptr);
+    time_t span   = (now > since) ? (now - since) : 1;
+    int64_t bucket = static_cast<int64_t>(span) / static_cast<int64_t>(max_points);
+    if (bucket < 1) bucket = 1;
+
+    const char* sql =
+        "SELECT MAX(ts),state,ps_v,bat_v,bat_a,sol_v,tgt_v,tgt_a,stop_a,pwm,mins,temp,pss "
+        "FROM charger_readings WHERE ts >= ?1 GROUP BY (ts - ?1)/?2 ORDER BY ts";
+
+    sqlite3_stmt* stmt = nullptr;
+    auto* db = db_handle(db_);
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return result;
+    sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(since));
+    sqlite3_bind_int64(stmt, 2, bucket);
+
+    std::shared_ptr<std::string> shared_state;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        PwrGateSnapshot p;
+        p.timestamp = std::chrono::system_clock::from_time_t(
+            static_cast<time_t>(sqlite3_column_int64(stmt, 0)));
+        if (auto* t = sqlite3_column_text(stmt, 1)) {
+            const char* state_val = reinterpret_cast<const char*>(t);
+            if (!shared_state || *shared_state != state_val) {
+                shared_state = std::make_shared<std::string>(state_val);
+            }
+            p.state = shared_state;
+        }
+        p.ps_v     = static_cast<float>(sqlite3_column_double(stmt, 2));
+        p.bat_v    = static_cast<float>(sqlite3_column_double(stmt, 3));
+        p.bat_a    = static_cast<float>(sqlite3_column_double(stmt, 4));
+        p.sol_v    = static_cast<float>(sqlite3_column_double(stmt, 5));
+        p.target_v = static_cast<float>(sqlite3_column_double(stmt, 6));
+        p.target_a = static_cast<float>(sqlite3_column_double(stmt, 7));
+        p.stop_a   = static_cast<float>(sqlite3_column_double(stmt, 8));
+        p.pwm      = sqlite3_column_int(stmt,  9);
+        p.minutes  = sqlite3_column_int(stmt, 10);
+        p.temp     = sqlite3_column_int(stmt, 11);
+        p.pss      = sqlite3_column_int(stmt, 12);
+        p.valid    = true;
+        result.push_back(std::move(p));
+    }
+    sqlite3_finalize(stmt);
+    LOG_INFO("DB: loaded %zu charger rows (range, bucket=%llds)",
+             result.size(), static_cast<long long>(bucket));
+    return result;
+}
+
 std::vector<UsageSlotProfile> Database::get_usage_profile(int days_back) const {
     std::lock_guard<std::mutex> lk(mu_);
     std::vector<UsageSlotProfile> result(8);
