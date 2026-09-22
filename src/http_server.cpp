@@ -18,14 +18,34 @@
 #include <unistd.h>
 
 static std::string jstr(const std::string& s) {
+    // Escape every control character, not just newline.
+    //
+    // The BLE device name arrives from the BMS terminated "\r\n". Escaping the
+    // \n alone left the \r raw, and a bare control character inside a string is
+    // invalid JSON: a strict parser rejects the whole document, not just that
+    // field. Python's json.load refused /api/status for months because of it.
+    static const char* HEX = "0123456789abcdef";
     std::string r;
-    r.reserve(s.size() + 4);
+    r.reserve(s.size() + 8);
     r += '"';
-    for (char c : s) {
-        if (c == '"') r += "\\\"";
-        else if (c == '\\') r += "\\\\";
-        else if (c == '\n') r += "\\n";
-        else r += c;
+    for (unsigned char c : s) {
+        switch (c) {
+            case '"':  r += "\\\""; break;
+            case '\\': r += "\\\\"; break;
+            case '\n': r += "\\n";  break;
+            case '\r': r += "\\r";  break;
+            case '\t': r += "\\t";  break;
+            case '\b': r += "\\b";  break;
+            case '\f': r += "\\f";  break;
+            default:
+                if (c < 0x20) {          // any other C0 control
+                    r += "\\u00";
+                    r += HEX[(c >> 4) & 0xF];
+                    r += HEX[c & 0xF];
+                } else {
+                    r += static_cast<char>(c);
+                }
+        }
     }
     r += '"';
     return r;
