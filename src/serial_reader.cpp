@@ -300,6 +300,8 @@ void SerialReader::read_loop() {
 
     auto last_stale_reconnect      = std::chrono::steady_clock::time_point{};
     int  stale_reconnects_since_data = 0; // escalation counter
+    auto last_nudge_time           = std::chrono::steady_clock::time_point{};
+    int  nudges_since_data         = 0;   // CRs sent with no reply yet
 
     // Helper: close and reopen the port, re-send DTR wake pulse
     auto reconnect = [&]() -> bool {
@@ -366,6 +368,40 @@ void SerialReader::read_loop() {
                 }
             }
 
+            // ── Nudge ────────────────────────────────────────────────────────
+            // The prompt above only helps when we actually saw it. If the device
+            // printed its prompt before we opened the port, or the buffer was
+            // flushed on reconnect, line_buf is empty and there is nothing to
+            // answer: the device waits for a keystroke and we wait for data,
+            // both forever. That is exactly how it sat silent for sixteen hours
+            // on 2026-09-21.
+            //
+            // So send a blind CR. If it is holding a prompt this accepts the
+            // shown default and it resumes; if it is merely quiet, a stray CR
+            // between status lines is ignored. Cheap either way, and far less
+            // disruptive than reopening the port or resetting USB.
+            // Not gated on read_only_. That flag exists to stop us ENTERING the
+            // menu with a proactive S. A bare CR can only answer a prompt and
+            // escape, which read-only mode already permits via handle_prompt.
+            {
+                auto now_n = std::chrono::steady_clock::now();
+                auto quiet_s = std::chrono::duration_cast<std::chrono::seconds>(
+                    now_n - last_snap_time).count();
+                auto since_nudge = std::chrono::duration_cast<std::chrono::seconds>(
+                    now_n - last_nudge_time).count();
+                if (quiet_s >= NUDGE_AFTER_S &&
+                    since_nudge >= NUDGE_INTERVAL_S &&
+                    nudges_since_data < NUDGES_BEFORE_RECONNECT) {
+                    last_nudge_time = now_n;
+                    ++nudges_since_data;
+                    (void)write(fd_, "\r", 1);
+                    LOG_INFO("Serial: quiet for %llds, sent CR to clear a possible "
+                             "menu prompt (nudge %d/%d)",
+                             static_cast<long long>(quiet_s), nudges_since_data,
+                             NUDGES_BEFORE_RECONNECT);
+                }
+            }
+
             // ── Stale data watchdog ──────────────────────────────────────────
             // VTIME=10 gives ~1s read timeout, so this runs roughly each second.
             {
@@ -409,6 +445,9 @@ void SerialReader::read_loop() {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
+
+        // Bytes arrived, so whatever we were doing to coax them worked.
+        nudges_since_data = 0;
 
         for (ssize_t i = 0; i < nr; ++i) {
             char c = rbuf[i];

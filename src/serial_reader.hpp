@@ -84,7 +84,18 @@ private:
 
     static constexpr long STUCK_TIMEOUT_S    = 900;  // 15 min before first recovery
     static constexpr long RECOVERY_COOLDOWN_S = 1800; // 30 min between attempts
-    static constexpr long STALE_RECONNECT_S  = 300;  // 5 min without any data → reconnect
+
+    // Silence recovery, cheapest first.
+    //
+    // A silent PwrGate is usually not a broken link. It is the device sitting in
+    // its settings menu waiting for a keystroke, which it will do forever. A
+    // bare CR answers the prompt and costs nothing if the device is simply idle,
+    // so try that well before reopening ports or resetting USB.
+    static constexpr long NUDGE_AFTER_S      = 20;   // silent this long → send CR
+    static constexpr long NUDGE_INTERVAL_S   = 15;   // and again this often
+    static constexpr int  NUDGES_BEFORE_RECONNECT = 4;
+
+    static constexpr long STALE_RECONNECT_S  = 90;   // nudges failed → reconnect
     // After this many serial reconnects still produce no data, escalate to USB reset
     static constexpr int  USB_RESET_AFTER_RECONNECTS = 2;
 
