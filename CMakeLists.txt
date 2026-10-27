@@ -215,6 +215,7 @@ if(BUILD_TESTING)
         tests/unit/test_runner_test.cpp
         tests/unit/system_load_test.cpp
         tests/unit/ble_test.cpp
+        tests/unit/ble_dbus_test.cpp
         src/logger.cpp
         src/analytics.cpp
         src/shelly_client.cpp

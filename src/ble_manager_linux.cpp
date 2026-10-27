@@ -160,11 +160,18 @@ struct BleManager::Impl {
         gloop = g_main_loop_new(gctx, FALSE);
         g_main_context_push_thread_default(gctx);
 
-        g_dbus_object_manager_client_new_for_bus(
+        // Made here, in this thread, not with the async constructor: GLib
+        // runs that one in a worker thread, and the manager's signals
+        // (InterfacesAdded, InterfacesRemoved, property changes) then go to
+        // the default main context, which nothing in limonitor runs. It saw
+        // only the devices BlueZ had when it started: never one a scan found,
+        // and it kept every one BlueZ removed.
+        GError* err = nullptr;
+        obj_mgr = g_dbus_object_manager_client_new_for_bus_sync(
             G_BUS_TYPE_SYSTEM,
             G_DBUS_OBJECT_MANAGER_CLIENT_FLAGS_NONE,
-            "org.bluez", "/", nullptr, nullptr, nullptr, cancel,
-            cb_obj_mgr_ready, this);
+            "org.bluez", "/", nullptr, nullptr, nullptr, cancel, &err);
+        obj_mgr_ready(err);
 
         g_main_loop_run(gloop);
 
@@ -638,19 +645,16 @@ struct BleManager::Impl {
         g_source_unref(src);
     }
 
-    static void cb_obj_mgr_ready(GObject*, GAsyncResult* res, gpointer ud) {
-        auto* self = static_cast<Impl*>(ud);
-        GError* err = nullptr;
-        self->obj_mgr = g_dbus_object_manager_client_new_for_bus_finish(res, &err);
+    void obj_mgr_ready(GError* err) {
         if (err) {
             LOG_ERROR("BLE: ObjectManager: %s", err->message);
             g_error_free(err);
-            self->set_state(BleState::ERROR, "D-Bus/BlueZ unavailable");
+            set_state(BleState::ERROR, "D-Bus/BlueZ unavailable");
             return;
         }
-        g_signal_connect(self->obj_mgr, "object-added", G_CALLBACK(cb_obj_added), self);
-        g_signal_connect(self->obj_mgr, "interface-proxy-properties-changed", G_CALLBACK(cb_interface_props_changed), self);
-        if (!self->try_find_device()) self->start_discovery();
+        g_signal_connect(obj_mgr, "object-added", G_CALLBACK(cb_obj_added), this);
+        g_signal_connect(obj_mgr, "interface-proxy-properties-changed", G_CALLBACK(cb_interface_props_changed), this);
+        if (!try_find_device()) start_discovery();
     }
 
     // Called whenever a new BlueZ object appears (new BLE device discovered in scan)

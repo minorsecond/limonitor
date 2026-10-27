@@ -200,6 +200,10 @@ void test_ble_reconnect_hard_reset_at_power_cycle_threshold();
 void test_ble_reconnect_power_cycle_resets_count();
 void test_ble_reconnect_begin_hard_reset_clears_connect_fails();
 void test_ble_reconnect_full_lifecycle();
+#ifndef __APPLE__
+void test_ble_connects_to_a_device_a_scan_finds();
+void test_ble_forgets_a_removed_device_and_finds_it_again();
+#endif
 
 int main() {
     printf("=== limonitor unit tests ===\n");
@@ -418,6 +422,12 @@ int main() {
     test_ble_reconnect_begin_hard_reset_clears_connect_fails();
     test_ble_reconnect_full_lifecycle();
     printf("PASS: BLE reconnect logic\n");
+
+#ifndef __APPLE__
+    test_ble_connects_to_a_device_a_scan_finds();
+    test_ble_forgets_a_removed_device_and_finds_it_again();
+    printf("PASS: BLE against a fake BlueZ\n");
+#endif
 
     printf("\nALL UNIT TESTS PASSED\n");
     return 0;
