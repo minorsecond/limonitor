@@ -69,6 +69,8 @@ struct FakeBluez {
     bool device_at_start = false;      // BlueZ remembers the battery
     bool add_on_scan = true;           // a scan finds it half a second in
     int connect_failures = 0;          // Connect fails this many times first
+    int stop_delay_ms = 0;             // StopDiscovery answers only once the scan stops, as BlueZ does
+    bool busy_while_scanning = false;  // Connect fails while the adapter scans, as on the node
 
     std::atomic<int> scans{0}, connect_calls{0}, connects_ok{0}, removes{0};
     std::atomic<bool> ready{false};
@@ -136,15 +138,31 @@ struct FakeBluez {
             }
             g_dbus_method_invocation_return_value(inv, nullptr);
         } else if (!strcmp(method, "StopDiscovery")) {
-            f->discovering = false;
-            g_dbus_method_invocation_return_value(inv, nullptr);
+            if (f->stop_delay_ms <= 0) {
+                f->discovering = false;
+                g_dbus_method_invocation_return_value(inv, nullptr);
+            } else {
+                struct Stop { FakeBluez* f; GDBusMethodInvocation* inv; };
+                GSource* s = g_timeout_source_new(f->stop_delay_ms);
+                g_source_set_callback(s, [](gpointer d) -> gboolean {
+                    auto* st = static_cast<Stop*>(d);
+                    st->f->discovering = false;
+                    g_dbus_method_invocation_return_value(st->inv, nullptr);
+                    delete st;
+                    return G_SOURCE_REMOVE;
+                }, new Stop{f, inv}, nullptr);
+                g_source_attach(s, f->ctx);
+                g_source_unref(s);
+            }
         } else if (!strcmp(method, "RemoveDevice")) {
             f->removes++;
             if (f->device_id) f->remove_device();
             g_dbus_method_invocation_return_value(inv, nullptr);
         } else if (!strcmp(method, "Connect") && !strcmp(iface, "org.bluez.Device1") && !strcmp(path, DEVICE)) {
             f->connect_calls++;
-            if (f->connect_failures > 0) {
+            if (f->busy_while_scanning && f->discovering) {
+                g_dbus_method_invocation_return_dbus_error(inv, "org.bluez.Error.Failed", "le-connection-abort-by-local");
+            } else if (f->connect_failures > 0) {
                 f->connect_failures--;
                 g_dbus_method_invocation_return_dbus_error(inv, "org.bluez.Error.Failed", "le-connection-abort-by-local");
             } else {
@@ -280,6 +298,27 @@ void test_ble_connects_to_a_device_a_scan_finds() {
     ASSERT(wait_for([&] { return f.scans > 0; }, 10), "limonitor starts a scan when BlueZ does not know the battery");
     ASSERT(wait_for([&] { return f.connect_calls > 0; }, 10),
            "limonitor connects to the battery the scan found (InterfacesAdded heard)");
+    b->stop();
+    delete b;
+    f.stop();
+}
+
+// The scan finds the battery and limonitor connects on the first try. It
+// asked BlueZ to stop the scan and called Connect without waiting for the
+// answer; BlueZ answers once the controller has stopped, and a connect made
+// before that fails ("le-connection-abort-by-local", 2026-10-27 on the node).
+void test_ble_connects_first_time_once_the_scan_has_stopped() {
+    if (!bus_up()) return;
+    FakeBluez f;
+    f.address = g_test_dbus_get_bus_address(g_bus);
+    f.stop_delay_ms = 300;
+    f.busy_while_scanning = true;
+    f.start();
+    BleManager* b = manager();
+    b->start();
+    ASSERT(wait_for([&] { return f.connect_calls > 0; }, 10), "limonitor connects to the battery the scan found");
+    ASSERT(wait_for([&] { return f.connects_ok > 0; }, 5), "the connect succeeds");
+    ASSERT(f.connect_calls == 1, "on the first try: limonitor waited for the scan to stop");
     b->stop();
     delete b;
     f.stop();

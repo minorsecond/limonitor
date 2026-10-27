@@ -203,6 +203,7 @@ void test_ble_reconnect_full_lifecycle();
 #ifndef __APPLE__
 void test_ble_connects_to_a_device_a_scan_finds();
 void test_ble_forgets_a_removed_device_and_finds_it_again();
+void test_ble_connects_first_time_once_the_scan_has_stopped();
 #endif
 
 int main() {
@@ -426,6 +427,7 @@ int main() {
 #ifndef __APPLE__
     test_ble_connects_to_a_device_a_scan_finds();
     test_ble_forgets_a_removed_device_and_finds_it_again();
+    test_ble_connects_first_time_once_the_scan_has_stopped();
     printf("PASS: BLE against a fake BlueZ\n");
 #endif
 

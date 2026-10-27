@@ -116,15 +116,7 @@ struct BleManager::Impl {
                 // Already connecting or connected.
                 return;
             }
-            g_autoptr(GDBusProxy) adapter = g_dbus_proxy_new_for_bus_sync(
-                G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, nullptr, "org.bluez",
-                adapter_path.c_str(), "org.bluez.Adapter1", nullptr, nullptr);
-            if (adapter) {
-                LOG_DEBUG("BLE: stopping discovery before connect");
-                g_dbus_proxy_call(adapter, "StopDiscovery",
-                    nullptr, G_DBUS_CALL_FLAGS_NONE, 5000, nullptr, nullptr, nullptr);
-            }
-            connect_device(path);
+            connect_device(path);       // stops the scan first
         }
     }
 
@@ -265,9 +257,30 @@ struct BleManager::Impl {
         }
     }
 
+    // BlueZ refuses an LE connect while the adapter still scans
+    // ("le-connection-abort-by-local"), and answers StopDiscovery only once
+    // the controller has stopped: so wait for that answer before Connect.
+    void stop_discovery_and_wait() {
+        g_autoptr(GDBusProxy) adapter = g_dbus_proxy_new_for_bus_sync(
+            G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, nullptr, "org.bluez",
+            adapter_path.c_str(), "org.bluez.Adapter1", cancel, nullptr);
+        if (!adapter) return;
+        g_autoptr(GVariant) d = g_dbus_proxy_get_cached_property(adapter, "Discovering");
+        if (!d || !g_variant_get_boolean(d)) return;
+        LOG_DEBUG("BLE: stopping discovery before connect");
+        GError* err = nullptr;
+        g_autoptr(GVariant) r = g_dbus_proxy_call_sync(adapter, "StopDiscovery",
+            nullptr, G_DBUS_CALL_FLAGS_NONE, 5000, cancel, &err);
+        if (err) {
+            LOG_DEBUG("BLE: StopDiscovery: %s", err->message);   // another client's scan, or none left
+            g_error_free(err);
+        }
+    }
+
     void connect_device(const std::string& path) {
         device_path = path;
         set_state(BleState::CONNECTING);
+        stop_discovery_and_wait();
         GError* err = nullptr;
         device_proxy = g_dbus_proxy_new_for_bus_sync(
             G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, nullptr,
